@@ -385,3 +385,18 @@ hold bucket credentials.
 
 **Still design-only:** the multi-cloud OpenTofu deploy modules (`haven-relay deploy
 --provider …`) and self-registration to discovery.
+
+## Web access (optional, off by default)
+
+A relay can also serve the Haven web client, so circle members can open Haven in a browser and
+link that browser as one of their own devices:
+
+```sh
+haven-relay run --web-app /path/to/web-client/dist   # plus your usual flags
+```
+
+The client is then at `<your relay's public address>/app/`. Leave the flag out and the relay
+offers no web access at all. Read the trust statement first
+([`WEB-PARITY.md`](WEB-PARITY.md) § "What the web client trusts"): the relay, and any tunnel or
+proxy in front of it, delivers that page's code. `/_haven` reports the digest of the build being
+served.

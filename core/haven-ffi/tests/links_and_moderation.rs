@@ -164,6 +164,48 @@ fn push_registration_signature_matches_the_worker_vector() {
     assert_ne!(acct.sign_push_registration(PUSH_VECTOR_TOKEN.into(), PUSH_VECTOR_TS + 1), sig);
 }
 
+/// A browser's registration is checked by the worker from the credential's raw bytes, so the two
+/// sides share a vector: `push/webpush-vector.json` is what this test produces from fixed seeds, and
+/// `push/worker.test.mjs` feeds that same file to the worker. Change the credential's layout, the
+/// web mark or the signed message on either side and one of the two tests fails.
+/// (`HAVEN_WRITE_VECTORS=1 cargo test -p haven_ffi --test links_and_moderation` rewrites the file.)
+#[test]
+fn web_push_registration_matches_the_worker_vector() {
+    use haven_ffi::multidevice::{issue_device_credential, web_push_registration};
+    const ENDPOINT: &str = "https://fcm.googleapis.com/fcm/send/vector:endpoint";
+    let account_seed = vec![PUSH_VECTOR_SEED; 32];
+    let device_seed = vec![0x43u8; 32];
+    let device = Account::from_seed(device_seed.clone()).unwrap();
+    let web = |name: &str| {
+        issue_device_credential(account_seed.clone(), device.public_bundle(), name.to_string(), 1_700_000_000).unwrap()
+    };
+    let cred = web(&haven_ffi::web_device_name("Chrome on Mac".into()));
+    let reg = web_push_registration(&device_seed, &cred, ENDPOINT, PUSH_VECTOR_TS).expect("a web device registers");
+    assert_eq!(reg.account_hex, PUSH_VECTOR_NODE);
+    assert_eq!(reg.device_hex, device.node_id_hex());
+    assert_eq!((reg.cred_sig.len(), reg.sig.len()), (64, 64), "the worker verifies bare Ed25519 signatures");
+
+    // Only a browser, and only with its own key.
+    assert!(web_push_registration(&device_seed, &web("Blaine's iPhone"), ENDPOINT, PUSH_VECTOR_TS).is_none(), "not a web device");
+    assert!(web_push_registration(&[0x44u8; 32], &cred, ENDPOINT, PUSH_VECTOR_TS).is_none(), "a credential for another device's key");
+    assert!(web_push_registration(&device_seed, b"junk", ENDPOINT, PUSH_VECTOR_TS).is_none());
+    // Bound to the endpoint and the time.
+    let other = web_push_registration(&device_seed, &cred, "https://fcm.googleapis.com/fcm/send/other", PUSH_VECTOR_TS).unwrap();
+    assert_ne!(other.sig, reg.sig);
+    assert_ne!(web_push_registration(&device_seed, &cred, ENDPOINT, PUSH_VECTOR_TS + 1).unwrap().sig, reg.sig);
+
+    let b64 = |b: &[u8]| data_encoding::BASE64.encode(b);
+    let vector = format!(
+        "{{\n  \"nodeId\": \"{}\",\n  \"deviceId\": \"{}\",\n  \"platform\": \"web\",\n  \"token\": \"{}\",\n  \"ts\": {},\n  \"sig\": \"{}\",\n  \"credSig\": \"{}\",\n  \"cred\": \"{}\"\n}}\n",
+        reg.account_hex, reg.device_hex, ENDPOINT, PUSH_VECTOR_TS, b64(&reg.sig), b64(&reg.cred_sig), b64(&reg.cred)
+    );
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../push/webpush-vector.json");
+    if std::env::var("HAVEN_WRITE_VECTORS").is_ok() {
+        std::fs::write(&path, &vector).unwrap();
+    }
+    assert_eq!(std::fs::read_to_string(&path).unwrap_or_default(), vector, "push/webpush-vector.json is out of date");
+}
+
 // ── moderation ─────────────────────────────────────────────────────────────────────────────────
 
 #[test]

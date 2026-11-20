@@ -6,6 +6,16 @@ Updated continuously. (Times in your local day.)
 ---
 
 ## 🆕 Latest waves (newest first)
+- **2.2.0 — Haven in a web browser (cut 2026-11-20)** — a browser can be linked as one more device
+  of an account: the page is served by a relay the circle's members run and talks only to that
+  relay, it never holds the account key, it links by showing a code that an app scans, and each
+  circle decides whether browsers may read it (off by default). Shared engine (`core/haven-client`)
+  for desktop and browser; notifications in a closed browser by a content-free Web Push (needs the
+  push worker deployed with a key pair). Tested against the iPhone, Android and Mac apps, in
+  calls (audio, video, screen sharing, groups of three) and through a real Cloudflare tunnel.
+  Fixes found on the way: Android camera carried into the next call, Android call dropped after a
+  blip, iPhone friends added by taking their invite, desktop screen share shown as an avatar,
+  desktop call messages lost mid-call. Everything tested and not tested: `docs/WEB-PARITY.md`.
 - **1.8.11 — Android callers can see themselves (cut 2026-09-23)** — the mirrored corner self-preview
   sat under the full-screen remote SurfaceView and was bound to a null track; now a media overlay
   bound to a state-backed track, with a camera-off glyph. App Store notes describe the call improvement generically — never

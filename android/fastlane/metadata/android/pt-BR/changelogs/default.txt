@@ -1,2 +1,5 @@
-2.1.3 — Atualização de segurança. Atualize todos os seus dispositivos.
-• Proteção mais forte para as chaves de criptografia dos seus círculos caso um dispositivo seja comprometido. Ela é aplicada automaticamente quando todos em um círculo tiverem atualizado. Suas publicações permanecem intactas.
+2.2.0 — Use o Haven em um navegador web.
+• Adicione um navegador web como um dos seus dispositivos: escaneie o código exibido (Ajustes → Dispositivos). Cada círculo decide se navegadores podem lê-lo.
+• Correção de privacidade: depois de uma chamada de vídeo, a próxima podia começar com a câmera já ligada. Agora toda chamada começa com a câmera desligada.
+• Uma chamada não cai mais logo depois de uma breve falha de conexão.
+• As mudanças de câmera chegam na ordem certa.

@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::covtest_util::engine as new_engine;
-use crate::engine::cov_engine_tests::hello_into;
+use crate::engine::testing::hello_into;
 use serde_json::json;
 
 fn dump_of(e: &Arc<Engine>) -> Value {

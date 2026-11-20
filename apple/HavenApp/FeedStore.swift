@@ -3490,6 +3490,21 @@ final class FeedStore: ObservableObject {
     static var qaReactLatency: [String: Double] = [:]
     /// The relay link minted by the `relay_link` qa op (exposed via the dump as `relay_link`).
     static var qaRelayLink: String = ""
+    /// The last `pair_answer` op's outcome (`sent`, `notACode`, `expired`, `notPrimary`, `unreachable`).
+    static var qaPairAnswer: String = ""
+    /// Whether this build carries a web client, whether the person turned web access on, and
+    /// whether the front door that is up is serving it (`host_web` in the dump; macOS hosts only).
+    static func qaHostWeb() -> [String: Any] {
+        #if os(macOS)
+        let h = RelayHost.shared
+        return ["available": h.webAccessAvailable, "enabled": h.webAccessEnabled, "serving": h.webAccessServing,
+                "hosting": h.enabled]
+        #else
+        return ["available": false, "enabled": false, "serving": false, "hosting": false]
+        #endif
+    }
+    /// The last `web_access` op's reading of the circle (`web_access` in the dump).
+    static var qaWebAccess: [String: Any] = [:]
     /// The last `relay_probe` op's answer (`relay_probe` in the dump; `[:]` until one ran).
     static var qaRelayProbe: [String: Any] = [:]
     /// Successful dump writes, and when the last one landed. See `dump_seq` in the payload.
@@ -3863,6 +3878,35 @@ final class FeedStore: ObservableObject {
             Self.qaRelayLink = relayLinkForAllCircles() ?? ""
             qaWriteDump()
             return
+        case "pair_answer":
+            // QA: Link a device → "Scan its code" / paste. Answers the `haven-pair:` code another
+            // device (a browser) is showing — the same call the screen makes; the outcome is
+            // `pair_answer` in the dump, and the request it leads to is `enroll_pending`.
+            let code = str("code")
+            Task { @MainActor in
+                Self.qaPairAnswer = "\(await self.answerPairCode(code))"
+                self.qaWriteDump()
+            }
+            return
+        case "enroll_confirm":
+            // QA: "Link this device" on the confirmation a link request raises.
+            if let req = pendingEnrollRequest { confirmSeedlessEnroll(req) }
+            qaWriteDump()
+            return
+        case "web_access":
+            // QA: the "Allow this circle in web browsers" switch (circle settings / a conversation).
+            let cid = str("circle_id").isEmpty ? "default" : str("circle_id")
+            // Without `allow` the op only READS the circle's standing (another member's answer
+            // changes it after the switch was flipped here).
+            let allow = obj["allow"] as? Bool
+            Task { @MainActor in
+                if let allow { await self.setCircleWebAccess(allow, in: cid) }
+                let st = await self.circleWebAccess(cid)
+                Self.qaWebAccess = ["circle_id": cid, "allowed": st?.allowed ?? false, "mine": st?.mine ?? false,
+                                    "can_sign": st?.canSign ?? false, "waiting_on": st?.waitingOn.count ?? 0]
+                self.qaWriteDump()
+            }
+            return
         case "add_relay":
             // QA: Storage → "Connect a relay" → paste. Same call the sheet makes: a bare node id or
             // the interface JSON `haven-relay` prints, adopted for `circle_ids` (all circles when
@@ -3888,6 +3932,14 @@ final class FeedStore: ObservableObject {
             // QA: the "Host a relay on this device" toggle (Relays settings). The multirelay e2e takes
             // B's in-app relay offline and brings it back while A keeps posting.
             RelayHost.shared.setEnabled((obj["on"] as? Bool) ?? true)
+            qaWriteDump()
+            return
+        case "host_web_access":
+            // QA: Storage → "Web access" on a hosting Mac (serve the web client under /app/ on the
+            // relay's front door). The dump's `host_web` says what this build can do and is doing.
+            #if os(macOS)
+            RelayHost.shared.setWebAccess((obj["on"] as? Bool) ?? true)
+            #endif
             qaWriteDump()
             return
         case "remove_member":
@@ -4419,6 +4471,10 @@ final class FeedStore: ObservableObject {
             // circles served here, and the HTTP outcome counters.
             "relay_stats": SharedStore.qaRelayStats(),
             "relay_link": Self.qaRelayLink,
+            "pair_answer": Self.qaPairAnswer,
+            "enroll_pending": pendingEnrollRequest?.name ?? "",
+            "web_access": Self.qaWebAccess,
+            "host_web": Self.qaHostWeb(),
             "hosted_relay": ["node": RelayHost.shared.nodeId, "serving": RelayHost.shared.serving,
                              "enabled": RelayHost.shared.enabled, "httpPort": Int(RelayHost.shared.mediaHttpPort ?? 0),
                              "front_door_settled": RelayHost.shared.frontDoorSettled,
@@ -5963,6 +6019,9 @@ final class FeedStore: ObservableObject {
     /// frame-19 to every member over iroh and re-arms dials to unreachable ids).
     func reannounceOwnRelay() {
         guard let engine else { return }
+        // My own other devices learn how to REACH those relays here too (a linked browser has no
+        // other way) — see `teachMyDevicesRelayInterfaces`.
+        teachMyDevicesRelayInterfaces()
         // Snapshot membership + announce plaintext on main (cheap), seal OFF main on the engine
         // actor — sealCircleMedia is real crypto and used to run for every circle×relay
         // on the main actor during the 45s host reannounce tick (beachball under concurrent receive).
@@ -6034,6 +6093,54 @@ final class FeedStore: ObservableObject {
                 }
             }
         }
+    }
+
+    /// Frame 37 (`RELAY_INTERFACE`, core/haven-client/src/wire.rs): tell my OWN other devices how to
+    /// reach the relays I know — each relay's HTTP URLs + token and DERP URL — sealed per device and
+    /// signed by the ACCOUNT key. `[hex64 account][JSON array of frame-19 announce objects]`.
+    ///
+    /// A native device learns a relay's interface from the relay itself over the node's blob
+    /// transport, or from a frame-19 announce once it holds the circle's key. A BROWSER linked to
+    /// this account has no blob transport and gets the circle's key THROUGH the relay mailbox, so
+    /// without this it can never take the first step. Receivers accept it only from the account's
+    /// own key (never a contact, never another linked device), so only a seed-holding device sends
+    /// it. Cheap — one small sealed frame per sibling — so it rides the re-announce tick, and goes
+    /// to a device the moment it is linked (`to:`). Desktop/Android parity:
+    /// `Engine::teach_my_devices_relay_interfaces`, `HavenNet.teachMyDevicesRelayInterfaces`.
+    /// One of MY OWN devices just reached this one: make sure it knows how to reach our relays.
+    ///
+    /// The details are sent when a device is linked — which is exactly when a browser reloads its
+    /// page — and otherwise only on the relay re-announce, which a phone that hosts nothing seldom
+    /// runs. A browser that missed that one frame had a relay it could not use and could only be
+    /// reached live (found by linking a browser to a real phone). A device making contact is the
+    /// moment it can certainly be answered, so answer it: at most once a minute per device, and
+    /// the cost on every other frame is one dictionary lookup.
+    private func teachRelayInterfacesOnContact(_ senderDevice: String) {
+        let dev = senderDevice.lowercased()
+        let now = Date()
+        if let last = relayTaughtAt[dev], now.timeIntervalSince(last) < 60 { return }
+        guard myOtherDeviceHexes().contains(dev) else { return }
+        relayTaughtAt[dev] = now
+        teachMyDevicesRelayInterfaces(to: dev)
+    }
+    /// When each of my devices was last told how to reach our relays (`teachRelayInterfacesOnContact`).
+    private var relayTaughtAt: [String: Date] = [:]
+
+    func teachMyDevicesRelayInterfaces(to only: String? = nil) {
+        guard engine != nil, AccountStore.storedSeed() != nil else { return }   // seedless devices cannot sign it
+        let targets = only.map { [$0.lowercased()] } ?? myOtherDeviceHexes()
+        guard !targets.isEmpty else { return }
+        let store = RelayMailboxStore.shared
+        let relays: [[String: Any]] = store.entries.keys.sorted().compactMap { hex in
+            guard hex.count == 64, !hex.hasPrefix("s3:"), store.isActive(hex),
+                  let http = store.httpInterface(hex), !http.urls.isEmpty else { return nil }
+            return (try? JSONSerialization.jsonObject(with: relayAnnounceData(hex))) as? [String: Any]
+        }
+        guard !relays.isEmpty,
+              let json = try? JSONSerialization.data(withJSONObject: relays, options: [.sortedKeys]) else { return }
+        var body = Data(myNodeHex.lowercased().utf8)
+        body.append(json)
+        for dev in targets { sendCallFrame(37, body, to: dev) }
     }
 
     /// The frame-19 announce body for one relay: bare 64-hex, or JSON with media/DERP/TURN.
@@ -7252,6 +7359,7 @@ final class FeedStore: ObservableObject {
     /// the reply-path bootstrap (an invitee holds no invite hints for the initiator).
     private func handleInbound(_ data: Data, viaNearby: Bool, senderDevice: String? = nil) {
         guard let type = data.first else { return }
+        if let senderDevice { teachRelayInterfacesOnContact(senderDevice) }
         // Publish ONLY on the actual false→true transition. `@Published` fires objectWillChange even
         // when the value is unchanged, and this runs on EVERY inbound frame (every hello, every media
         // chunk). Setting `= true` unconditionally re-rendered the ENTIRE UI observing FeedStore per
@@ -7690,8 +7798,12 @@ final class FeedStore: ObservableObject {
     /// keeps its stale key) can neither read nor LWW-write my account state afterward.
     func revokeDevice(_ nodeHex: String) {
         guard let seed = AccountStore.storedSeed(), let engine else { return }
+        // A browser may be registered for Web Push under this account: the worker has to be told,
+        // or the browser goes on being rung with the credential it kept.
+        let wasWeb = DeviceRosterManager.shared.name(of: nodeHex).map { isWebDeviceName(name: $0) } ?? false
         Task { @MainActor [weak self] in
             guard await DeviceRosterManager.shared.revoke(nodeHex, engine: engine, accountSeed: seed) else { return }
+            if wasWeb { PushManager.shared.revokeWebPush(deviceHex: nodeHex) }
             guard let self, self.engine === engine else { return }
             await self.rotateSelfSyncAfterRevocation(revokedHex: nodeHex, accountSeed: seed, engine: engine)
         }
@@ -7741,6 +7853,28 @@ final class FeedStore: ObservableObject {
         guard let engine else { return false }
         let ok = await engine.run { $0.grantCircleAdmin(circleId: circleId, adminHex: memberHex) }
         if ok, self.engine === engine { persistUserAction() }
+        return ok
+    }
+
+    /// Where a circle (or a conversation) stands on web devices — browsers linked to a member's
+    /// account. Nil before the engine is up.
+    func circleWebAccess(_ circleId: String) async -> CircleWebAccessFfi? {
+        guard let engine else { return nil }
+        return await engine.run { $0.circleWebAccess(circleId: circleId) }
+    }
+
+    /// State my account's position on web devices in a circle. Account-key-signed (so false on a
+    /// linked device), rides the circle's control lane, and re-keys the circle if its answer changes.
+    @discardableResult
+    func setCircleWebAccess(_ allow: Bool, in circleId: String) async -> Bool {
+        guard let engine else { return false }
+        let ok = await engine.run { $0.setCircleWebAccess(circleId: circleId, allow: allow) }
+        if ok, self.engine === engine {
+            persistUserAction()
+            // Publish it now, not with the next scheduled sync: the position and the key commit that
+            // follows a change of answer go to the circle's mailbox for every member to pick up.
+            backfillMailbox(circleIds: [circleId])
+        }
         return ok
     }
 
@@ -7822,6 +7956,11 @@ final class FeedStore: ObservableObject {
     private var activeEnrollTicket: EnrollTicketFfi?
     /// NEW-DEVICE side: the ticket this device is enrolling with (kept to open the frame-29 grant).
     private var pendingEnrollTicket: EnrollTicketFfi?
+    /// PRIMARY side, scan-to-link: the `haven-pair:` code the active ticket was minted for. A request
+    /// under that ticket is honoured only from the device the code names — reading a code off a
+    /// screen must not be enough to get a device of one's own onto the account. Nil for a ticket this
+    /// device showed (whoever holds that ticket may ask, as before).
+    private var activeEnrollBoundCode: String?
 
     /// PRIMARY: mint a fresh enrollment ticket to advertise as a `haven-enroll:` QR. Only a seed-holding
     /// primary can (it must issue credentials + seal the self-sync grant). Returns nil if not a primary.
@@ -7833,7 +7972,46 @@ final class FeedStore: ObservableObject {
         let ticket = try? enrollIssueTicket(accountBundle: accountBundle, primaryDevice: primaryDevice,
                                             issuedAt: UInt64(Date().timeIntervalSince1970), relays: relays)
         activeEnrollTicket = ticket
+        activeEnrollBoundCode = nil
         return ticket
+    }
+
+    /// What happened to a `haven-pair:` code this device was asked to answer.
+    enum PairAnswer { case sent, notACode, expired, notPrimary, unreachable }
+
+    /// PRIMARY, scan-to-link: another device (a browser on a borrowed computer, say) is SHOWING a
+    /// `haven-pair:` code because it cannot scan one. Mint a ticket bound to the device that code
+    /// names and send it there (frame 38), sealed under the code's secret, through the relay the code
+    /// names. The device then asks to join in the ordinary way and the confirmation sheet still
+    /// decides. Same rules as the desktop's `link_scanned_device`.
+    func answerPairCode(_ text: String) async -> PairAnswer {
+        let code = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let now = UInt64(Date().timeIntervalSince1970)
+        guard let parsed = try? pairCodeParse(text: code) else { return .notACode }
+        guard (try? pairCodeIsExpired(text: code, now: now, ttlSecs: 600)) == false else { return .expired }
+        let relay = parsed.relay.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard relay.hasPrefix("https://") || relay.hasPrefix("http://") else { return .notACode }
+        let deviceHex = parsed.deviceId.map { String(format: "%02x", $0) }.joined()
+        guard deviceHex != DeviceKeyStore.deviceNodeHex() else { return .notACode }
+        guard AccountStore.storedSeed() != nil else { return .notPrimary }
+        guard let node else { return .unreachable }
+        guard let ticket = mintEnrollTicket(),
+              let ticketText = try? enrollTicketEncode(ticket: ticket),
+              let offer = try? pairOfferBuild(codeText: code, ticketText: ticketText, ts: now) else { return .notPrimary }
+        activeEnrollBoundCode = code
+        let f = frame(38, offer)
+        // The other device is waiting on that relay right now; a dial can still lose a race with its
+        // relay registration, so try a few times before saying it did not work.
+        for attempt in 0..<4 {
+            if (try? await node.sendToNodeVia(nodeIdHex: deviceHex, relayUrl: relay, payload: f)) != nil {
+                return .sent
+            }
+            try? await Task.sleep(nanoseconds: UInt64(700_000_000 * (attempt + 1)))
+        }
+        // Nobody was sent this ticket: do not leave it live.
+        activeEnrollTicket = nil
+        activeEnrollBoundCode = nil
+        return .unreachable
     }
 
     /// NEW DEVICE: begin enrolling with a scanned/pasted `haven-enroll:` ticket. Adopts the bootstrap
@@ -7867,12 +8045,23 @@ final class FeedStore: ObservableObject {
         guard AccountStore.storedSeed() != nil, let ticket = activeEnrollTicket else { return }   // only a primary with a live ticket
         guard let req = try? enrollVerifyRequest(secret: ticket.secret, wire: payload,
                                                  now: UInt64(Date().timeIntervalSince1970), maxAgeSecs: 600) else { return }
+        // A ticket minted for a scanned code enrolls the device that code names and no other.
+        if let bound = activeEnrollBoundCode {
+            guard (try? pairCodeMatches(text: bound, deviceBundle: req.deviceBundle)) == true else {
+                HavenLog.net("enroll: a request under a scan-bound ticket came from a different device — refused")
+                return
+            }
+        }
         let deviceHex = nodeHex(req.deviceBundle.prefix(32))
         guard deviceHex != DeviceKeyStore.deviceNodeHex() else { return }   // not our own device
         // Idempotent: don't stack duplicate sheets while one is already up for this device.
         if pendingEnrollRequest?.deviceHex == deviceHex { return }
-        pendingEnrollRequest = PendingEnrollRequest(deviceBundle: req.deviceBundle, deviceHex: deviceHex,
-                                                    name: req.name.isEmpty ? "New device" : req.name)
+        // The name is what the ACCOUNT signs into the device's credential, and a web device's carries
+        // the web mark there (per-circle consent, core `webpolicy`). A device that linked by SHOWING a
+        // code is marked here whatever it called itself; the confirmation then shows the mark too.
+        let given = req.name.isEmpty ? "New device" : req.name
+        let name = activeEnrollBoundCode != nil ? webDeviceName(name: given) : given
+        pendingEnrollRequest = PendingEnrollRequest(deviceBundle: req.deviceBundle, deviceHex: deviceHex, name: name)
     }
 
     /// PRIMARY: the user confirmed the link. Issue the credential + union the device into the roster +
@@ -7909,6 +8098,8 @@ final class FeedStore: ObservableObject {
             }
             self.nearbyBroadcast(29, grant)
             self.sendToDeviceHex(29, grant, request.deviceHex)   // directed to the requester
+            // …and how to reach our relays, which a browser device cannot learn any other way.
+            self.teachMyDevicesRelayInterfaces(to: request.deviceHex)
             // Populate the newly-seedless device: its self-sync base initializes from this pushed slot.
             self.pushFullStateToMyDevices()
             NotificationManager.shared.notify(title: "New device linked",
@@ -9205,15 +9396,34 @@ final class FeedStore: ObservableObject {
         // earlier failures must be tried immediately, not when the cooldown happens to expire.
         if CallDialPolicy.forgivesBackoff(type) { forgiveDials(accountHex: nodeHex) }
         Task.detached(priority: .userInitiated) {
-            let sealedOpt = await engine.run {
+            // ONE SEAL PER DEVICE. A frame sealed to the callee's ACCOUNT key opens only on a device
+            // that holds that key — a linked device that never received the seed (every browser, and
+            // any device linked the seedless way) got the frame and could not open it, so it never
+            // rang. Each device the account's signed roster names gets its own copy, sealed to that
+            // device's key and addressed to its id; an account with no known devices, and any device
+            // whose key is not known yet, keeps the account-sealed frame. Desktop parity:
+            // `Engine::send_call_frame`.
+            let accountSealed = await engine.run {
                 try? $0.sealCallFrame(recipientNodeHex: nodeHex, frameType: type, data: payload)
             }
-            guard let sealed = sealedOpt, !sealed.isEmpty else {
-                let known = await engine.run { $0.deviceNodeIdsFor(accountHex: nodeHex).count }
-                HavenLog.call("call frame type=\(type) NOT SENT to \(nodeHex.prefix(8)) — seal failed (recipient unresolvable: \(known) known device id(s), \(sealedOpt == nil ? "threw" : "empty"))")
-                return
+            let known = await engine.run { $0.deviceNodeIdsFor(accountHex: nodeHex) }
+            let dests = known.isEmpty ? [nodeHex] : known
+            var sent = 0
+            for dest in dests {
+                var sealed = accountSealed
+                if dest.lowercased() != nodeHex.lowercased() {
+                    let own = await engine.run {
+                        try? $0.sealCallFrame(recipientNodeHex: dest, frameType: type, data: payload)
+                    }
+                    if let own, !own.isEmpty { sealed = own }
+                }
+                guard let sealed, !sealed.isEmpty else { continue }
+                await MainActor.run { FeedStore.shared.deliverSealedCallFrame(type, sealed, to: dest) }
+                sent += 1
             }
-            await MainActor.run { FeedStore.shared.deliverSealedCallFrame(type, sealed, to: nodeHex) }
+            if sent == 0 {
+                HavenLog.call("call frame type=\(type) NOT SENT to \(nodeHex.prefix(8)) — seal failed (recipient unresolvable: \(known.count) known device id(s))")
+            }
         }
     }
 

@@ -418,6 +418,7 @@ fun DmThread(circleId: String, partner: Contact, onBack: () -> Unit) {
     var disappearSecs by remember { mutableStateOf<ULong?>(null) }
     var editingId by remember { mutableStateOf<String?>(null) }
     var showOptions by remember { mutableStateOf(false) }
+    var showWebAccess by remember { mutableStateOf(false) }
     val version by HavenNet.feedVersion
     // The thread decode goes through the engine — off main; tagged so a switch never shows the
     // previous thread's messages.
@@ -600,6 +601,11 @@ fun DmThread(circleId: String, partner: Contact, onBack: () -> Unit) {
                             text = { Text(stringResource(R.string.msg_song)) },
                             onClick = { showOptions = false; showMusicDialog = true })
                         androidx.compose.material3.HorizontalDivider(color = HavenTheme.cardBorder)
+                        // A conversation is a circle of two with no owner: a browser reads it only
+                        // if BOTH people agree.
+                        DropdownMenuItem(
+                            text = { Text(stringResource(R.string.circle_web_title)) },
+                            onClick = { showOptions = false; showWebAccess = true })
                         DropdownMenuItem(
                             text = { Text(if (secretMode) stringResource(R.string.msg_secret_message_checked) else stringResource(R.string.msg_secret_message)) },
                             onClick = { secretMode = !secretMode; showOptions = false })
@@ -664,6 +670,16 @@ fun DmThread(circleId: String, partner: Contact, onBack: () -> Unit) {
                     onCaptured = { ref, _ -> pendingMedia = pendingMedia + ref; showDmCamera = false },
                 )
             }
+        }
+        if (showWebAccess) {
+            androidx.compose.material3.AlertDialog(
+                onDismissRequest = { showWebAccess = false }, containerColor = HavenTheme.card,
+                text = { CircleWebAccessRows(circleId) },
+                confirmButton = {
+                    Text(stringResource(R.string.common_done), color = HavenTheme.pink,
+                        modifier = Modifier.clickable { showWebAccess = false }.padding(8.dp))
+                },
+            )
         }
         if (showVoice) {
             VoiceRecorderDialog(circleId,

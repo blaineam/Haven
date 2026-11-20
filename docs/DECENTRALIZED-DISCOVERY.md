@@ -78,7 +78,7 @@ that makes deleting it a mistake).
 |---|
 | `apple/HavenApp/PushManager.swift:22` |
 | `android/…/core/Moderation.kt:28` |
-| `desktop/src-tauri/src/engine.rs:30` |
+| `core/haven-client/src/engine.rs:30` |
 
 `https://haven-push.wemiller.workers.dev` — a compile-time constant in three languages. Changing
 it requires shipping three app updates. This is deliverable 2's problem; see

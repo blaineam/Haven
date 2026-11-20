@@ -44722,6 +44722,1398 @@
           }
         }
       }
+    },
+    "Offer Haven in a browser from this relay" : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Haven im Browser über dieses Relay anbieten"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Offer Haven in a browser from this relay"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ofrecer Haven en el navegador desde este relay"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Proposer Haven dans un navigateur depuis ce relais"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Offri Haven nel browser da questo relay"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このリレーからブラウザ版 Haven を提供する"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "이 릴레이에서 브라우저용 Haven 제공"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Oferecer o Haven no navegador por este relay"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "通过此中继在浏览器中提供 Haven"
+          }
+        }
+      }
+    },
+    "Let people in your circles open Haven in a web browser through this relay, and add that browser as one of their own devices (from You ▸ Devices on a device they already use)." : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Erlaube Personen in deinen Kreisen, Haven über dieses Relay im Webbrowser zu öffnen und diesen Browser als eines ihrer eigenen Geräte hinzuzufügen (unter Du ▸ Geräte auf einem Gerät, das sie bereits nutzen)."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Let people in your circles open Haven in a web browser through this relay, and add that browser as one of their own devices (from You ▸ Devices on a device they already use)."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Permite que las personas de tus círculos abran Haven en un navegador a través de este relay y añadan ese navegador como uno de sus dispositivos (desde Tú ▸ Dispositivos en un dispositivo que ya usan)."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Permet aux personnes de vos cercles d’ouvrir Haven dans un navigateur web via ce relais, et d’ajouter ce navigateur comme l’un de leurs appareils (depuis Vous ▸ Appareils sur un appareil qu’elles utilisent déjà)."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Consenti alle persone delle tue cerchie di aprire Haven in un browser tramite questo relay e di aggiungere quel browser come uno dei propri dispositivi (da Tu ▸ Dispositivi su un dispositivo che usano già)."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "サークルの人が、このリレー経由で Haven をウェブブラウザで開き、そのブラウザを自分のデバイスの一つとして追加できるようにします（すでに使っているデバイスの「あなた ▸ デバイス」から）。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "서클의 사람들이 이 릴레이를 통해 웹 브라우저에서 Haven을 열고, 그 브라우저를 자신의 기기 중 하나로 추가할 수 있게 합니다(이미 사용 중인 기기의 나 ▸ 기기에서)."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Permite que as pessoas dos seus círculos abram o Haven em um navegador por este relay e adicionem esse navegador como um dos seus dispositivos (em Você ▸ Dispositivos, em um dispositivo que já usam)."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "让圈子里的人通过此中继在网页浏览器中打开 Haven，并把该浏览器添加为自己的设备之一（在已使用的设备上前往“你 ▸ 设备”）。"
+          }
+        }
+      }
+    },
+    "Address:" : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Adresse:"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Address:"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Dirección:"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Adresse :"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Indirizzo:"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "アドレス:"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "주소:"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Endereço:"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "地址："
+          }
+        }
+      }
+    },
+    "Off by default for a reason: this relay, and whatever sits in front of it (a tunnel or proxy), delivers the web page's code and could change it. A browser can never hold an account's master key, and its owner can remove it at any time." : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Aus gutem Grund standardmäßig aus: Dieses Relay und alles, was davor liegt (ein Tunnel oder Proxy), liefert den Code der Webseite aus und könnte ihn verändern. Ein Browser kann nie den Hauptschlüssel eines Kontos besitzen, und sein Besitzer kann ihn jederzeit entfernen."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Off by default for a reason: this relay, and whatever sits in front of it (a tunnel or proxy), delivers the web page's code and could change it. A browser can never hold an account's master key, and its owner can remove it at any time."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Está desactivado por defecto por una razón: este relay, y lo que tenga delante (un túnel o proxy), entrega el código de la página web y podría cambiarlo. Un navegador nunca puede tener la clave maestra de una cuenta, y su dueño puede quitarlo cuando quiera."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Désactivé par défaut pour une bonne raison : ce relais, et tout ce qui se trouve devant lui (un tunnel ou un proxy), fournit le code de la page web et pourrait le modifier. Un navigateur ne peut jamais détenir la clé maîtresse d’un compte, et son propriétaire peut le retirer à tout moment."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "È disattivato per impostazione predefinita per un motivo: questo relay, e ciò che gli sta davanti (un tunnel o un proxy), consegna il codice della pagina web e potrebbe modificarlo. Un browser non può mai avere la chiave principale di un account, e il proprietario può rimuoverlo in qualsiasi momento."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "既定でオフなのには理由があります。このリレーと、その前段にあるもの（トンネルやプロキシ）がウェブページのコードを配信するため、内容を変更できてしまいます。ブラウザがアカウントのマスターキーを持つことはなく、持ち主はいつでも削除できます。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "기본적으로 꺼져 있는 데는 이유가 있습니다. 이 릴레이와 그 앞에 있는 것(터널 또는 프록시)이 웹 페이지의 코드를 전달하므로 코드를 바꿀 수도 있습니다. 브라우저는 계정의 마스터 키를 가질 수 없으며, 소유자가 언제든지 제거할 수 있습니다."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Vem desativado por um motivo: este relay, e o que estiver na frente dele (um túnel ou proxy), entrega o código da página e poderia alterá-lo. Um navegador nunca guarda a chave mestra de uma conta, e o dono pode removê-lo quando quiser."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "默认关闭是有原因的：此中继以及位于它前面的任何环节（隧道或代理）负责提供网页的代码，并且可能更改它。浏览器永远无法持有账户的主密钥，其所有者可以随时将其移除。"
+          }
+        }
+      }
+    },
+    "Web access needs the single front door (path proxy), which is not running." : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Der Webzugriff braucht die gemeinsame Eingangstür (Pfad-Proxy), und die läuft gerade nicht."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Web access needs the single front door (path proxy), which is not running."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "El acceso web necesita la puerta de entrada única (proxy de rutas), que no está en marcha."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "L’accès web nécessite la porte d’entrée unique (proxy de chemins), qui n’est pas en service."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "L’accesso web richiede la porta d’ingresso unica (proxy dei percorsi), che non è in funzione."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ウェブアクセスには単一のフロントドア（パスプロキシ）が必要ですが、現在動作していません。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "웹 액세스에는 단일 프런트 도어(경로 프록시)가 필요한데, 현재 실행되고 있지 않습니다."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "O acesso web precisa da porta de entrada única (proxy de caminhos), que não está em execução."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "网页访问需要单一入口（路径代理），但它目前没有运行。"
+          }
+        }
+      }
+    },
+    "Is the other device showing a code of its own — a browser, for example? Scan it, or paste it here." : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Zeigt das andere Gerät – zum Beispiel ein Browser – einen eigenen Code an? Scanne ihn oder füge ihn hier ein."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Is the other device showing a code of its own — a browser, for example? Scan it, or paste it here."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "¿El otro dispositivo —un navegador, por ejemplo— muestra su propio código? Escanéalo o pégalo aquí."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "L’autre appareil affiche-t-il son propre code — un navigateur, par exemple ? Scannez-le ou collez-le ici."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "L’altro dispositivo, ad esempio un browser, mostra un proprio codice? Scansionalo o incollalo qui."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "相手のデバイス（ブラウザなど）が自分のコードを表示していますか？ それをスキャンするか、ここに貼り付けてください。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "다른 기기(예: 브라우저)가 자체 코드를 표시하고 있나요? 그 코드를 스캔하거나 여기에 붙여 넣으세요."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "O outro dispositivo — um navegador, por exemplo — está mostrando um código próprio? Escaneie ou cole aqui."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "另一台设备（例如浏览器）是否显示了它自己的代码？扫描它，或粘贴到这里。"
+          }
+        }
+      }
+    },
+    "Scan its code" : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Dessen Code scannen"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Scan its code"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Escanear su código"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Scanner son code"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Scansiona il suo codice"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "相手のコードをスキャン"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "그 기기의 코드 스캔"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Escanear o código dele"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "扫描它的代码"
+          }
+        }
+      }
+    },
+    "Use this code" : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Diesen Code verwenden"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Use this code"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Usar este código"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Utiliser ce code"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Usa questo codice"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このコードを使う"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "이 코드 사용"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Usar este código"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "使用此代码"
+          }
+        }
+      }
+    },
+    "That is not a Haven device code." : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Das ist kein Haven-Gerätecode."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "That is not a Haven device code."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Eso no es un código de dispositivo de Haven."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ce n’est pas un code d’appareil Haven."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Questo non è un codice dispositivo di Haven."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "これは Haven のデバイスコードではありません。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Haven 기기 코드가 아닙니다."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Isso não é um código de dispositivo do Haven."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "这不是 Haven 设备代码。"
+          }
+        }
+      }
+    },
+    "Sent. Approve the device here when it asks to link." : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Gesendet. Bestätige das Gerät hier, sobald es sich verknüpfen möchte."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sent. Approve the device here when it asks to link."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Enviado. Aprueba el dispositivo aquí cuando pida vincularse."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Envoyé. Approuvez l’appareil ici lorsqu’il demandera à être associé."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Inviato. Approva il dispositivo qui quando chiede di collegarsi."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "送信しました。デバイスがリンクを求めてきたら、ここで承認してください。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "보냈습니다. 기기가 연결을 요청하면 여기에서 승인하세요."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Enviado. Aprove o dispositivo aqui quando ele pedir para se vincular."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已发送。设备请求关联时，请在这里批准。"
+          }
+        }
+      }
+    },
+    "That code has expired. Show a fresh one on the other device." : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Dieser Code ist abgelaufen. Zeige auf dem anderen Gerät einen neuen an."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "That code has expired. Show a fresh one on the other device."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ese código ha caducado. Muestra uno nuevo en el otro dispositivo."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ce code a expiré. Affichez-en un nouveau sur l’autre appareil."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Questo codice è scaduto. Mostrane uno nuovo sull’altro dispositivo."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このコードは期限切れです。相手のデバイスで新しいコードを表示してください。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "이 코드는 만료되었습니다. 다른 기기에서 새 코드를 표시하세요."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Esse código expirou. Mostre um novo no outro dispositivo."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "该代码已过期。请在另一台设备上显示新的代码。"
+          }
+        }
+      }
+    },
+    "Only your primary device can link new devices." : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Nur dein Hauptgerät kann neue Geräte verknüpfen."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Only your primary device can link new devices."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Solo tu dispositivo principal puede vincular dispositivos nuevos."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Seul votre appareil principal peut associer de nouveaux appareils."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Solo il tuo dispositivo principale può collegare nuovi dispositivi."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "新しいデバイスをリンクできるのはプライマリデバイスだけです。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "기본 기기에서만 새 기기를 연결할 수 있습니다."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Somente o seu dispositivo principal pode vincular novos dispositivos."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "只有你的主设备可以关联新设备。"
+          }
+        }
+      }
+    },
+    "Couldn't reach that device. Keep its page open and try again." : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Das Gerät war nicht erreichbar. Lass dessen Seite geöffnet und versuche es erneut."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Couldn't reach that device. Keep its page open and try again."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No se pudo llegar a ese dispositivo. Mantén su página abierta e inténtalo de nuevo."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Impossible de joindre cet appareil. Gardez sa page ouverte et réessayez."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Impossibile raggiungere quel dispositivo. Tieni aperta la sua pagina e riprova."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "そのデバイスに届きませんでした。相手のページを開いたまま、もう一度お試しください。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "그 기기에 연결하지 못했습니다. 해당 페이지를 열어 둔 채로 다시 시도하세요."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Não foi possível alcançar esse dispositivo. Mantenha a página dele aberta e tente de novo."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法连接到那台设备。请保持它的页面打开，然后重试。"
+          }
+        }
+      }
+    },
+    "haven-pair:…" : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "haven-pair:…"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "haven-pair:…"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "haven-pair:…"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "haven-pair:…"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "haven-pair:…"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "haven-pair:…"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "haven-pair:…"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "haven-pair:…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "haven-pair:…"
+          }
+        }
+      }
+    },
+    "Web browsers" : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Webbrowser"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Web browsers"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Navegadores web"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Navigateurs web"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Browser web"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ウェブブラウザ"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "웹 브라우저"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Navegadores"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "网页浏览器"
+          }
+        }
+      }
+    },
+    "Allow this circle in web browsers" : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Diesen Kreis in Webbrowsern erlauben"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Allow this circle in web browsers"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Permitir este círculo en navegadores web"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Autoriser ce cercle dans les navigateurs web"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Consenti questa cerchia nei browser web"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このサークルをウェブブラウザで許可する"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "이 서클을 웹 브라우저에서 허용"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Permitir este círculo em navegadores"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "允许在网页浏览器中使用此圈子"
+          }
+        }
+      }
+    },
+    "On: browsers that members have linked can read and post in this circle." : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "An: Browser, die Mitglieder verknüpft haben, können in diesem Kreis lesen und posten."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "On: browsers that members have linked can read and post in this circle."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Activado: los navegadores que los miembros han vinculado pueden leer y publicar en este círculo."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Activé : les navigateurs associés par les membres peuvent lire et publier dans ce cercle."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Attivo: i browser collegati dai membri possono leggere e pubblicare in questa cerchia."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "オン: メンバーがリンクしたブラウザで、このサークルの閲覧と投稿ができます。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "켜짐: 멤버가 연결한 브라우저에서 이 서클을 읽고 게시할 수 있습니다."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ativado: navegadores que os membros vincularam podem ler e publicar neste círculo."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已开启：成员关联的浏览器可以在此圈子中阅读和发布。"
+          }
+        }
+      }
+    },
+    "Off: browsers get nothing from this circle." : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Aus: Browser erhalten nichts aus diesem Kreis."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Off: browsers get nothing from this circle."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Desactivado: los navegadores no reciben nada de este círculo."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Désactivé : les navigateurs ne reçoivent rien de ce cercle."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Disattivato: i browser non ricevono nulla da questa cerchia."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "オフ: ブラウザにはこのサークルの内容は一切届きません。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "꺼짐: 브라우저는 이 서클에서 아무것도 받지 않습니다."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Desativado: navegadores não recebem nada deste círculo."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已关闭：浏览器不会收到此圈子的任何内容。"
+          }
+        }
+      }
+    },
+    "You are an admin of this circle, so your choice decides it." : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Du bist Admin dieses Kreises, deine Wahl entscheidet also."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "You are an admin of this circle, so your choice decides it."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Eres administrador de este círculo, así que tu elección decide."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Vous êtes administrateur de ce cercle, c’est donc votre choix qui décide."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sei amministratore di questa cerchia, quindi la tua scelta decide."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "あなたはこのサークルの管理者なので、あなたの選択で決まります。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "이 서클의 관리자이므로 내 선택으로 결정됩니다."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Você é administrador deste círculo, então a sua escolha decide."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "你是此圈子的管理员，因此由你的选择决定。"
+          }
+        }
+      }
+    },
+    "This circle's admins decide. Your choice is recorded but does not change it." : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Die Admins dieses Kreises entscheiden. Deine Wahl wird festgehalten, ändert aber nichts."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This circle's admins decide. Your choice is recorded but does not change it."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Deciden los administradores de este círculo. Tu elección queda registrada, pero no lo cambia."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ce sont les administrateurs de ce cercle qui décident. Votre choix est enregistré mais ne change rien."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Decidono gli amministratori di questa cerchia. La tua scelta viene registrata ma non cambia il risultato."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このサークルの管理者が決めます。あなたの選択は記録されますが、結果は変わりません。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "이 서클의 관리자가 결정합니다. 내 선택은 기록되지만 결과를 바꾸지 않습니다."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Quem decide são os administradores deste círculo. A sua escolha fica registrada, mas não muda isso."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "由此圈子的管理员决定。你的选择会被记录，但不会改变结果。"
+          }
+        }
+      }
+    },
+    "Everyone in this circle has agreed." : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Alle in diesem Kreis haben zugestimmt."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Everyone in this circle has agreed."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Todos en este círculo han aceptado."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tout le monde dans ce cercle a accepté."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tutti in questa cerchia hanno acconsentito."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このサークルの全員が同意しました。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "이 서클의 모두가 동의했습니다."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Todos neste círculo concordaram."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此圈子的所有人都已同意。"
+          }
+        }
+      }
+    },
+    "Change this on your primary device." : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ändere das auf deinem Hauptgerät."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Change this on your primary device."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Cámbialo en tu dispositivo principal."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Modifiez ce réglage sur votre appareil principal."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Cambialo sul tuo dispositivo principale."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "プライマリデバイスで変更してください。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "기본 기기에서 변경하세요."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mude isso no seu dispositivo principal."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "请在你的主设备上更改此设置。"
+          }
+        }
+      }
+    },
+    "A browser's copy of Haven is delivered by a relay, so it is less protected than the app. Turning this off stops browsers getting anything new; what they already received is not taken back." : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Die Browser-Version von Haven wird von einem Relay ausgeliefert und ist daher weniger geschützt als die App. Wenn du das ausschaltest, erhalten Browser nichts Neues mehr; bereits Empfangenes wird nicht zurückgenommen."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "A browser's copy of Haven is delivered by a relay, so it is less protected than the app. Turning this off stops browsers getting anything new; what they already received is not taken back."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "La copia de Haven de un navegador la entrega un relay, así que está menos protegida que la app. Al desactivarlo, los navegadores dejan de recibir cosas nuevas; lo que ya recibieron no se retira."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "La copie de Haven dans un navigateur est fournie par un relais ; elle est donc moins protégée que l’app. Désactiver ce réglage empêche les navigateurs de recevoir quoi que ce soit de nouveau ; ce qu’ils ont déjà reçu n’est pas retiré."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "La copia di Haven in un browser è consegnata da un relay, quindi è meno protetta dell’app. Disattivando, i browser non ricevono più nulla di nuovo; ciò che hanno già ricevuto non viene ritirato."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ブラウザ版の Haven はリレーから配信されるため、アプリほど保護されていません。オフにすると、ブラウザには新しい内容が届かなくなります。すでに届いた内容は取り消されません。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "브라우저용 Haven은 릴레이가 전달하므로 앱보다 보호 수준이 낮습니다. 끄면 브라우저는 새 내용을 받지 않습니다. 이미 받은 내용은 회수되지 않습니다."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "A cópia do Haven em um navegador é entregue por um relay, então é menos protegida que o app. Desativar impede que navegadores recebam coisas novas; o que já receberam não é retirado."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "浏览器中的 Haven 由中继提供，因此受到的保护不如应用。关闭后，浏览器不再收到任何新内容；已经收到的内容不会被收回。"
+          }
+        }
+      }
+    },
+    "Everyone in this circle has to agree. %lld still to agree." : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Alle in diesem Kreis müssen zustimmen. Es fehlen noch %lld."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Everyone in this circle has to agree. %lld still to agree."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Todos en este círculo tienen que aceptar. Faltan %lld."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tout le monde dans ce cercle doit accepter. Il en manque encore %lld."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tutti in questa cerchia devono acconsentire. Ne mancano ancora %lld."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このサークルの全員の同意が必要です。あと%lld人です。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "이 서클의 모두가 동의해야 합니다. 아직 %lld명이 남았습니다."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Todos neste círculo precisam concordar. Ainda faltam %lld."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此圈子的所有人都需要同意。还差 %lld 人。"
+          }
+        }
+      }
     }
   },
   "version" : "1.1"

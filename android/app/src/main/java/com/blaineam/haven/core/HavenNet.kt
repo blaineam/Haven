@@ -1450,6 +1450,25 @@ object HavenNet : InboundListener {
         return ok
     }
 
+    /** Where a circle (or a conversation) stands on web devices — browsers linked to a member's
+     *  account. Reads the engine: call off main. */
+    fun circleWebAccess(circleId: String): uniffi.haven_ffi.CircleWebAccessFfi? =
+        runCatching { social.circleWebAccess(circleId) }.getOrNull()
+
+    /** State my account's position on web devices in a circle. Account-key-signed (false on a linked
+     *  device), rides the circle's control lane, and re-keys the circle if its answer changes. */
+    fun setCircleWebAccess(circleId: String, allow: Boolean): Boolean {
+        if (core.seedless) return false                             // account-key holder only
+        val ok = runCatching { social.setCircleWebAccess(circleId, allow) }.getOrDefault(false)
+        if (ok) {
+            persist()
+            // Publish it now, not with the next scheduled sync: the position and the key commit that
+            // follows a change of answer go to the circle's mailbox for every member to pick up.
+            scope.launch { runCatching { backfillMailbox(circleId) }; runCatching { SelfSyncCoordinator.sync(social) } }
+        }
+        return ok
+    }
+
     fun renameCircle(id: String, name: String) {
         runCatching { social.renameCircle(id, name) }; persist(); bumpCircles()
         selfSyncNudge()   // the new name rides the circle: record to my other devices now
@@ -1514,6 +1533,7 @@ object HavenNet : InboundListener {
      *  the reply-path bootstrap (an invitee holds no invite hints for the initiator). */
     fun onInbound(payload: ByteArray, viaNearby: Boolean, senderDevice: String? = null) {
         if (payload.isEmpty()) return
+        senderDevice?.let { teachRelayInterfacesOnContact(it) }
         val type = payload[0].toInt() and 0xFF
         val body = payload.copyOfRange(1, payload.size)
         // Call frames lead with a 64-char sender hex — drop blocked senders early (parity with iOS).
@@ -2798,7 +2818,11 @@ object HavenNet : InboundListener {
      *  read/LWW-write access to our account-state channel; publish the rotated-key grants promptly. */
     fun revokeDevice(nodeHex: String) {
         if (core.seedless) return   // only the seed-holding primary revokes
-        DeviceRosterManager.revoke(nodeHex, social, core.seed)
+        // A browser may be registered for Web Push under this account: the worker has to be told, or
+        // the browser goes on being rung with the credential it kept.
+        val wasWeb = DeviceRosterManager.nameOf(nodeHex)?.let { uniffi.haven_ffi.isWebDeviceName(it) } == true
+        val revoked = DeviceRosterManager.revoke(nodeHex, social, core.seed)
+        if (revoked && wasWeb) revokeWebPush(nodeHex)
         scope.launch { runCatching { SelfSyncCoordinator.sync(social) } }   // publish the rotated-key grants
     }
 
@@ -2883,10 +2907,69 @@ object HavenNet : InboundListener {
         return uri
     }
 
+    /**
+     * PRIMARY, scan-to-link: tickets minted for a `haven-pair:` code another device SHOWED, by ticket
+     * secret → that code. A request under such a ticket is honoured only from the device the code
+     * names — reading a code off a screen must not be enough to get a device of one's own onto the
+     * account. A ticket this device showed has no entry (whoever holds it may ask, as before).
+     */
+    private val ticketBoundCode = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    /** What happened to a `haven-pair:` code this device was asked to answer. */
+    enum class PairAnswer { SENT, NOT_A_CODE, EXPIRED, NOT_PRIMARY, UNREACHABLE }
+
+    /**
+     * PRIMARY, scan-to-link: another device (a browser on a borrowed computer, say) is SHOWING a
+     * `haven-pair:` code because it cannot scan one. Mint a ticket bound to the device that code
+     * names and send it there (frame 38), sealed under the code's secret, through the relay the code
+     * names. The device then asks to join in the ordinary way and the confirm dialog still decides.
+     * Same rules as the desktop's `link_scanned_device` and iOS `answerPairCode`.
+     */
+    suspend fun answerPairCode(text: String): PairAnswer {
+        val code = text.trim()
+        val now = (System.currentTimeMillis() / 1000).toULong()
+        val parsed = runCatching { uniffi.haven_ffi.pairCodeParse(code) }.getOrNull() ?: return PairAnswer.NOT_A_CODE
+        if (runCatching { uniffi.haven_ffi.pairCodeIsExpired(code, now, TICKET_TTL_SECS) }.getOrDefault(true)) {
+            return PairAnswer.EXPIRED
+        }
+        val relay = parsed.relay.trim()
+        if (!(relay.startsWith("https://") || relay.startsWith("http://"))) return PairAnswer.NOT_A_CODE
+        val deviceHex = bytesToHex(parsed.deviceId)
+        val myDevice = runCatching { social.myDeviceNodeHex() }.getOrDefault("")
+        if (deviceHex.equals(myDevice, ignoreCase = true)) return PairAnswer.NOT_A_CODE
+        if (core.seedless) return PairAnswer.NOT_PRIMARY
+        val n = node ?: return PairAnswer.UNREACHABLE
+        DeviceRosterManager.enable(social, core.seed, core.bundle, nodeIdHex)
+        val primaryDevice = hexToBytes32(myDevice) ?: return PairAnswer.NOT_PRIMARY
+        val relays = allRelays().filter { !it.startsWith("s3:") }.take(4)
+        val ticket = runCatching {
+            uniffi.haven_ffi.enrollIssueTicket(core.bundle, primaryDevice, now, relays)
+        }.getOrNull() ?: return PairAnswer.NOT_PRIMARY
+        val ticketText = runCatching { uniffi.haven_ffi.enrollTicketEncode(ticket) }.getOrNull()
+            ?: return PairAnswer.NOT_PRIMARY
+        val offer = runCatching { uniffi.haven_ffi.pairOfferBuild(code, ticketText, now) }.getOrNull()
+            ?: return PairAnswer.NOT_A_CODE
+        val secretHex = bytesToHex(ticket.secret)
+        ticketBoundCode[secretHex] = code
+        pendingTickets[secretHex] = ticket
+        val frame = Wire.frame(Wire.PAIR_OFFER, offer)
+        // The other device is waiting on that relay right now; a dial can still lose a race with its
+        // relay registration, so try a few times before saying it did not work.
+        for (attempt in 0 until 4) {
+            if (runCatching { n.sendToNodeVia(deviceHex, relay, frame) }.isSuccess) return PairAnswer.SENT
+            kotlinx.coroutines.delay(700L * (attempt + 1))
+        }
+        // Nobody was sent this ticket: do not leave it live.
+        pendingTickets.remove(secretHex)
+        ticketBoundCode.remove(secretHex)
+        return PairAnswer.UNREACHABLE
+    }
+
     /** PRIMARY: cancel the pending ticket (closing the QR sheet without a link). */
     fun cancelSeedlessTicket() {
         pendingRequestSecret?.let { pendingTickets.remove(it) }
         pendingTickets.clear()
+        ticketBoundCode.clear()
         pendingRequestSecret = null
         scope.launch(Dispatchers.Main) { seedlessTicketUri.value = ""; seedlessPendingRequest.value = null }
     }
@@ -2898,15 +2981,25 @@ object HavenNet : InboundListener {
         val now = (System.currentTimeMillis() / 1000).toULong()
         for ((secretHex, ticket) in pendingTickets.toMap()) {
             if (runCatching { uniffi.haven_ffi.enrollTicketIsExpired(ticket, now, TICKET_TTL_SECS) }.getOrDefault(true)) {
-                pendingTickets.remove(secretHex); continue
+                pendingTickets.remove(secretHex); ticketBoundCode.remove(secretHex); continue
             }
             val req = runCatching {
                 uniffi.haven_ffi.enrollVerifyRequest(ticket.secret, body, now, TICKET_TTL_SECS)
             }.getOrNull() ?: continue
+            // A ticket minted for a scanned code enrolls the device that code names and no other.
+            val bound = ticketBoundCode[secretHex]
+            if (bound != null &&
+                !runCatching { uniffi.haven_ffi.pairCodeMatches(bound, req.deviceBundle) }.getOrDefault(false)) {
+                continue
+            }
             pendingRequestSecret = secretHex
             val deviceHex = nodeHex(req.deviceBundle)
+            // The name is what the ACCOUNT signs into the device's credential, and a web device's
+            // carries the web mark there (per-circle consent, core `webpolicy`). A device that linked
+            // by SHOWING a code is marked here whatever it called itself; the prompt shows it too.
+            val name = if (bound != null) uniffi.haven_ffi.webDeviceName(req.name) else req.name
             scope.launch(Dispatchers.Main) {
-                seedlessPendingRequest.value = SeedlessEnrollPrompt(deviceHex, req.name, req.deviceBundle)
+                seedlessPendingRequest.value = SeedlessEnrollPrompt(deviceHex, name, req.deviceBundle)
             }
             return
         }
@@ -2937,6 +3030,8 @@ object HavenNet : InboundListener {
             }.getOrNull() ?: return@launch
             NearbyTransport.broadcast(Wire.frame(Wire.SEEDLESS_ENROLL_GRANT, grant))
             runCatching { sendFrame(Wire.SEEDLESS_ENROLL_GRANT, grant, prompt.deviceHex) }
+            // …and how to reach our relays, which a browser device cannot learn any other way.
+            runCatching { teachMyDevicesRelayInterfaces(only = prompt.deviceHex) }
             pendingTickets.remove(secretHex)
             pendingRequestSecret = null
             scope.launch(Dispatchers.Main) { seedlessTicketUri.value = "" }
@@ -4630,6 +4725,7 @@ object HavenNet : InboundListener {
      *  [FcmPush]). Signed over `fcm-v1:<token>` so the worker can verify it is mine and a signature made
      *  for APNs or a /flag can't be replayed here. Fire-and-forget: polling stays the fallback. */
     fun registerAndroidPushToken(token: String) {
+        flushWebPushRevokes()   // a browser revoked while offline is reported now
         val acct = core.account ?: return
         if (token.isEmpty() || HavenOffline.enabled) return
         val ts = System.currentTimeMillis() / 1000
@@ -4640,6 +4736,44 @@ object HavenNet : InboundListener {
             .put("platform", "android")
             .put("ts", ts)
             .put("sig", Base64.encodeToString(sig, Base64.NO_WRAP)))
+    }
+
+    /** Browsers this account revoked that the push worker has not yet acknowledged (device hex). */
+    private fun webRevokes(): MutableSet<String> =
+        appContext.getSharedPreferences("haven.push", Context.MODE_PRIVATE).getStringSet("webRevokes", emptySet())!!.toMutableSet()
+    private fun saveWebRevokes(v: Set<String>) {
+        appContext.getSharedPreferences("haven.push", Context.MODE_PRIVATE).edit().putStringSet("webRevokes", v).apply()
+    }
+
+    /** The account revoked a browser: tell the push worker to drop that browser's endpoint and to
+     *  refuse its credential from now on (`/unregister-web`, signed by the account). Queued until the
+     *  worker answers, so a revocation made offline is delivered on a later launch. */
+    fun revokeWebPush(deviceHex: String) {
+        saveWebRevokes(webRevokes().apply { add(deviceHex.lowercase()) })
+        flushWebPushRevokes()
+    }
+
+    /** Send every queued revocation. Called on a revocation and at start. */
+    fun flushWebPushRevokes() {
+        val acct = core.account ?: return   // no account key here: a linked device cannot revoke
+        val pending = webRevokes()
+        if (pending.isEmpty() || HavenOffline.enabled) return
+        scope.launch {
+            for (hex in pending) {
+                val ts = System.currentTimeMillis() / 1000
+                val sig = acct.signPushRegistration("webpush-revoke-v1:$hex", ts.toULong())
+                val body = JSONObject().put("nodeId", accountNodeHex).put("deviceId", hex).put("ts", ts)
+                    .put("sig", Base64.encodeToString(sig, Base64.NO_WRAP)).toString().toByteArray(Charsets.UTF_8)
+                val ok = runCatching {
+                    val c = (java.net.URL("$pushRelayBase/unregister-web").openConnection() as java.net.HttpURLConnection).apply {
+                        requestMethod = "POST"; doOutput = true; connectTimeout = 8000; readTimeout = 8000
+                        setRequestProperty("Content-Type", "application/json")
+                    }
+                    try { c.outputStream.use { it.write(body) }; c.responseCode == 200 } finally { c.disconnect() }
+                }.getOrDefault(false)
+                if (ok) saveWebRevokes(webRevokes().apply { remove(hex) })   // otherwise it stays queued
+            }
+        }
     }
 
     /** The push worker's base URL. A seam for the JVM tests, which point it at an in-process server so no
@@ -4717,6 +4851,9 @@ object HavenNet : InboundListener {
      * sync tick + on each connect. iOS reannounceOwnRelay parity.
      */
     private fun reannounceOwnRelay() {
+        // My own other devices learn how to REACH the relays I know here too (a linked browser has no
+        // other way) — whether or not this device hosts one itself.
+        runCatching { teachMyDevicesRelayInterfaces() }
         val hex = runCatching { relayHost?.nodeIdHex() }.getOrNull() ?: return
         if (hex.length != 64) return
         for (c in runCatching { social.circles() }.getOrDefault(emptyList())) {
@@ -4838,7 +4975,9 @@ object HavenNet : InboundListener {
      * reliable cross-NAT media path too. Sealed to the circle either way; legacy receivers that expect
      * a bare hex simply ignore the JSON form (wrong length), so mixed versions stay compatible.
      */
-    private fun relayAnnounceBlob(circleId: String, nodeHex: String): ByteArray? {
+    /** The frame-19 announce OBJECT for one relay (`{node, addedAt, urls, token, derp, turn…}`), or
+     *  null when there is nothing but the bare id to say. */
+    private fun relayAnnounceJson(nodeHex: String): org.json.JSONObject? {
         val e = relayEntries[nodeHex]
         val addedAt = e?.addedAtMs ?: 0L
         val hasHttp = e != null && e.httpUrls.isNotEmpty() && e.httpToken.isNotEmpty()
@@ -4847,18 +4986,74 @@ object HavenNet : InboundListener {
         // ignores JSON it can't read as a bare hex (wrong length), so mixed versions stay compatible.
         val hasDerp = e != null && e.derpUrl.isNotEmpty()
         val hasTurn = e != null && e.turnUrls.isNotEmpty()
-        val payload = if (hasHttp || addedAt > 0 || hasDerp || hasTurn) {
-            org.json.JSONObject().put("node", nodeHex).put("addedAt", addedAt).apply {
-                if (hasHttp) { put("urls", JSONArray(e!!.httpUrls)); put("token", e.httpToken) }
-                if (hasDerp) put("derp", e!!.derpUrl)
-                if (hasTurn) {
-                    put("turn", JSONArray(e!!.turnUrls))
-                    if (e.turnUser.isNotEmpty()) put("turnUser", e.turnUser)
-                    if (e.turnPass.isNotEmpty()) put("turnPass", e.turnPass)
-                }
-            }.toString().toByteArray(Charsets.UTF_8)
-        } else nodeHex.toByteArray(Charsets.UTF_8)
+        if (!(hasHttp || addedAt > 0 || hasDerp || hasTurn)) return null
+        return org.json.JSONObject().put("node", nodeHex).put("addedAt", addedAt).apply {
+            if (hasHttp) { put("urls", JSONArray(e!!.httpUrls)); put("token", e.httpToken) }
+            if (hasDerp) put("derp", e!!.derpUrl)
+            if (hasTurn) {
+                put("turn", JSONArray(e!!.turnUrls))
+                if (e.turnUser.isNotEmpty()) put("turnUser", e.turnUser)
+                if (e.turnPass.isNotEmpty()) put("turnPass", e.turnPass)
+            }
+        }
+    }
+
+    private fun relayAnnounceBlob(circleId: String, nodeHex: String): ByteArray? {
+        val payload = (relayAnnounceJson(nodeHex)?.toString() ?: nodeHex).toByteArray(Charsets.UTF_8)
         return runCatching { social.sealCircleMedia(circleId, payload) }.getOrNull()
+    }
+
+    /**
+     * Frame 37 (`RELAY_INTERFACE`, core/haven-client/src/wire.rs): tell my OWN other devices how to
+     * reach the relays I know — each relay's HTTP URLs + token and DERP URL — sealed per device and
+     * signed by the ACCOUNT key. `[hex64 account][JSON array of frame-19 announce objects]`.
+     *
+     * A native device learns a relay's interface from the relay itself over the node's blob transport,
+     * or from a frame-19 announce once it holds the circle's key. A BROWSER linked to this account has
+     * no blob transport and gets the circle's key THROUGH the relay mailbox, so without this it can
+     * never take the first step. Receivers accept it only from the account's own key (never a contact,
+     * never another linked device), so only a seed-holding device sends it. Cheap — one small sealed
+     * frame per sibling — so it rides the sync tick, and goes to a device the moment it is linked
+     * ([only]). iOS/desktop parity: `FeedStore.teachMyDevicesRelayInterfaces`,
+     * `Engine::teach_my_devices_relay_interfaces`.
+     */
+    /** When each of my devices was last told how to reach our relays. */
+    private val relayTaughtAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    /**
+     * One of MY OWN devices just reached this one: make sure it knows how to reach our relays. The
+     * details are otherwise sent once, when a device is linked — exactly when a browser reloads its
+     * page — and a browser that missed that frame had a relay it could not use. At most once a minute
+     * per device; every other frame costs one map lookup. iOS `teachRelayInterfacesOnContact` parity.
+     */
+    private fun teachRelayInterfacesOnContact(senderDevice: String) {
+        val dev = senderDevice.lowercase()
+        val now = System.currentTimeMillis()
+        val last = relayTaughtAt[dev]
+        if (last != null && now - last < 60_000) return
+        if (core.seedless) return
+        if (!runCatching { myOtherDeviceHexes() }.getOrDefault(emptyList()).any { it.equals(dev, ignoreCase = true) }) return
+        relayTaughtAt[dev] = now
+        runCatching { teachMyDevicesRelayInterfaces(only = dev) }
+    }
+
+    private fun teachMyDevicesRelayInterfaces(only: String? = null) {
+        if (core.seedless) return   // a seedless device holds no account key to sign it with
+        val targets = only?.let { listOf(it.lowercase()) } ?: runCatching { myOtherDeviceHexes() }.getOrDefault(emptyList())
+        if (targets.isEmpty()) return
+        val relays = JSONArray()
+        for ((hex, e) in relayEntries.toSortedMap()) {
+            if (hex.length != 64 || e.isS3 || !e.active || e.httpUrls.isEmpty() || e.httpToken.isEmpty()) continue
+            relayAnnounceJson(hex)?.let { relays.put(it) }
+        }
+        if (relays.length() == 0) return
+        val account = runCatching { social.myNodeHex() }.getOrNull()?.lowercase() ?: return
+        val body = account.toByteArray(Charsets.UTF_8) + relays.toString().toByteArray(Charsets.UTF_8)
+        for (dev in targets) {
+            val sealed = runCatching { social.sealCallFrame(dev, Wire.RELAY_INTERFACE.toUByte(), body) }.getOrNull() ?: continue
+            if (sealed.isEmpty()) continue
+            runCatching { sendFrame(Wire.RELAY_INTERFACE, sealed, dev) }
+        }
     }
 
     /** Frame 19: [LP circleId][sealCircleMedia(relay node hex | {"node","urls","token"} JSON)].

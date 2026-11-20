@@ -3,18 +3,25 @@
 //! dirs as the engine tests; commands that restart the app or touch the OS keyring are skipped.
 
 use super::*;
+use crate::engine::DEFAULT_CIRCLE;
 use crate::covtest_util::engine as new_engine;
-use crate::engine::cov_engine_tests::{hello_into, is_foreground, prefs_of};
+use crate::engine::testing::{hello_into, is_foreground, prefs_of};
 use tauri::{Manager, State};
 
-type St<'a> = State<'a, Arc<Engine>>;
+/// What a shared command takes (`haven_client::commands::Eng`).
+type St<'a> = Eng<'a>;
 
 fn with_engine<T>(seed: u8, f: impl FnOnce(St, &Arc<Engine>) -> T) -> T {
     let (e, _paths) = new_engine(seed);
+    f(Eng(&e), &e)
+}
+
+/// For the commands that stay in this crate and take Tauri's managed state.
+fn with_tauri_engine<T>(seed: u8, f: impl FnOnce(State<'_, Arc<Engine>>, &Arc<Engine>) -> T) -> T {
+    let (e, _paths) = new_engine(seed);
     let app = tauri::test::mock_app();
     app.manage(e.clone());
-    let st: St = app.state::<Arc<Engine>>();
-    f(st, &e)
+    f(app.state::<Arc<Engine>>(), &e)
 }
 
 #[test]
@@ -122,9 +129,7 @@ async fn circles_commands_create_rename_admin_and_leave() {
 async fn dm_commands_thread_pin_and_clear() {
     let (a, _) = new_engine(44);
     let (b, _) = new_engine(45);
-    let app = tauri::test::mock_app();
-    app.manage(a.clone());
-    let st: St = app.state::<Arc<Engine>>();
+    let st: St = Eng(&a);
     // Make b a contact of a through the hello handlers.
     a.connect_by_link(b.invite_uri());
     hello_into(&a, &b);
@@ -175,9 +180,7 @@ async fn dm_commands_thread_pin_and_clear() {
 async fn contact_request_commands_approve_dismiss_block() {
     let (a, _) = new_engine(46);
     let (b, _) = new_engine(47);
-    let app = tauri::test::mock_app();
-    app.manage(b.clone());
-    let st: St = app.state::<Arc<Engine>>();
+    let st: St = Eng(&b);
     assert!(!connect_by_link(st.clone(), "garbage".into()));
     hello_into(&b, &a);
     let p = pending(st.clone());
@@ -399,9 +402,7 @@ async fn relay_commands_manage_entries_without_a_network() {
 #[tokio::test]
 async fn async_relay_commands_forget_erase_and_restore() {
     let (e, _) = new_engine(54);
-    let app = tauri::test::mock_app();
-    app.manage(e.clone());
-    let st: St = app.state::<Arc<Engine>>();
+    let st: St = Eng(&e);
     let hex = "cd".repeat(32);
     prefs_of(&e).ensure_relay_entry(&hex, Some("Far"), false, true);
     prefs_of(&e).relays.insert(DEFAULT_CIRCLE.into(), vec![hex.clone()]);
@@ -526,7 +527,7 @@ fn queued_deep_links_are_drained_in_order_exactly_once() {
 #[tokio::test]
 async fn instagram_import_commands_drive_the_runner_state() {
     let _bridge = crate::covtest_util::IGENCODE_LOCK.lock();
-    with_engine(58, |st, _| {
+    with_tauri_engine(58, |st, _| {
         instagram_reset(st.clone());
         assert_eq!(instagram_status()["phase"], "idle");
         instagram_cancel();                                   // no run in flight: harmless

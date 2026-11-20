@@ -157,8 +157,11 @@ Play's internal track) and a **Windows / Linux desktop client** (`desktop/`, Tau
 Rust backend links the core *directly* and the same binary runs headless as your circle's
 relay; Linux + relay ship on GitHub Releases, Windows installers build but the install path
 is still untested on real hardware; see [`docs/WINDOWS-PORT.md`](docs/WINDOWS-PORT.md) and
-[`docs/ROADMAP.md`](docs/ROADMAP.md) for the exact per-platform gaps). The web client was
-abandoned (a browser can't be an iroh peer); `web/` is now just an invite-landing page. See
+[`docs/ROADMAP.md`](docs/ROADMAP.md) for the exact per-platform gaps). There is also a **web client**
+(`web-client/`, the desktop UI over the same engine compiled to WebAssembly): a browser linked as
+one more device of your account, served by — and reaching the network only through — a relay your
+circle runs, off until that relay's owner and each circle turn it on
+([`docs/WEB-PARITY.md`](docs/WEB-PARITY.md)). `web/` is the project website and invite-landing page. See
 [`docs/ROADMAP.md`](docs/ROADMAP.md) and [`apple/README.md`](apple/README.md).
 
 ## Repository layout

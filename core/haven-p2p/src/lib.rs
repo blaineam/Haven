@@ -31,16 +31,19 @@ pub mod device;
 pub mod enroll;
 pub mod friend_invite;
 pub mod groupkey;
+pub mod httpauth;
 pub mod identity;
 pub mod keypackage;
 pub mod link;
 pub mod mediaref;
 pub mod mediavariants;
+pub mod pair;
 pub mod pushbanner;
 pub mod selfsync;
 pub mod social;
 pub mod transport;
 pub mod treekem;
+pub mod webpolicy;
 /// The shared binary wire cursor. Internal plumbing, not part of the public surface —
 /// five modules each held a private copy of it before consolidation.
 pub(crate) mod wire;

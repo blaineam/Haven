@@ -48,7 +48,7 @@ ML-DSA-65 VK) does not fit a scannable QR.
   key: type-24 request / type-25 grant / type-26 full-state (`apple/HavenApp/FeedView.swift:1545-1548`,
   `requestDeviceEnrollment :1566-1579`, `handleDeviceEnrollmentRequest :1604-1625`,
   `handleDeviceEnrollmentGrant :1630-1641`, `pushFullStateToMyDevices :1660-1678`). Android mirror:
-  `android/.../core/HavenNet.kt:898-940`. Desktop mirror: `desktop/src-tauri/src/engine.rs:826-882`
+  `android/.../core/HavenNet.kt:898-940`. Desktop mirror: `core/haven-client/src/engine.rs:826-882`
   (`wire::DEVICE_ENROLL`/`DEVICE_GRANT`).
 - Engine boot after linking: Apple `FeedView.swift:133-163` (`HavenSocial(accountSeed:)` at `:135`,
   `useDeviceIdentity` at `:148`, `registerDevice` at `:160`); Android `HavenNet.kt:233-248`; Desktop

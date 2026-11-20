@@ -90,6 +90,9 @@ class WireTest {
         assertEquals(16, Wire.SDP_OFFER)
         assertEquals(17, Wire.SDP_ANSWER)
         assertEquals(18, Wire.ICE)
+        // The web client's two frames: the same numbers on the desktop (core `wire.rs`) and iOS.
+        assertEquals(37, Wire.RELAY_INTERFACE)
+        assertEquals(38, Wire.PAIR_OFFER)
         assertTrue(true)
     }
 }

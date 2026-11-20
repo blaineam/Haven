@@ -3,7 +3,27 @@
 // when the backend emits `haven:changed`.
 
 const TAURI = window.__TAURI__ || {};
-const invoke = TAURI.core ? TAURI.core.invoke : async () => { throw new Error("Tauri not ready"); };
+// The browser build runs this same file with a host shim in place of Tauri (web-client/web-host.js).
+// A browser is only ever a LINKED device: no account is created or moved into one.
+const HOST_WEB = !!(window.__HAVEN_HOST__ && window.__HAVEN_HOST__.web);
+const hostInvoke = TAURI.core ? TAURI.core.invoke : async () => { throw new Error("Tauri not ready"); };
+// Most commands need nothing but the engine and are shared with the browser build
+// (haven_client::commands); the host exposes them all through ONE entry point, `engine_invoke`.
+// The rest are the host's own (window, files, onboarding, importer). The host says which is which:
+// `engine_invoke` rejects a name it does not have with the fixed string "unknown-command", and
+// that name goes straight to the host from then on.
+const hostOnlyCommands = new Set();
+async function invoke(cmd, args = {}) {
+  if (!hostOnlyCommands.has(cmd)) {
+    try {
+      return await hostInvoke("engine_invoke", { name: cmd, args });
+    } catch (e) {
+      if (e !== "unknown-command") throw e;
+      hostOnlyCommands.add(cmd);
+    }
+  }
+  return hostInvoke(cmd, args);
+}
 const listen = TAURI.event ? TAURI.event.listen : async () => {};
 
 // i18n — strings.js (a plain script loaded before this module) provides t()/tEn()/HAVEN_LANG.
@@ -23,7 +43,8 @@ const HAVEN_LANG = window.HAVEN_LANG || "en";
 const HOST_OS = /Windows|Win64|WOW64/i.test(navigator.userAgent) ? "windows"
   : /Macintosh|Mac OS X/i.test(navigator.userAgent) ? "macos"
   : "linux";
-document.documentElement.dataset.os = HOST_OS;
+// In a browser the tab IS the window: no OS chrome of ours at all, whatever the user agent says.
+document.documentElement.dataset.os = HOST_WEB ? "web" : HOST_OS;
 
 // ---- tiny helpers ----------------------------------------------------------------------
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -145,6 +166,7 @@ window.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeModal
 // Stroked glyphs shaped after the SF Symbols the macOS build names, so the two read as one app.
 // `fill` entries are filled shapes (paperplane.fill, person.2.fill…) — the rest stroke.
 const ICONS = {
+  "globe": { d: "M12 3a9 9 0 100 18 9 9 0 000-18zM3 12h18M12 3c2.6 2.4 4 5.6 4 9s-1.4 6.6-4 9c-2.6-2.4-4-5.6-4-9s1.4-6.6 4-9z" },
   "chevron.down": { d: "M4 8l6 6 6-6" },
   "chevron.right": { d: "M9 5l7 7-7 7" },
   "person.2.fill": { fill: true, d: "M9 11.2a3.4 3.4 0 100-6.8 3.4 3.4 0 000 6.8zm7 .3a2.9 2.9 0 100-5.8 2.9 2.9 0 000 5.8zM9 12.8c-3 0-5.6 1.7-5.6 3.9v1.1a.8.8 0 00.8.8h9.6a.8.8 0 00.8-.8v-1.1c0-2.2-2.6-3.9-5.6-3.9zm7 .2c-.7 0-1.4.1-2 .3 1.2 1 1.9 2.2 1.9 3.4v1.9h4.3a.8.8 0 00.8-.8v-.9c0-2-2.3-3.9-5-3.9z" },
@@ -387,8 +409,14 @@ function syncingPlaceholder(circleId, ref, isVideo) {
 // The #3 placeholder for a deliberately-evicted blob: a tap re-fetches it (media_download clears the
 // eviction first, then pulls it relay-first with a peer fallback). Spinner while pending; "No longer
 // available" + Retry if it hasn't arrived after ~45s (relay/peers don't have it either).
+// In a browser, media over this size is never loaded into the page: a tab has no disk, and the
+// relay cannot decrypt a video to serve it. It is SAVED instead — fetched once, handed to the
+// browser as a file, and dropped. Mirrors `Engine::WEB_LARGE_MEDIA_BYTES`.
+const WEB_SAVE_ONLY_BYTES = 64 * 1024 * 1024;
+
 function evictedPlaceholder(circleId, ref, bytes, isVideo, post) {
   const box = el("div", { class: "media-evicted" });
+  const saveOnly = HOST_WEB && bytes > WEB_SAVE_ONLY_BYTES;
   // A relay's retention swept this, but the AUTHOR probably still has the original. Asking them is
   // the difference between "gone" and "gone from the relay". Nothing to ask for on your own post:
   // you ARE the author, so if the bytes are gone here they're gone everywhere.
@@ -415,12 +443,28 @@ function evictedPlaceholder(circleId, ref, bytes, isVideo, post) {
             : null);
       return;
     }
+    if (saveOnly) {
+      box.replaceChildren(
+        el("button", { class: "btn small primary", onclick: () => save() }, "⬇ " + t("save_to_computer", fmtBytes(bytes))),
+        el("div", { class: "muted small" }, mode === "saved" ? t("saved_to_downloads") : t("too_large_for_browser")));
+      return;
+    }
     box.replaceChildren(
       el("button", { class: "btn small primary", onclick: () => start() },
         "⬇ " + t("download_size", fmtBytes(bytes))),
       el("div", { class: "muted small" }, t("removed_to_save_space")));
   };
+  // The browser-only path for something too large to hold: the host fetches it, gives it to the
+  // browser as a file and lets go of it again. It never becomes a player in the page.
+  const save = async () => {
+    draw("loading");
+    try {
+      await invoke("media_save_to_disk", { circleId, reference: ref, video: !!isVideo });
+      draw("saved");
+    } catch (_) { draw("gone"); }
+  };
   const start = async () => {
+    if (saveOnly) return save();
     draw("loading");
     try { await invoke("media_download", { reference: ref }); } catch (_) {}
     // Poll for arrival; the engine emits haven:changed on success and re-renders the feed, but poll
@@ -1244,6 +1288,8 @@ async function renderFeed() {
   if (upgrade) list.append(upgrade);
   const nudge = await relayNudgeBanner(state.activeCircle, (active || {}).member_count || 0);
   if (nudge) list.append(nudge);
+  const webBlocked = await webBlockedBanner(state.activeCircle);
+  if (webBlocked) list.append(webBlocked);
   list.append(await storiesTray(storyItems));
   if (!items.length) {
     list.append(el("div", { class: "empty" },
@@ -3983,6 +4029,60 @@ async function circleSheet() {
   await manageCircleDialog(circles.find((c) => c.id === state.activeCircle));
 }
 
+// ---- Web access, per circle ---------------------------------------------------------------
+// A browser linked to someone's account reads a circle only when the circle allows web devices
+// (core `webpolicy`): its admins decide for a circle that has a creator, and every member has to
+// agree for one that does not (older circles, direct messages). This is each account's own
+// switch, plus a plain statement of where the circle stands and who it is waiting on.
+async function circleWebAccessSection(circleId, redraw) {
+  const s = await invoke("circle_web_access", { circleId }).catch(() => null);
+  if (!s) return null;   // an engine that predates it
+  const contacts = await invoke("contacts").catch(() => []);
+  const nameOf = (hex) => (contacts.find((c) => c.id_hex.toLowerCase() === hex.toLowerCase()) || {}).name;
+  const chk = el("input", { type: "checkbox", style: "width:auto", id: "cwa-switch" });
+  chk.checked = s.mine;
+  chk.disabled = !s.can_sign;
+  chk.onchange = async () => {
+    const want = chk.checked;
+    const ok = await invoke("set_circle_web_access", { circleId, allow: want }).catch(() => false);
+    if (!ok) { chk.checked = !want; toast(t("cwa_cant")); return; }
+    toast(t("updated_toast"));
+    if (redraw) redraw();
+  };
+  let who;
+  if (s.decided_by_admins) who = s.i_decide ? t("cwa_admin_you") : t("cwa_admin_other");
+  else if (!s.waiting_on.length) who = t("cwa_everyone_done");
+  else {
+    const others = s.waiting_on.map(nameOf).filter(Boolean);
+    const unnamed = s.waiting_on.length - others.length - (s.mine ? 0 : 1);
+    const parts = [...(s.mine ? [] : [t("cwa_you")]), ...others, ...(unnamed > 0 ? [t("cwa_n_others", unnamed)] : [])];
+    who = t("cwa_everyone_waiting", parts.join(", "));
+  }
+  return el("div", { class: "col", style: "gap:4px", id: "cwa" },
+    el("label", { class: "row", style: "gap:8px;align-items:center" }, chk, el("span", { style: "flex:1" }, t("cwa_mine"))),
+    el("div", { class: s.allowed ? "small ok-text" : "muted small", id: "cwa-state" }, s.allowed ? t("cwa_on") : t("cwa_off")),
+    el("div", { class: "muted small" }, who),
+    s.can_sign ? null : el("div", { class: "muted small" }, s.this_is_web ? t("cwa_browser_cant") : t("cwa_linked_cant")),
+    el("div", { class: "muted small", style: "opacity:0.8" }, t("cwa_warn")));
+}
+
+/// In a browser: say why a circle is empty when it is empty because it has not allowed browsers.
+async function webBlockedBanner(circleId) {
+  if (!HOST_WEB) return null;
+  const s = await invoke("circle_web_access", { circleId }).catch(() => null);
+  if (!s || s.allowed) return null;
+  return el("div", { class: "card", id: "cwa-blocked", style: "margin-bottom:10px" },
+    el("div", { style: "font-weight:600" }, t("cwa_blocked_t")),
+    el("div", { class: "muted small", style: "white-space:normal" }, t("cwa_blocked_s")));
+}
+
+/// The web-browser switch for one conversation.
+async function dmWebAccessSheet(dm) {
+  const section = await circleWebAccessSection(dm.id, () => { closeModal(); dmWebAccessSheet(dm); });
+  if (!section) return;
+  sheet(t("cwa_title"), el("div", { class: "col" }, el("div", { class: "muted small" }, dm.name), section));
+}
+
 async function manageCircleDialog(circle) {
   if (!circle) return;
   const isDefault = circle.id === "default";
@@ -4049,6 +4149,7 @@ async function manageCircleDialog(circle) {
     }
   }
   relaySection.append(el("button", { class: "btn small ghost", style: "align-self:flex-start", onclick: () => relaySheet() }, t("manage_relays_link")));
+  const webSection = await circleWebAccessSection(circle.id, () => { closeModal(); manageCircleDialog(circle); });
 
   // The circle's own name (nickname-resolved), not a hardcoded "My Circle" — this sheet manages
   // whichever circle is active.
@@ -4073,6 +4174,8 @@ async function manageCircleDialog(circle) {
     el("label", { class: "muted small", style: "margin-top:6px" }, t("relays_for_circle")),
     el("div", { class: "muted small" }, t("relays_for_circle_hint")),
     relaySection,
+    webSection ? el("label", { class: "muted small", style: "margin-top:6px" }, t("cwa_title")) : null,
+    webSection,
     el("label", { class: "muted small", style: "margin-top:6px" }, t("members_label")),
     memberList,
     isDefault ? null : el("button", { class: "btn danger", style: "margin-top:6px", onclick: async () => {
@@ -5217,6 +5320,8 @@ async function renderThread(root, dm) {
         el("div", { class: "dm-name" }, dm.name),
         presence),
       el("div", { class: "spacer" }),
+      // A conversation is a circle of two with no owner: a browser reads it only if BOTH agree.
+      el("button", { class: "icon-btn glass", id: "dm-web", title: t("cwa_title"), "aria-label": t("cwa_title"), onclick: () => dmWebAccessSheet(dm) }, icon("globe")),
       partner ? el("button", { class: "icon-btn glass", title: t("audio_call"), "aria-label": t("audio_call"), onclick: () => callStart([partner], dm.name, false) }, icon("phone.fill")) : null,
       partner ? el("button", { class: "icon-btn glass", title: t("video_call"), "aria-label": t("video_call"), onclick: () => callStart([partner], dm.name, true) }, icon("video.fill")) : null,
     ),
@@ -5317,7 +5422,7 @@ function makeQrSvg(text) {
   return qr.createSvgTag({ cellSize: 5, margin: 2 });
 }
 
-async function startScan() {
+async function startScan(onCode) {
   const video = el("video", { id: "scan-video", autoplay: "", muted: "", playsinline: "" });
   const canvas = el("canvas", { style: "display:none" });
   const status = el("div", { class: "muted small" }, t("point_camera_qr"));
@@ -5339,7 +5444,9 @@ async function startScan() {
         const code = window.jsQR ? window.jsQR(img.data, img.width, img.height) : null;
         if (code && code.data) {
           stop();
-          invoke("connect_by_link", { uri: code.data.trim() }).then((ok) => toast(ok ? t("invite_sent_short") : t("not_haven_qr")));
+          // Default: a contact's invite. A caller scanning for something else says what to do with it.
+          if (onCode) onCode(code.data.trim());
+          else invoke("connect_by_link", { uri: code.data.trim() }).then((ok) => toast(ok ? t("invite_sent_short") : t("not_haven_qr")));
           return;
         }
       }
@@ -5642,7 +5749,33 @@ async function relaySheet() {
       s3.configured ? el("button", { class: "btn danger small", onclick: async () => { await invoke("erase_relay", { nodeHex: "s3:" + s3.bucket }); await invoke("s3_clear"); toast(t("s3_removed")); renderRelay(); } }, t("remove")) : null,
     ),
   );
-  sheet(t("relays"), el("div", { class: "col", style: "gap:16px" }, hostCard, liveTunnelCard, publicCard, alwaysOn, adoptCard, s3card, headless));
+  // Web access: let circle members link a browser through THIS relay. Shown only where it can
+  // work — a host that ships the web client, and never inside the web client itself.
+  // (A host that does not know the command answers nothing at all: treat that as "not available".)
+  const wa = (HOST_WEB ? null : await invoke("relay_web_access").catch(() => null)) || { available: false };
+  const webCard = (() => {
+    if (!wa.available) return null;
+    const chk = el("input", { type: "checkbox", style: "width:auto" }); chk.checked = !!wa.enabled;
+    chk.addEventListener("change", async () => {
+      try {
+        await invoke("set_relay_web_access", { on: chk.checked });
+        toast(s.hosting ? t("saved_restart_hosting") : t("saved"));
+      } catch (e) { chk.checked = !chk.checked; toast("" + e); }
+    });
+    const live = s.hosting && wa.enabled && s.path_routed && s.live_media_url ? s.live_media_url.replace(/\/+$/, "") + "/app/" : "";
+    return el("div", { class: "card col" },
+      el("h3", {}, t("web_access")),
+      el("div", { class: "muted small", style: "white-space:normal" }, t("web_access_hint")),
+      el("label", { class: "row", style: "gap:8px;align-items:center;margin-top:6px" }, chk, el("span", {}, t("web_access_on"))),
+      live ? el("div", { class: "muted small", style: "word-break:break-all" }, t("web_access_address"), " ", el("span", { style: "color:var(--tint)" }, live)) : null,
+      el("div", { class: "muted small", style: "white-space:normal" }, t("web_access_warn")));
+  })();
+  // A tab cannot listen, so it cannot host: in a browser the sheet is the relays this account
+  // USES (adopt, activate, S3) and none of the hosting controls.
+  const cards = HOST_WEB
+    ? [adoptCard, s3card]
+    : [hostCard, liveTunnelCard, publicCard, webCard, alwaysOn, adoptCard, s3card, headless];
+  sheet(t("relays"), el("div", { class: "col", style: "gap:16px" }, ...cards));
 }
 
 // ---- You / Settings --------------------------------------------------------------------
@@ -6008,8 +6141,9 @@ async function settingsSheet() {
     group(row(t("blocked_people"), "hand.raised.fill", () => blockedSheet())),
     foot(t("blocked_foot")),
 
-    group(row(t("identities"), "icloud", () => identitiesSheet())),
-    foot(t("identities_foot")),
+    // A browser holds one linked device of one account — there are no identities to switch.
+    HOST_WEB ? null : group(row(t("identities"), "icloud", () => identitiesSheet())),
+    HOST_WEB ? null : foot(t("identities_foot")),
 
     group(row(t("devices"), "laptop", () => devicesSheet())),
     foot(t("devices_foot")),
@@ -6043,8 +6177,9 @@ async function settingsSheet() {
     paletteGroup(),
     foot(t("palette_foot")),
 
-    group(row(t("import_from_instagram"), "square.and.arrow.down", () => instagramImportSheet())),
-    foot(t("import_ig_foot")),
+    // The importer reads a multi-gigabyte archive straight off disk by path; a page has no path.
+    HOST_WEB ? null : group(row(t("import_from_instagram"), "square.and.arrow.down", () => instagramImportSheet())),
+    HOST_WEB ? null : foot(t("import_ig_foot")),
 
     group(row(t("advanced"), "wrench", () => advancedSheet())),
     foot(t("advanced_foot")),
@@ -6400,7 +6535,40 @@ async function privacyMediaSheet() {
     el("div", { class: "muted small", style: "font-weight:600" }, t("notification_previews")),
     el("div", { class: "muted small" }, t("notification_previews_hint")),
     el("div", { class: "set-group" }, detailBox),
+    HOST_WEB ? await webPushSection() : null,
   ));
+}
+
+/** BROWSER ONLY: "notify me when Haven is closed" (Web Push). The switch is live only where it can
+ *  work — a browser that supports it, that the person chose to stay linked in, with notifications
+ *  not blocked. Everywhere else the row says, in a line, why not. */
+async function webPushSection() {
+  const st = await invoke("web_push_status").catch(() => ({ supported: false, kept: false, permission: "unsupported", enabled: false }));
+  const why = (code) => ({
+    unsupported: t("wp_unsupported"), session: t("wp_session"), unavailable: t("wp_unavailable"), blocked: t("wp_blocked"),
+  })[code] || String(code);
+  const note = el("div", { class: "muted small", id: "wp-note" },
+    !st.supported ? why("unsupported") : !st.kept ? why("session") : st.permission === "denied" ? why("blocked") : t("wp_hint"));
+  const chk = el("input", { type: "checkbox", style: "width:auto", id: "wp-toggle" });
+  chk.checked = !!st.enabled;
+  chk.disabled = !st.supported || !st.kept || (st.permission === "denied" && !st.enabled);
+  chk.onchange = async () => {
+    const want = chk.checked;
+    chk.disabled = true;
+    try {
+      const now = await invoke("web_push_set", { on: want });
+      chk.checked = !!now.enabled;
+      note.textContent = t("wp_hint");
+      toast(t("saved"));
+    } catch (e) {
+      chk.checked = !want;
+      note.textContent = why(e);
+    } finally { chk.disabled = false; }
+  };
+  return el("div", { class: "col", style: "gap:6px" },
+    el("div", { class: "set-group" },
+      el("label", { class: "set-row", style: "cursor:pointer" }, el("span", { style: "flex:1" }, t("wp_title")), chk)),
+    note);
 }
 
 async function blockedSheet() {
@@ -6735,12 +6903,31 @@ async function enrollDeviceSheet() {
   catch (e) { toast(t("couldnt_create_link_code", e)); return; }
   const qrBox = el("div", { class: "qr-box" });
   try { qrBox.innerHTML = makeQrSvg(ticket); } catch (_) { qrBox.textContent = t("qr_unavailable"); }
+  const pairIn = el("input", { class: "field-capsule", placeholder: "haven-pair:…", style: "width:100%" });
+  const answerPairCode = async (c) => {
+    c = (c || "").trim();
+    if (!/^haven-pair:/i.test(c)) { toast(t("pair_not_a_code")); return; }
+    try {
+      await invoke("enroll_scan_code", { code: c });
+      toast(t("pair_sent"));
+      devicesSheet();
+    } catch (e) { toast(t("pair_failed", e)); }
+  };
   const body = el("div", { class: "col", style: "gap:12px;align-items:center;text-align:center" },
     el("div", { class: "muted small" }, t("enroll_hint")),
     qrBox,
     el("button", { class: "btn small", onclick: async () => { try { await navigator.clipboard.writeText(ticket); toast(t("link_code_copied")); } catch (_) { toast(t("copy_failed")); } } }, t("copy_link_code")),
     el("div", { class: "muted small", style: "word-break:break-all;opacity:0.7" }, ticket),
-    el("div", { class: "muted small" }, t("enroll_approve_hint")));
+    el("div", { class: "muted small" }, t("enroll_approve_hint")),
+    // Scan-to-link, the other way round: a device that cannot scan or be typed into (a browser on
+    // a borrowed computer) shows a `haven-pair:` code of its own, and THIS device answers it. The
+    // request that comes back still waits for Approve in the Devices sheet.
+    el("hr", { style: "width:100%;border:0;border-top:1px solid var(--line);margin:4px 0" }),
+    el("div", { class: "muted small" }, t("pair_scan_hint")),
+    el("div", { class: "row wrap", style: "justify-content:center;width:100%" },
+      el("button", { class: "btn small", onclick: () => startScan(answerPairCode) }, t("pair_scan"))),
+    pairIn,
+    el("button", { class: "btn small", onclick: () => answerPairCode(pairIn.value) }, t("pair_use_code")));
   sheet(t("add_a_device"), body);
 }
 
@@ -7592,9 +7779,23 @@ async function connectPeerIfNeeded(peer) {
   openHairpinForPeer(peer);
   const pc = pcFor(peer);
   if (call.me < peer) {
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    invoke("call_signal", { kind: "offer", sessionId: call.session, to: peer, json: JSON.stringify({ t: "offer", sdp: offer.sdp }) });
+    // ONE offer per connection. This runs from several places (accepting, each re-sent invite,
+    // a roster merge), sometimes at the same moment, and a second `createOffer` on a connection
+    // that already has one — or is already connected — fails ("order of m-lines…") or, worse,
+    // half-applies. Answered already: nothing to do. Offer outstanding: send the SAME offer again
+    // (the first copy may have been lost). Otherwise make it, once.
+    const send = (sdp) => invoke("call_signal", { kind: "offer", sessionId: call.session, to: peer, json: JSON.stringify({ t: "offer", sdp }) });
+    if (pc.currentRemoteDescription || pc.__offering) return;
+    if (pc.signalingState === "have-local-offer" && pc.localDescription) { send(pc.localDescription.sdp); return; }
+    if (pc.signalingState !== "stable") return;
+    pc.__offering = true;
+    try {
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      send(offer.sdp);
+    } finally {
+      pc.__offering = false;
+    }
   }
 }
 
@@ -7702,6 +7903,8 @@ async function onCallEvent(payload) {
       if (!call.localStream) await startMesh();
       const pc = pcFor(c.from);
       const { sdp } = JSON.parse(c.json);
+      // The same offer again (a second copy of the frame): it is already answered.
+      if (pc.signalingState === "stable" && pc.remoteDescription && pc.remoteDescription.sdp === sdp) return;
       await pc.setRemoteDescription({ type: "offer", sdp });
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
@@ -7712,6 +7915,8 @@ async function onCallEvent(payload) {
       if (!validSession(c.sessionId)) return;
       const pc = call.pcs.get(c.from); if (!pc) return;
       const { sdp } = JSON.parse(c.json);
+      // An answer is only meaningful while our offer is outstanding; a second copy is not.
+      if (pc.signalingState !== "have-local-offer") return;
       await pc.setRemoteDescription({ type: "answer", sdp });
       break;
     }
@@ -8318,13 +8523,60 @@ function renderOnboarding() {
     return m;
   };
 
-  const code = el("input", { class: "field-capsule", placeholder: "haven-enroll:… or haven-seed:…", style: "width:100%" });
+  const code = el("input", { class: "field-capsule", placeholder: HOST_WEB ? "haven-enroll:…" : "haven-enroll:… or haven-seed:…", style: "width:100%" });
+  // Browser only: whether this browser keeps the link. Unticked by default — the safe answer on
+  // a machine that is not yours — and decided before anything is stored.
+  const remember = el("input", { type: "checkbox", style: "width:auto;margin-top:2px" });
+  const rememberRow = () => el("label", { class: "row", style: "gap:8px;align-items:flex-start;text-align:left" },
+    remember,
+    el("span", { class: "col", style: "gap:2px" },
+      el("span", {}, t("web_remember")),
+      el("span", { class: "muted small", style: "white-space:normal" }, t("web_remember_hint"))));
+  // Browser only — scan-to-link. A browser on a borrowed computer usually has no camera and
+  // nobody can type a ticket into it from a phone, so it shows a code of its own and a device
+  // that already has the account answers it. One element, made once, so a redraw of this screen
+  // never restarts it; the code is replaced before its ten minutes are up.
+  const pairBox = el("div", { class: "col", style: "align-items:center;gap:8px;width:100%" });
+  let pairStarted = false;
+  const startPair = async () => {
+    if (pairStarted) return;
+    pairStarted = true;
+    const show = async () => {
+      try {
+        const pc = await invoke("pair_begin");
+        const qr = el("div", { class: "qr-box", id: "pair-qr" });
+        try { qr.innerHTML = makeQrSvg(pc); } catch (_) { qr.textContent = t("qr_unavailable"); }
+        pairBox.replaceChildren(
+          el("div", { class: "muted small", style: "white-space:normal" }, t("web_pair_hint")),
+          qr,
+          el("button", { class: "btn small", id: "pair-copy", "data-code": pc, onclick: async () => {
+            try { await navigator.clipboard.writeText(pc); toast(t("web_pair_copied")); } catch (_) { toast(t("copy_failed")); }
+          } }, t("web_pair_copy")),
+          el("div", { class: "muted small", style: "white-space:normal" }, t("web_pair_or")));
+      } catch (e) {
+        console.error("pair_begin failed", e);
+        pairBox.replaceChildren(el("div", { class: "muted small", style: "white-space:normal" }, t("web_pair_unavailable")));
+      }
+    };
+    listen("haven:pair-offer", async () => {
+      pairBox.replaceChildren(el("div", { class: "muted small" }, t("web_pair_answered")));
+      Terms.accept();
+      try { await invoke("pair_finish", { remember: remember.checked }); }
+      catch (e) { toast(t("couldnt_link", e)); }
+    });
+    await show();
+    setInterval(() => { if (pairBox.isConnected) show(); }, 8 * 60 * 1000);
+  };
   const linkBox = () => el("div", { class: "col", style: "width:100%;gap:8px" },
-    el("div", { class: "muted small" }, linkMode === "move"
+    HOST_WEB ? el("div", { class: "muted small", style: "white-space:normal" }, t("web_trust_note")) : null,
+    HOST_WEB ? rememberRow() : null,
+    HOST_WEB ? (startPair(), pairBox) : null,
+    HOST_WEB ? null : el("div", { class: "muted small" }, linkMode === "move"
       ? t("link_move_hint")
       : t("link_add_hint")),
     code,
-    el("button", { class: "btn ghost small", style: "align-self:flex-start", onclick: () => { showLink = false; draw(); } }, t("back_arrow")),
+    // In a browser linking is the only path, so there is nothing to go back to.
+    HOST_WEB ? null : el("button", { class: "btn ghost small", style: "align-self:flex-start", onclick: () => { showLink = false; draw(); } }, t("back_arrow")),
     el("button", { class: "btn primary", style: "width:100%", onclick: async () => {
       const c = code.value.trim();
       if (!c) { toast(t("paste_link_code_first")); return; }
@@ -8335,7 +8587,8 @@ function renderOnboarding() {
         // seed-drop S4: the new secure link (`haven-enroll:`) gives this device its OWN key +
         // credential + granted self-sync key and NEVER the master seed. The legacy `haven-seed:` /
         // raw-seed transfer still works (an old primary in the wild) via onboard_link.
-        if (/^haven-enroll:/i.test(c)) await invoke("onboard_link_seedless", { ticket: c });
+        if (/^haven-enroll:/i.test(c)) await invoke("onboard_link_seedless", HOST_WEB ? { ticket: c, remember: remember.checked } : { ticket: c });
+        else if (HOST_WEB) { toast(t("web_link_only")); return; }   // never a seed in a browser
         else await invoke("onboard_link", { code: c });
       }
       catch (e) { toast(t("couldnt_link", e)); }
@@ -8361,7 +8614,7 @@ function renderOnboarding() {
     el("h1", { style: "font-size:34px;font-weight:800;margin:6px 0 0" }, t("welcome_haven")),
     el("p", { class: "muted", style: "margin:0;white-space:pre-line" },
       t("welcome_sub")),
-    showLink ? linkBox()
+    (showLink || HOST_WEB) ? linkBox()
              : el("div", { class: "col", style: "width:100%;gap:10px" },
                  choice(t("new_to_haven_t"),
                         t("new_to_haven_s"),
@@ -8439,7 +8692,8 @@ function renderOnboarding() {
     next.disabled = needName;
     next.style.opacity = needName ? 0.5 : 1;
     dots.innerHTML = "";
-    for (let i = 0; i < 4; i++) dots.appendChild(el("div", { class: "dot" + (i === step ? " on" : "") }));
+    // A browser has one step (link), so there is no progress to show.
+    for (let i = 0; i < (HOST_WEB ? 0 : 4); i++) dots.appendChild(el("div", { class: "dot" + (i === step ? " on" : "") }));
   }
 
   const card = el("div", { class: "col", style: "max-width:520px;width:100%;align-items:center;gap:14px" },
@@ -8729,7 +8983,15 @@ async function boot() {
   // A resumed import (see igimport::resume_if_needed) starts before this webview exists, so the
   // first event can land with nobody listening — ask once at boot rather than showing nothing.
   invoke("instagram_status").then((s) => { IG.status = s; renderImportPill(s); }).catch(() => {});
-  listen("haven:call", (e) => onCallEvent(e.payload));
+  // ONE call event at a time. `onCallEvent` awaits between reading the peer connection's state and
+  // changing it, and the same signalling frame routinely arrives twice (direct, and forwarded by a
+  // relay). Run concurrently, two copies of an offer each set the remote description and each
+  // tried to set a local answer — the second one into a connection already back in "stable",
+  // which throws. A queue keeps every event's read-then-write whole, and nothing it throws is
+  // left unhandled.
+  let callEvents = Promise.resolve();
+  listen("haven:call", (e) =>
+    (callEvents = callEvents.then(() => onCallEvent(e.payload)).catch((err) => console.warn("call event failed", err))));
   // QA driver → webview: deterministic call-UI actions (qa.rs "ui" op). Calls live in the page on
   // desktop, so this is the only way a test can make this leg PLACE or ANSWER one.
   listen("haven:qa-ui", (e) => {
@@ -8784,6 +9046,58 @@ async function boot() {
   // and it is the same hop the picker path has always paid on the way OUT — every re-encoded blob
   // already crosses this boundary as base64. Correctness over the allocation.
   const MEDIA_RE = { img: /\.(jpe?g|png|gif|heic|heif|webp|bmp|tiff?)$/i, vid: /\.(mp4|mov|m4v|webm|avi|mkv|3gp)$/i };
+  // One dropped file → the composer, through the picker's own sanitize pipeline (re-encode, no
+  // EXIF/GPS). Shared by the desktop drop (a path, read back from disk) and the browser drop (a
+  // File the page was handed directly).
+  const attachDroppedFile = async (file, isVideo) => {
+    const b64 = await sanitizeMediaFile(file, isVideo);
+    if (b64 === null) return;                          // refused — no ref, no attachment entry
+    const circleId = state.composerCircle || state.activeCircle;
+    const ref = await invoke("add_media", { circleId, dataBase64: b64, isVideo });
+    const thumbRef = isVideo ? null : await mintThumb(b64, circleId);
+    await state.composerAdd(ref, isVideo, false, thumbRef);
+  };
+  if (HOST_WEB) {
+    // A browser hands the page File objects, never paths, and navigates AWAY to a dropped file
+    // unless every dragover/drop is cancelled — so they are cancelled for the whole window, even
+    // when no composer is open (losing the session to a stray drop would be worse than ignoring it).
+    const hasFiles = (e) => Array.from(e.dataTransfer?.types || []).includes("Files");
+    let depth = 0;
+    window.addEventListener("dragenter", (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      depth++;
+      if (typeof state.composerAdd === "function") document.body.classList.add("drop-target");
+    });
+    window.addEventListener("dragover", (e) => { if (hasFiles(e)) e.preventDefault(); });
+    window.addEventListener("dragleave", (e) => {
+      if (!hasFiles(e)) return;
+      depth = Math.max(0, depth - 1);
+      if (!depth) document.body.classList.remove("drop-target");
+    });
+    window.addEventListener("drop", async (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      depth = 0;
+      document.body.classList.remove("drop-target");
+      if (typeof state.composerAdd !== "function") return;
+      for (const file of Array.from(e.dataTransfer.files || [])) {
+        const isVideo = /^video\//.test(file.type) || MEDIA_RE.vid.test(file.name);
+        if (!isVideo && !/^image\//.test(file.type) && !MEDIA_RE.img.test(file.name)) continue;
+        const maxBytes = isVideo ? MEDIA_TARGETS.MAX_SOURCE_BYTES_VIDEO : MEDIA_TARGETS.MAX_SOURCE_BYTES_STILL;
+        if (file.size > maxBytes) {
+          toast(t("over_limit", isVideo ? t("video_word") : t("photo_word"), fmtMB(maxBytes)));
+          continue;
+        }
+        try {
+          await attachDroppedFile(file, isVideo);
+        } catch (err) {
+          console.error("drop ingest failed", file.name, err);
+          toast(t("couldnt_attach_file"));
+        }
+      }
+    });
+  }
   listen("tauri://drag-enter", () => document.body.classList.add("drop-target"));
   listen("tauri://drag-leave", () => document.body.classList.remove("drop-target"));
   listen("tauri://drag-drop", async (e) => {
@@ -8802,12 +9116,7 @@ async function boot() {
         const buf = new Uint8Array(bin.length);
         for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
         const file = new File([buf], got.name, { type: isVideo ? "video/*" : "image/*" });
-        const b64 = await sanitizeMediaFile(file, isVideo);
-        if (b64 === null) continue;                      // refused — no ref, no attachment entry
-        const circleId = state.composerCircle || state.activeCircle;
-        const ref = await invoke("add_media", { circleId, dataBase64: b64, isVideo });
-        const thumbRef = isVideo ? null : await mintThumb(b64, circleId);
-        await state.composerAdd(ref, isVideo, false, thumbRef);
+        await attachDroppedFile(file, isVideo);
       } catch (err) {
         console.error("drop ingest failed", p, err);
         // The Rust side enforces the same size cap before it reads, so name that reason explicitly

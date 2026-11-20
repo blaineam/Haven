@@ -793,6 +793,50 @@ test('circles: per-circle relays can be toggled from the manage sheet', async ()
   assert.deepEqual(J(lastCall(app, 'set_circle_relay').args), { nodeHex: HEX('e'), circleId: 'default', on: true });
 });
 
+test('circles: the web-browser switch says where the circle stands, and only an engine that knows it shows it', async () => {
+  // An engine that predates per-circle consent: no section at all.
+  const old = await boot();
+  await click(old.app, '#tb-right button.icon-btn');
+  assert.equal(old.app.q('#cwa'), null);
+
+  // A circle nobody owns, nobody has agreed yet: off, waiting on me and one person I cannot name.
+  const waiting = { allowed: false, mine: false, can_sign: true, decided_by_admins: false, i_decide: true, waiting_on: [ME, HEX('7')], this_is_web: false };
+  const { app } = await boot({ be: { circle_web_access: waiting, set_circle_web_access: true } });
+  await click(app, '#tb-right button.icon-btn');
+  const text = app.q('#cwa').textContent;
+  assert.match(text, /Off: browsers get nothing/);
+  assert.match(text, /Everyone in this circle has to agree\. Still waiting on: you, 1 more\./);
+  assert.match(text, /not taken back/, 'what turning it off cannot undo is said on the switch');
+  const box = app.q('#cwa-switch');
+  assert.ok(!box.checked && !box.disabled);
+  box.checked = true;
+  box.dispatchEvent(new app.ctx.Event('change', { bubbles: true }));
+  await app.settle();
+  assert.deepEqual(J(lastCall(app, 'set_circle_web_access').args), { circleId: 'default', allow: true });
+});
+
+test('circles: the web-browser switch is locked on a device that cannot sign, and a refusal is not shown as done', async () => {
+  // A linked device (no account key): the switch shows the account's position but cannot move it.
+  const linked = { allowed: true, mine: true, can_sign: false, decided_by_admins: true, i_decide: false, waiting_on: [], this_is_web: false };
+  const a = await boot({ be: { circle_web_access: linked } });
+  await click(a.app, '#tb-right button.icon-btn');
+  assert.ok(a.app.q('#cwa-switch').checked && a.app.q('#cwa-switch').disabled);
+  assert.match(a.app.q('#cwa').textContent, /On: browsers that members have linked/);
+  assert.match(a.app.q('#cwa').textContent, /admins decide/);
+  assert.match(a.app.q('#cwa').textContent, /primary device/);
+
+  // The engine says no (it could not sign): the switch goes back and says so.
+  const mine = { allowed: false, mine: false, can_sign: true, decided_by_admins: true, i_decide: true, waiting_on: [], this_is_web: false };
+  const b = await boot({ be: { circle_web_access: mine, set_circle_web_access: false } });
+  await click(b.app, '#tb-right button.icon-btn');
+  const box = b.app.q('#cwa-switch');
+  box.checked = true;
+  box.dispatchEvent(new b.app.ctx.Event('change', { bubbles: true }));
+  await b.app.settle();
+  assert.equal(box.checked, false);
+  assert.match(b.app.q('#toast').textContent, /can't change that/);
+});
+
 // ── people: connect sheet, requests, contacts ──────────────────────────────────────────────────
 test('connect: pending requests badge the tab and the banner opens the review sheet', async () => {
   const { app, s } = await boot({ state: { ...withDm().state, pending: [{ id_hex: HEX('c'), name: 'Cy', verify_hex: 'f'.repeat(64) }] } });
@@ -962,6 +1006,38 @@ test('relays: hosting starts and stops, and shows the link and live tunnel while
   assert.match(routed.app.q('#modal-root').textContent, /one\.example/);
 });
 
+test('relays: web access is offered only by a host that ships the web client, and is a plain switch', async () => {
+  // A build without the web client (or an older host that does not know the command): no card.
+  const without = await boot();
+  await openSettingsRow(without.app, /Relays/);
+  assert.doesNotMatch(without.app.q('#modal-root').textContent, /Web access/);
+
+  // Available, off, hosting on one origin: the card, the warning, no address until it is on.
+  const off = await boot({ be: {
+    relay_web_access: { available: true, enabled: false },
+    relay_status: { hosting: true, started: true, internet_active: true, relay_link: null, live_media_url: 'https://one.example/', live_derp_url: null, path_routed: true },
+  } });
+  await openSettingsRow(off.app, /Relays/);
+  const text = off.app.q('#modal-root').textContent;
+  assert.match(text, /Web access/);
+  assert.match(text, /could change it/, 'the trust warning is on the card');
+  assert.doesNotMatch(text, /one\.example\/app\//, 'no address while it is off');
+  const box = [...off.app.qa('#modal-root input[type=checkbox]')].find((b) => b.parentElement.textContent.includes('Offer Haven in a browser'));
+  assert.ok(box && !box.checked);
+  box.checked = true;
+  box.dispatchEvent(new off.app.ctx.Event('change'));
+  await off.app.settle();
+  assert.equal(lastCall(off.app, 'set_relay_web_access').args.on, true);
+
+  // On: the address members open is the front door's /app/.
+  const on = await boot({ be: {
+    relay_web_access: { available: true, enabled: true },
+    relay_status: { hosting: true, started: true, internet_active: true, relay_link: null, live_media_url: 'https://one.example/', live_derp_url: null, path_routed: true },
+  } });
+  await openSettingsRow(on.app, /Relays/);
+  assert.match(on.app.q('#modal-root').textContent, /https:\/\/one\.example\/app\//);
+});
+
 test('relays: the front-door mode and URLs are saved together; token entry follows the mode', async () => {
   const { app } = await boot();
   await openSettingsRow(app, /Relays/);
@@ -1105,6 +1181,38 @@ test('devices: minting a link code can fail and says why', async () => {
   assert.match(app.q('#toast').textContent, /no seed/);
 });
 
+test('devices: a code another device shows is answered from Add a device, and only if it is one', async () => {
+  const roster = { enabled: true, this_device_authorized: true, devices: [] };
+  const { app } = await boot({ be: { device_roster: roster, enroll_mint_ticket: 'haven-enroll:TICKET123', enroll_scan_code: null } });
+  await openSettingsRow(app, /Devices/);
+  await click(app, modalBtn(app, /secure|Add a device|Add device/i));
+  const box = [...app.qa('#modal-root input.field-capsule')].find((i) => /haven-pair/.test(i.getAttribute('placeholder') || ''));
+  assert.ok(box, 'there is a field for the other device\'s code');
+  assert.ok(modalBtn(app, /Scan its code/i), 'and a camera scan');
+  // A ticket, a seed or nothing is not a device code: nothing is sent.
+  for (const bad of ['', 'haven-enroll:TICKET123', 'haven-seed:XYZ']) {
+    box.value = bad;
+    await click(app, modalBtn(app, /Use this code/i));
+    assert.equal(lastCall(app, 'enroll_scan_code'), undefined, `"${bad}" is not sent`);
+    assert.match(app.q('#toast').textContent, /not a Haven device code/i);
+  }
+  box.value = '  haven-pair:CODE  ';
+  await click(app, modalBtn(app, /Use this code/i));
+  assert.equal(lastCall(app, 'enroll_scan_code').args.code, 'haven-pair:CODE');
+  assert.match(app.q('#toast').textContent, /Approve the device/i);
+});
+
+test('devices: an unreachable device is reported, not swallowed', async () => {
+  const roster = { enabled: true, this_device_authorized: true, devices: [] };
+  const { app } = await boot({ be: { device_roster: roster, enroll_mint_ticket: 'haven-enroll:T', enroll_scan_code: () => { throw new Error('keep its page open'); } } });
+  await openSettingsRow(app, /Devices/);
+  await click(app, modalBtn(app, /secure|Add a device|Add device/i));
+  const box = [...app.qa('#modal-root input.field-capsule')].find((i) => /haven-pair/.test(i.getAttribute('placeholder') || ''));
+  box.value = 'haven-pair:CODE';
+  await click(app, modalBtn(app, /Use this code/i));
+  assert.match(app.q('#toast').textContent, /keep its page open/);
+});
+
 test('devices: relay-history card shows progress while running and a summary when done', async () => {
   const running = { state: 'scanning', circles_done: 1, circles_total: 3, entries_checked: 10, entries_found: 40, fraction: 0.25 };
   const { app } = await boot({ be: { device_roster: { enabled: false, this_device_authorized: false, devices: [] }, relay_history_status: running } });
@@ -1172,6 +1280,64 @@ test('advanced: storage limits save, unused media is cleaned, and the manage-med
   const pinnedRow = [...app.qa('#modal-root .list-item')].find((r) => /Work/.test(r.textContent));
   await click(app, pinnedRow.querySelector('button'));
   assert.equal(lastCall(app, 'media_unpin').args.refs[0], 'vid_pin');
+});
+
+// ── Web Push: "notify me when Haven is closed" (the browser client only) ────────────────────────
+
+const WP_OK = { supported: true, kept: true, permission: 'default', enabled: false };
+const wpBoot = (be) => boot({ host: { web: true }, be });
+const wpToggle = async (app, on) => {
+  const chk = app.q('#wp-toggle');
+  chk.checked = on;
+  chk.dispatchEvent(new app.ctx.Event('change', { bubbles: true }));
+  await app.settle();
+  return chk;
+};
+
+test('web push: the desktop app has no such switch; a browser does, off until asked for', async () => {
+  const desktop = await boot();
+  await openSettingsRow(desktop.app, /Privacy/);
+  assert.equal(desktop.app.q('#wp-toggle'), null);
+  assert.equal(lastCall(desktop.app, 'web_push_status'), undefined, 'the desktop app never asks');
+
+  const { app } = await wpBoot({ web_push_status: WP_OK, web_push_set: ({ on }) => ({ ...WP_OK, permission: 'granted', enabled: on }) });
+  await openSettingsRow(app, /Privacy/);
+  const chk = app.q('#wp-toggle');
+  assert.ok(chk && !chk.checked && !chk.disabled);
+  assert.match(app.q('#wp-note').textContent, /never who or what/, 'it says what the alert will and will not show');
+
+  assert.equal((await wpToggle(app, true)).checked, true);
+  assert.deepEqual(J(lastCall(app, 'web_push_set').args), { on: true });
+  assert.equal((await wpToggle(app, false)).checked, false);
+  assert.deepEqual(J(lastCall(app, 'web_push_set').args), { on: false });
+});
+
+test('web push: where it cannot work the switch is off and the row says why', async () => {
+  for (const [status, why] of [
+    [{ supported: false, kept: true, permission: 'unsupported', enabled: false }, /cannot show notifications/],
+    [{ ...WP_OK, kept: false }, /chose to stay linked/],
+    [{ ...WP_OK, permission: 'denied' }, /blocked for this site/],
+  ]) {
+    const { app } = await wpBoot({ web_push_status: status });
+    await openSettingsRow(app, /Privacy/);
+    assert.equal(app.q('#wp-toggle').disabled, true, JSON.stringify(status));
+    assert.match(app.q('#wp-note').textContent, why);
+  }
+  // Already on in a browser whose permission was since revoked: it can still be turned OFF.
+  const { app } = await wpBoot({ web_push_status: { ...WP_OK, permission: 'denied', enabled: true } });
+  await openSettingsRow(app, /Privacy/);
+  assert.equal(app.q('#wp-toggle').disabled, false);
+});
+
+test('web push: a refusal puts the switch back and says why', async () => {
+  for (const [code, why] of [['unavailable', /Not available right now/], ['blocked', /blocked for this site/], ['session', /chose to stay linked/]]) {
+    const { app } = await wpBoot({ web_push_status: WP_OK, web_push_set: () => { throw code; } });
+    await openSettingsRow(app, /Privacy/);
+    const chk = await wpToggle(app, true);
+    assert.equal(chk.checked, false, code);
+    assert.equal(chk.disabled, false);
+    assert.match(app.q('#wp-note').textContent, why);
+  }
 });
 
 test('privacy & media: the toggles write through to the backend', async () => {
@@ -1670,6 +1836,40 @@ test('media tiles: a blob that has not arrived shows a loading box that polls, t
   assert.ok(!box(), 'the placeholder is replaced once the bytes land');
 });
 
+test('media tiles: in a browser a very large video is saved to the computer, never loaded into the page', async () => {
+  const BIG = 300 * 1024 * 1024;
+  const feed = { feeds: { default: [BO_POST({ media: ['vid_big'], reactions: [] })] } };
+  const box = (app) => app.q('.card[data-post="bp1"] .media-evicted');
+
+  // The desktop app has a disk: the same video is an ordinary Download there.
+  const desktop = await boot({ state: feed, be: { media_data_url: null, media_evicted_size: BIG, media_is_wanted: false } });
+  assert.match(box(desktop.app).textContent, /Download/);
+  assert.doesNotMatch(box(desktop.app).textContent, /Too large/);
+
+  let saved = 0;
+  const { app } = await boot({ host: { web: true }, state: feed, be: {
+    media_data_url: null, media_evicted_size: BIG, media_is_wanted: false, media_save_to_disk: () => { saved += 1; },
+  } });
+  assert.match(box(app).textContent, /Save to this computer \(300(\.0)? MB\)/);
+  assert.match(box(app).textContent, /Too large to play in a browser/);
+  await click(app, box(app).querySelector('button'));
+  assert.equal(saved, 1);
+  assert.deepEqual(J(lastCall(app, 'media_save_to_disk').args), { circleId: 'default', reference: 'vid_big', video: true });
+  assert.equal(lastCall(app, 'media_download'), undefined, 'the page never asks for it as something to display');
+  assert.equal(app.calls.filter((c) => c.cmd === 'media_data_url' && c.args.reference === 'vid_big').length <= 1, true, 'and never polls for it as a player');
+  assert.match(box(app).textContent, /Saved to your downloads/);
+  assert.ok(box(app).querySelector('button'), 'it can be saved again');
+
+  // An ordinary video in a browser is still an ordinary Download, and a failed save says so.
+  const small = await boot({ host: { web: true }, state: feed, be: { media_data_url: null, media_evicted_size: 20 * 1024 * 1024, media_is_wanted: false } });
+  assert.doesNotMatch(box(small.app).textContent, /Save to this computer/);
+  const failing = await boot({ host: { web: true }, state: feed, be: {
+    media_data_url: null, media_evicted_size: BIG, media_is_wanted: false, media_save_to_disk: () => { throw 'unavailable'; },
+  } });
+  await click(failing.app, box(failing.app).querySelector('button'));
+  assert.match(box(failing.app).textContent, /no longer available/i);
+});
+
 test('media tiles: a deliberately evicted blob offers a sized Download instead of silently refetching', async () => {
   const { app, be } = await boot({ state: { feeds: { default: [BO_POST({ media: ['img_gone'], reactions: [] })] } }, be: { media_data_url: null, media_evicted_size: 3_500_000, media_is_wanted: false } });
   const box = () => app.q('.card[data-post="bp1"] .media-evicted');
@@ -1925,8 +2125,39 @@ test('calls: the callee side answers an offer and applies ICE candidates only fo
   assert.equal(pc.ice.length, 1);
   await ev(app, 'ice', { sessionId: 'stale', json: JSON.stringify({ c: 'late' }) });
   assert.equal(pc.ice.length, 1);
+  // The same offer delivered again (direct, and forwarded by a relay) is not answered twice — a
+  // real connection is already back in "stable", and a second local answer there throws.
+  const answers = () => app.calls.filter((c) => c.cmd === 'call_signal' && c.args.kind === 'answer').length;
+  const before = answers();
+  await ev(app, 'offer', { json: JSON.stringify({ t: 'offer', sdp: 'their-offer' }) });
+  assert.equal(answers(), before, 'a duplicate offer is ignored');
+  // An answer with no offer of ours outstanding is not applied (a real connection refuses it).
   await ev(app, 'answer', { json: JSON.stringify({ sdp: 'their-answer' }) });
-  assert.equal(pc.remote.sdp, 'their-answer');
+  assert.equal(pc.remote.sdp, 'their-offer');
+});
+
+test('calls: one offer per connection — repeated asks re-send the same offer, and an answered one sends none', async () => {
+  const { app } = await callOn();
+  await app.ev(`callStart([${JSON.stringify(BO)}], "Bo", false)`);
+  await ev(app, 'accept', { sessionId: callState(app).session });
+  const offers = () => app.calls.filter((c) => c.cmd === 'call_signal' && c.args.kind === 'offer');
+  const first = offers();
+  assert.equal(first.length, 1, 'the smaller id makes the one offer');
+  {
+    const sdp = JSON.parse(first[0].args.json).sdp;
+    // The invite is re-sent while unanswered: the offer goes again, byte for byte, never a new one.
+    await ev(app, 'accept', { sessionId: callState(app).session });
+    assert.ok(offers().every((o) => JSON.parse(o.args.json).sdp === sdp), 'only ever the same offer');
+    const pc = app.rtc.at(-1);
+    await ev(app, 'answer', { sessionId: callState(app).session, json: JSON.stringify({ sdp: 'their-answer' }) });
+    assert.equal(pc.remote.sdp, 'their-answer');
+    const n = offers().length;
+    await ev(app, 'accept', { sessionId: callState(app).session });
+    assert.equal(offers().length, n, 'an answered connection is not offered again');
+    // A second copy of the answer is ignored rather than thrown on.
+    await ev(app, 'answer', { sessionId: callState(app).session, json: JSON.stringify({ sdp: 'other' }) });
+    assert.equal(pc.remote.sdp, 'their-answer');
+  }
 });
 
 test('calls: a peer hanging up the last other participant ends the call; a stale BYE is ignored', async () => {

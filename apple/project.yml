@@ -166,7 +166,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.blaineam.kith
         GENERATE_INFOPLIST_FILE: NO
-        MARKETING_VERSION: "2.1.4"
+        MARKETING_VERSION: "2.2.0"
         CURRENT_PROJECT_VERSION: "641"
         IPHONEOS_DEPLOYMENT_TARGET: "17.0"
         # One alternate icon per non-default palette (docs/PALETTES.md); UIApplication.setAlternateIconName.
@@ -256,6 +256,12 @@ targets:
           - $(SRCROOT)/Scripts/embed-cloudflared.sh
         outputFiles:
           - $(TARGET_BUILD_DIR)/$(FULL_PRODUCT_NAME)/Contents/Helpers/cloudflared
+      # Haven web client → Contents/Resources/web-client, when web-client/dist has been built
+      # (web-client/build.sh). Optional: without it the app has no "Web access" switch.
+      - path: Scripts/embed-web-client.sh
+        name: Embed web client
+        basedOnDependencyAnalysis: false
+        showEnvVars: false
       # LAST: drop the architectures the app is not built for from the embedded frameworks.
       # ARCHS[sdk=macosx*] = arm64 thins what Xcode links, but the upstream WebRTC binary is
       # copied out of its xcframework WHOLE (arm64 + x86_64, ~24 MB). Ported from Enter Space;
@@ -276,7 +282,7 @@ targets:
         PRODUCT_NAME: Haven
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         GENERATE_INFOPLIST_FILE: NO
-        MARKETING_VERSION: "2.1.4"
+        MARKETING_VERSION: "2.2.0"
         CURRENT_PROJECT_VERSION: "641"
         MACOSX_DEPLOYMENT_TARGET: "14.0"
         # OFF so the embed/codesign script can write into the .app and invoke /usr/bin/codesign
@@ -324,7 +330,7 @@ targets:
         LM_SKIP_METADATA_EXTRACTION: YES
         PRODUCT_MODULE_NAME: HavenNotificationService
         GENERATE_INFOPLIST_FILE: NO
-        MARKETING_VERSION: "2.1.4"
+        MARKETING_VERSION: "2.2.0"
         CURRENT_PROJECT_VERSION: "641"
         IPHONEOS_DEPLOYMENT_TARGET: "17.0"
         ENABLE_USER_SCRIPT_SANDBOXING: YES
@@ -359,7 +365,7 @@ targets:
         LM_SKIP_METADATA_EXTRACTION: YES
         PRODUCT_MODULE_NAME: HavenBroadcast
         GENERATE_INFOPLIST_FILE: NO
-        MARKETING_VERSION: "2.1.4"
+        MARKETING_VERSION: "2.2.0"
         CURRENT_PROJECT_VERSION: "641"
         IPHONEOS_DEPLOYMENT_TARGET: "17.0"
         ENABLE_USER_SCRIPT_SANDBOXING: YES
@@ -412,7 +418,7 @@ targets:
         LM_SKIP_METADATA_EXTRACTION: YES
         PRODUCT_MODULE_NAME: HavenShareExtension
         GENERATE_INFOPLIST_FILE: NO
-        MARKETING_VERSION: "2.1.4"
+        MARKETING_VERSION: "2.2.0"
         CURRENT_PROJECT_VERSION: "641"
         IPHONEOS_DEPLOYMENT_TARGET: "17.0"
         ENABLE_USER_SCRIPT_SANDBOXING: YES
@@ -461,7 +467,7 @@ targets:
         LM_SKIP_METADATA_EXTRACTION: YES
         PRODUCT_MODULE_NAME: HavenIntents
         GENERATE_INFOPLIST_FILE: NO
-        MARKETING_VERSION: "2.1.4"
+        MARKETING_VERSION: "2.2.0"
         CURRENT_PROJECT_VERSION: "641"
         IPHONEOS_DEPLOYMENT_TARGET: "17.0"
         ENABLE_USER_SCRIPT_SANDBOXING: YES
@@ -723,7 +729,7 @@ targets:
         PRODUCT_NAME: HavenUITestHost
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         GENERATE_INFOPLIST_FILE: NO
-        MARKETING_VERSION: "2.1.4"
+        MARKETING_VERSION: "2.2.0"
         CURRENT_PROJECT_VERSION: "641"
         MACOSX_DEPLOYMENT_TARGET: "14.0"
         "EXCLUDED_ARCHS[sdk=macosx*]": x86_64
@@ -821,7 +827,7 @@ targets:
         # iOS app's Haven.app; the user-facing name is still "Haven" via CFBundleDisplayName.
         PRODUCT_NAME: HavenWatch
         GENERATE_INFOPLIST_FILE: NO
-        MARKETING_VERSION: "2.1.4"
+        MARKETING_VERSION: "2.2.0"
         # Keep in lock-step with the host iOS app's build number (Apple requires an embedded
         # watch app to share the companion's version/build).
         CURRENT_PROJECT_VERSION: "641"

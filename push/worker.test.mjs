@@ -572,3 +572,289 @@ test('/call wakes Android with a short-lived data message and does not send its 
     assert.equal(fcm.calls.filter((c) => onHost(c.url, 'apple.com')).length, 0);
   } finally { fcm.restore(); }
 });
+
+// ── Web Push (browsers) ──────────────────────────────────────────────────────────────────────────
+//
+// A browser holds no account key: it registers with its DEVICE key plus the credential the
+// account signed for that device. `webDevice` builds exactly what the core produces
+// (core/haven-p2p/src/device.rs `DeviceCredential::signing_bytes`): the signed bytes and the
+// Ed25519 half of the account's signature over them.
+import { createPublicKey, verify as cryptoVerify } from 'node:crypto';
+
+const vapidPair = generateKeyPairSync('ec', { namedCurve: 'P-256' });
+const vapidJwk = vapidPair.privateKey.export({ format: 'jwk' });
+const VAPID_PUBLIC = Buffer.concat([Buffer.from([4]), Buffer.from(vapidJwk.x, 'base64url'), Buffer.from(vapidJwk.y, 'base64url')]).toString('base64url');
+const webEnv = () => ({ ...fakeEnv(), VAPID_PUBLIC_KEY: VAPID_PUBLIC, VAPID_PRIVATE_KEY: vapidJwk.d, VAPID_SUBJECT: 'https://haven.example/contact' });
+
+function edIdentity() {
+  const { publicKey, privateKey } = generateKeyPairSync('ed25519');
+  const raw = Buffer.from(publicKey.export({ format: 'der', type: 'spki' }).subarray(-32));
+  return { raw, hex: raw.toString('hex'), signRaw: (bytes) => edSign(null, bytes, privateKey) };
+}
+
+/// A device the account has linked. `name` decides whether it is a web device ("🌐 …").
+function webDevice(account, name = '🌐 Chrome on Mac') {
+  const dev = edIdentity();
+  const nameB = Buffer.from(name, 'utf8');
+  const head = Buffer.alloc(12);
+  head.writeBigUInt64LE(1700000000n, 0);
+  head.writeUInt32LE(nameB.length, 8);
+  // The bundle is ed25519(32) ‖ x25519(32) ‖ post-quantum keys; only its first 32 bytes matter here.
+  const bundle = Buffer.concat([dev.raw, Buffer.alloc(200, 7)]);
+  const signed = Buffer.concat([Buffer.from('haven-device-cred-v1'), account.raw, head, nameB, bundle]);
+  return {
+    dev,
+    cred: signed.toString('base64'),
+    credSig: account.signRaw(signed).toString('base64'),
+    sign: (endpoint, ts) => dev.signRaw(Buffer.from(`haven-push-register-v1:${dev.hex}:webpush-v1:${endpoint}:${ts}`)).toString('base64'),
+  };
+}
+
+const ENDPOINT = 'https://fcm.googleapis.com/fcm/send/abc123:def';
+function webReg(account, d, over = {}) {
+  const ts = now();
+  const endpoint = over.token ?? ENDPOINT;
+  return { nodeId: account.hex, platform: 'web', token: endpoint, ts, sig: d.sign(endpoint, ts), deviceId: d.dev.hex, cred: d.cred, credSig: d.credSig, ...over };
+}
+async function send(env, path, body) {
+  const res = await worker.fetch(post(path, body), env);
+  return { res, body: await res.json() };
+}
+
+test('a browser asks for the VAPID key cross-origin; there is none until Web Push is configured', async () => {
+  const get = (env) => worker.fetch(new Request('https://push.example/webpush'), env);
+  assert.equal((await get(fakeEnv())).status, 404);
+  const res = await get(webEnv());
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get('access-control-allow-origin'), '*');
+  assert.deepEqual(await res.json(), { key: VAPID_PUBLIC });
+  const pre = await worker.fetch(new Request('https://push.example/register', { method: 'OPTIONS' }), webEnv());
+  assert.equal(pre.status, 204);
+  assert.equal(pre.headers.get('access-control-allow-origin'), '*');
+  assert.match(pre.headers.get('access-control-allow-headers'), /content-type/);
+});
+
+test('a linked browser registers its endpoint with its device key and the account-signed credential', async () => {
+  const env = webEnv();
+  const account = edIdentity();
+  const d = webDevice(account);
+  const { res, body } = await send(env, '/register', webReg(account, d));
+  assert.equal(res.status, 200, JSON.stringify(body));
+  const [t] = (await env.TOKENS.get(account.hex, 'json')).tokens;
+  assert.equal(t.token, ENDPOINT);
+  assert.equal(t.platform, 'web');
+  assert.equal(t.device, d.dev.hex);
+  assert.ok(t.exp > now() + 29 * 86400, 'a registration lasts about thirty days');
+
+  // Renewing it straight away is not a KV write; a new endpoint replaces the old one.
+  const writes = env.TOKENS.writes.length;
+  assert.equal((await send(env, '/register', webReg(account, d))).res.status, 200);
+  assert.equal(env.TOKENS.writes.length, writes);
+  const next = 'https://updates.push.services.mozilla.com/wpush/v2/xyz';
+  assert.equal((await send(env, '/register', webReg(account, d, { token: next }))).res.status, 200);
+  assert.deepEqual((await env.TOKENS.get(account.hex, 'json')).tokens.map((x) => x.token), [next]);
+});
+
+test('nobody registers a browser under an account that has not linked it', async () => {
+  const env = webEnv();
+  const account = edIdentity(), stranger = edIdentity();
+  const d = webDevice(account);
+  const refused = async (body, why) => {
+    const { res } = await send(env, '/register', body);
+    assert.equal(res.status, 401, why);
+  };
+  // A credential signed by some other account, presented under the victim's node id.
+  const forged = webDevice(stranger);
+  await refused(webReg(account, forged), 'a credential the account did not sign');
+  // A real credential, but the endpoint signed by a different device key.
+  const other = webDevice(account);
+  await refused({ ...webReg(account, d), sig: other.sign(ENDPOINT, now()) }, 'signed by another device');
+  await refused({ ...webReg(account, d), deviceId: other.dev.hex }, 'the credential names a different device');
+  // A signature over a different endpoint, and one without the webpush prefix.
+  await refused({ ...webReg(account, d), token: 'https://fcm.googleapis.com/fcm/send/other' }, 'signed for another endpoint');
+  const ts = now();
+  await refused({ ...webReg(account, d), ts, sig: d.dev.signRaw(Buffer.from(`haven-push-register-v1:${d.dev.hex}:${ENDPOINT}:${ts}`)).toString('base64') }, 'no webpush-v1 prefix');
+  // A stale timestamp.
+  const old = now() - 3600;
+  await refused({ ...webReg(account, d), ts: old, sig: d.sign(ENDPOINT, old) }, 'stale');
+  // A credential for a device the account did NOT mark as a browser (a phone's credential).
+  const phone = webDevice(account, "Blaine's iPhone");
+  await refused(webReg(account, phone), 'not a web device');
+  // A tampered credential: the mark added after the account signed.
+  const tampered = Buffer.from(phone.cred, 'base64');
+  await refused({ ...webReg(account, phone), cred: Buffer.concat([tampered.subarray(0, 64), Buffer.from('🌐 '), tampered.subarray(64)]).toString('base64') }, 'tampered');
+  assert.equal(env.TOKENS.map.size, 0, 'nothing is stored for a refused registration');
+});
+
+test('an endpoint must be a known push service over https, and Web Push must be configured', async () => {
+  const account = edIdentity();
+  const d = webDevice(account);
+  for (const bad of [
+    'https://evil.example/hook', 'http://fcm.googleapis.com/fcm/send/x', 'https://fcm.googleapis.com.evil.example/x',
+    'https://fcm.googleapis.com:8443/x', 'https://user@fcm.googleapis.com/x', 'not a url', `https://fcm.googleapis.com/${'a'.repeat(1100)}`,
+  ]) {
+    const { res } = await send(webEnv(), '/register', webReg(account, d, { token: bad }));
+    assert.equal(res.status, 400, bad);
+  }
+  for (const good of ['https://web.push.apple.com/QGx', 'https://db5p.notify.windows.com/w/?token=abc']) {
+    const { res } = await send(webEnv(), '/register', webReg(account, d, { token: good }));
+    assert.equal(res.status, 200, good);
+  }
+  assert.equal((await send(fakeEnv(), '/register', webReg(account, d))).res.status, 404, 'off until the owner sets the VAPID keys');
+});
+
+test('/notify rings a browser with an empty, VAPID-signed push — and nothing else', async () => {
+  const env = webEnv();
+  const account = edIdentity();
+  await send(env, '/register', webReg(account, webDevice(account)));
+  const apns = stubApns(200);
+  try {
+    const { res } = await send(env, '/notify', { nodeId: account.hex, ciphertext: 'c2VhbGVk', event: 'ZXZlbnQ=' });
+    assert.equal(res.status, 200);
+    assert.equal(apns.calls.length, 1, 'one request, to the push service only');
+    const call = apns.calls[0];
+    assert.equal(call.url, ENDPOINT);
+    assert.equal(call.init.method, 'POST');
+    assert.equal(call.init.body, undefined, 'no payload: nothing to read, nothing to decrypt');
+    assert.equal(call.init.headers.ttl, '300');
+    const m = /^vapid t=([^,]+), k=(.+)$/.exec(call.init.headers.authorization);
+    assert.ok(m, call.init.headers.authorization);
+    assert.equal(m[2], VAPID_PUBLIC);
+    const [h, c, s] = m[1].split('.');
+    assert.deepEqual(JSON.parse(Buffer.from(h, 'base64url')), { typ: 'JWT', alg: 'ES256' });
+    const claims = JSON.parse(Buffer.from(c, 'base64url'));
+    assert.equal(claims.aud, 'https://fcm.googleapis.com');
+    assert.equal(claims.sub, 'https://haven.example/contact');
+    assert.ok(claims.exp > now() && claims.exp <= now() + 24 * 3600, 'the push services refuse a token valid for more than a day');
+    const pub = createPublicKey({ key: { kty: 'EC', crv: 'P-256', x: vapidJwk.x, y: vapidJwk.y }, format: 'jwk' });
+    assert.ok(cryptoVerify('sha256', Buffer.from(`${h}.${c}`), { key: pub, dsaEncoding: 'ieee-p1363' }, Buffer.from(s, 'base64url')), 'signed by the VAPID key');
+
+    // A silent notify (my own post reaching my other devices) must not ring a browser: a browser
+    // has to show something for every push it gets.
+    await send(env, '/notify', { nodeId: account.hex, silent: true });
+    assert.equal(apns.calls.length, 1);
+    // A call rings it too, briefly.
+    await send(env, '/call', { nodeId: account.hex, ciphertext: '_' });
+    assert.equal(apns.calls.length, 2);
+    assert.equal(apns.calls[1].init.headers.ttl, '45');
+  } finally { apns.restore(); }
+});
+
+test('a browser that unsubscribed, or whose registration lapsed, is forgotten', async () => {
+  const env = webEnv();
+  const account = edIdentity();
+  await send(env, '/register', webReg(account, webDevice(account)));
+  const gone = stubApns(410);
+  try {
+    await send(env, '/notify', { nodeId: account.hex, ciphertext: 'c2VhbGVk' });
+  } finally { gone.restore(); }
+  assert.equal(await env.TOKENS.get(account.hex, 'json'), null, 'a 410 from the push service drops the endpoint');
+
+  await send(env, '/register', webReg(account, webDevice(account)));
+  const rec = await env.TOKENS.get(account.hex, 'json');
+  rec.tokens[0].exp = now() - 1;
+  await env.TOKENS.put(account.hex, JSON.stringify(rec));
+  const quiet = stubApns(200);
+  try {
+    await send(env, '/notify', { nodeId: account.hex, ciphertext: 'c2VhbGVk' });
+    assert.equal(quiet.calls.length, 0, 'an expired registration is not rung');
+  } finally { quiet.restore(); }
+  assert.equal(await env.TOKENS.get(account.hex, 'json'), null);
+});
+
+test('a browser registration leaves the account\'s phones exactly as they were', async () => {
+  const env = webEnv();
+  const { publicKey, privateKey } = generateKeyPairSync('ed25519');
+  const raw = Buffer.from(publicKey.export({ format: 'der', type: 'spki' }).subarray(-32));
+  const account = { raw, hex: raw.toString('hex'), signRaw: (b) => edSign(null, b, privateKey) };
+  const ts = now();
+  const sig = account.signRaw(Buffer.from(`haven-push-register-v1:${account.hex}:${TOKEN_A}:${ts}`)).toString('base64');
+  assert.equal((await send(env, '/register', { nodeId: account.hex, token: TOKEN_A, ts, sig })).res.status, 200);
+  await send(env, '/register', webReg(account, webDevice(account)));
+  const apns = stubApns((url) => (url.startsWith('https://fcm.googleapis.com') ? 410 : 200));
+  try {
+    const { res } = await send(env, '/notify', { nodeId: account.hex, ciphertext: 'c2VhbGVk' });
+    assert.equal(res.status, 200);
+    assert.equal(apns.calls.filter((c) => c.url.includes('api.push.apple.com')).length, 1, 'the phone is still pushed');
+  } finally { apns.restore(); }
+  assert.deepEqual((await env.TOKENS.get(account.hex, 'json')).tokens.map((t) => t.token), [TOKEN_A], 'only the dead browser is dropped');
+});
+
+
+test('a browser registration built by the Rust core (shared vector) verifies in the worker', async () => {
+  // push/webpush-vector.json is produced by core/haven-ffi/tests/links_and_moderation.rs
+  // (web_push_registration_matches_the_worker_vector) from fixed seeds. The worker reads the
+  // credential's raw bytes, so this is what keeps its parser and the core's layout the same thing.
+  const { readFileSync } = await import('node:fs');
+  const v = JSON.parse(readFileSync(new URL('./webpush-vector.json', import.meta.url), 'utf8'));
+  const realNow = Date.now;
+  Date.now = () => v.ts * 1000 + 10_000;
+  try {
+    const env = webEnv();
+    const ok = await send(env, '/register', v);
+    assert.equal(ok.res.status, 200, JSON.stringify(ok.body));
+    assert.equal((await env.TOKENS.get(v.nodeId, 'json')).tokens[0].device, v.deviceId);
+    const flipped = Buffer.from(v.cred, 'base64'); flipped[70] ^= 1;   // inside the signed name
+    assert.equal((await send(webEnv(), '/register', { ...v, cred: flipped.toString('base64') })).res.status, 401);
+  } finally { Date.now = realNow; }
+});
+
+test('the account revokes a browser: its endpoint is dropped and its credential files nothing again', async () => {
+  const env = webEnv();
+  const account = edIdentity();
+  const d = webDevice(account), other = webDevice(account);
+  const next = 'https://updates.push.services.mozilla.com/wpush/v2/other';
+  await send(env, '/register', webReg(account, d));
+  await send(env, '/register', webReg(account, other, { token: next }));
+  const revoke = (signer, device, ts = now()) => ({
+    nodeId: account.hex, deviceId: device, ts,
+    sig: signer.signRaw(Buffer.from(`haven-push-register-v1:${account.hex}:webpush-revoke-v1:${device}:${ts}`)).toString('base64'),
+  });
+
+  // Only the ACCOUNT can: not the browser itself, not another of the account's browsers, not a stranger.
+  for (const [who, signer] of [['the browser', d.dev], ['another browser', other.dev], ['a stranger', edIdentity()]]) {
+    assert.equal((await send(env, '/unregister-web', revoke(signer, d.dev.hex))).res.status, 401, who);
+  }
+  assert.equal((await send(env, '/unregister-web', revoke(account, d.dev.hex, now() - 3600))).res.status, 401, 'stale');
+  assert.equal((await send(env, '/unregister-web', { ...revoke(account, d.dev.hex), deviceId: 'nope' })).res.status, 400);
+  assert.equal((await env.TOKENS.get(account.hex, 'json')).tokens.length, 2, 'nothing changed');
+
+  assert.equal((await send(env, '/unregister-web', revoke(account, d.dev.hex))).res.status, 200);
+  let rec = await env.TOKENS.get(account.hex, 'json');
+  assert.deepEqual(rec.tokens.map((t) => t.token), [next], 'only the revoked browser is dropped');
+  assert.deepEqual(rec.revokedWeb, [d.dev.hex]);
+  // Its credential is still a valid signature — and is refused; the other browser is untouched.
+  assert.equal((await send(env, '/register', webReg(account, d))).res.status, 401, 'a revoked browser cannot file again');
+  assert.equal((await send(env, '/register', webReg(account, other, { token: next }))).res.status, 200);
+  // Idempotent, and no extra write for a repeat.
+  const writes = env.TOKENS.writes.length;
+  assert.equal((await send(env, '/unregister-web', revoke(account, d.dev.hex))).res.status, 200);
+  assert.equal(env.TOKENS.writes.length, writes);
+
+  // The list survives everything else that rewrites the record: the last token going away…
+  const gone = stubApns(410);
+  try { await send(env, '/notify', { nodeId: account.hex, ciphertext: 'c2VhbGVk' }); } finally { gone.restore(); }
+  rec = await env.TOKENS.get(account.hex, 'json');
+  assert.deepEqual(rec, { tokens: [], revokedWeb: [d.dev.hex] }, 'remembered with no tokens left');
+  assert.equal((await send(env, '/register', webReg(account, d))).res.status, 401);
+  // …and a phone of the same account registering.
+  const ts = now();
+  const sig = account.signRaw(Buffer.from(`haven-push-register-v1:${account.hex}:${TOKEN_A}:${ts}`)).toString('base64');
+  assert.equal((await send(env, '/register', { nodeId: account.hex, token: TOKEN_A, ts, sig })).res.status, 200);
+  assert.deepEqual((await env.TOKENS.get(account.hex, 'json')).revokedWeb, [d.dev.hex]);
+  assert.equal((await send(env, '/register', webReg(account, d))).res.status, 401);
+});
+
+test('revoking a browser that never registered still bars it, and an account with no browsers is unchanged', async () => {
+  const env = webEnv();
+  const account = edIdentity();
+  const d = webDevice(account);
+  const ts = now();
+  const sig = account.signRaw(Buffer.from(`haven-push-register-v1:${account.hex}:webpush-revoke-v1:${d.dev.hex}:${ts}`)).toString('base64');
+  assert.equal((await send(env, '/unregister-web', { nodeId: account.hex, deviceId: d.dev.hex, ts, sig })).res.status, 200);
+  assert.equal((await send(env, '/register', webReg(account, d))).res.status, 401);
+  // A phone-only account's record keeps its old shape exactly.
+  const phone = identity();
+  await register(env, phone, TOKEN_A);
+  assert.deepEqual(Object.keys(await env.TOKENS.get(phone.nodeId, 'json')), ['tokens']);
+});

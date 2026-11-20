@@ -1,2 +1,5 @@
-2.1.3 — Security update. Please update all your devices.
-• Stronger protection for your circles' encryption keys if a device is ever compromised. It applies automatically once everyone in a circle has updated. Your posts are untouched.
+2.2.0 — Use Haven in a web browser.
+• Add a web browser as one of your devices: scan the code it shows (Settings → Devices). Each circle decides whether browsers may read it.
+• Privacy fix: after a video call, your next call could start with the camera already on. Every call now starts with the camera off.
+• A call no longer hangs up a few seconds after a brief connection blip.
+• Camera and screen-share changes arrive in the right order.

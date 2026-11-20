@@ -1754,18 +1754,54 @@ final class CallManager: NSObject, ObservableObject {
 
     /// Frame 22: tell every peer whether my camera is on, so they show live video vs. my avatar
     /// immediately (instead of a frozen last frame) when I pause the camera.
+    ///
+    /// `[hex64][lp session][u64 LE stamp][flag]`. The stamp says WHEN the state was set: a call
+    /// frame travels by more than one lane (sent directly, and left on the relay for the in-call
+    /// poll), so "on" can arrive after the "off" that followed it, and the receiver drops the stale
+    /// one. A reader that predates the stamp takes the leading id and the last byte, as it always did.
     private func broadcastCameraState(_ on: Bool) {
+        for p in invitees() { FeedStore.shared.sendCallFrame(22, Self.cameraStateFrame(myHex: myHex, sessionId: sessionId, on: on, stamp: nextCameraStamp()), to: p) }
+    }
+
+    static func cameraStateFrame(myHex: String, sessionId: String, on: Bool, stamp: UInt64) -> Data {
         var f = Data(myHex.utf8)
         CallManager.lpAppend(&f, Data(sessionId.utf8))
+        for i in 0..<8 { f.append(UInt8((stamp >> (8 * UInt64(i))) & 0xff)) }
         f.append(on ? 1 : 0)
-        for p in invitees() { FeedStore.shared.sendCallFrame(22, f, to: p) }
+        return f
     }
+
+    /// The stamp of a camera-state frame, or nil for the older layout (applied as it arrives).
+    static func cameraStamp(_ payload: Data) -> UInt64? {
+        let b = [UInt8](payload)
+        guard b.count >= 66 else { return nil }
+        let n = Int(b[64]) | (Int(b[65]) << 8)
+        guard b.count == 66 + n + 9 else { return nil }
+        var v: UInt64 = 0
+        for i in 0..<8 { v |= UInt64(b[66 + n + i]) << (8 * UInt64(i)) }
+        return v
+    }
+
+    /// Strictly later than the last one sent: two toggles in one millisecond are still ordered.
+    private func nextCameraStamp() -> UInt64 {
+        cameraStampSent = max(UInt64(Date().timeIntervalSince1970 * 1000), cameraStampSent + 1)
+        return cameraStampSent
+    }
+    private var cameraStampSent: UInt64 = 0
+    /// The newest camera-state stamp applied from each peer in this call.
+    private var cameraStampSeen: [String: UInt64] = [:]
 
     /// A peer signalled their camera on/off (frame 22).
     func handleCameraState(_ payload: Data) {
         guard payload.count > 64 else { return }
         let from = String(data: payload.prefix(64), encoding: .utf8) ?? ""
         guard from.count == 64, roster.contains(from) else { return }   // only a participant (F3/F4)
+        // A frame older than one already applied is a late copy off the slower lane: dropped, so
+        // "on" cannot overwrite the "off" that followed it. No stamp (an older sender) = apply.
+        if let stamp = Self.cameraStamp(payload) {
+            if stamp < (cameraStampSeen[from] ?? 0) { return }
+            cameraStampSeen[from] = stamp
+        }
         let on = payload.last == 1   // trailing flag byte
         if on { remoteCameraOff.remove(from) } else { remoteCameraOff.insert(from) }
     }
@@ -2013,6 +2049,8 @@ final class CallManager: NSObject, ObservableObject {
             "audio_unavailable": audioUnavailable,
             "audio_gate": "\(audioGate.state)",
             "remote_video_tracks": Array(remoteVideoTracks.keys),
+            // Peers who said their video slot is off: their tile shows an avatar, not their track.
+            "remote_camera_off": Array(remoteCameraOff),
             "inbound_audio_bytes": audioTotal,
             "inbound_video_bytes": videoTotal,
             "inbound_video_frames": framesTotal,
@@ -2122,6 +2160,7 @@ final class CallManager: NSObject, ObservableObject {
         }
         #endif
         remoteVideoTracks.removeAll(); remoteScreenTracks.removeAll(); remoteCameraOff.removeAll(); participants = []
+        cameraStampSeen.removeAll()
         signalledCameraTracks.removeAll(); signalledScreenTracks.removeAll(); hairpinVideoTracks.removeAll()
         #if DEBUG
         CallMediaBridge.shared.qaResetCallStats()

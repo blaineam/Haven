@@ -2,46 +2,30 @@
 //! shared Rust core (`haven_ffi`). The GUI is the WebView2 frontend in `../ui`; `--headless`
 //! runs only the in-process relay/mailbox (the "invisible relay", like the Mac app).
 
-mod preview;
-mod postgroups;
-mod callwire;
+// The platform-independent client layer lives in `core/haven-client` (shared with the browser
+// build). Re-exported under the names these modules had here, so `crate::wire::…` still resolves.
+#[allow(unused_imports)] // each is used by a subset of the modules below
+pub(crate) use haven_client::{
+    callwire, engine, localmedia, mediaholding, mediaresume, netgate, postgroups, preview, relayhealth, relayintro,
+    relayparking, relayscope, reoptimize, roster, scheduled, secret, seenjournal, selfsync, selfsyncrot, store, wire,
+};
+#[cfg(test)]
+pub(crate) use haven_client::covtest_util;
 mod commands;
 // The PII-free screenshot dataset. `cfg` — NOT a runtime check — so the seeder and every synthetic
 // identity in it are absent from a release binary: no env var can reach code that isn't compiled.
 #[cfg(debug_assertions)]
 mod demo;
-mod engine;
 // The Instagram "Download your information" importer: archive parser, song suggester, runner.
 // Apple parity — apple/HavenApp/Instagram{Archive,Importer,ImportView}.swift.
 mod igencode;
 mod igimport;
 mod instagram;
-mod localmedia;
-mod mediaholding;
-mod mediaresume;
-mod netgate;
 // qa-cmd v2 driver (docs/QA.md) — same rule as demo: `cfg`, not a runtime check, so no release
 // binary carries a file-drop remote control. See qa.rs for the contract.
 #[cfg(debug_assertions)]
 mod qa;
-mod relayhealth;
-mod relayintro;
-mod relayparking;
-mod relayscope;
-mod reoptimize;
-mod roster;
-mod scheduled;
-mod secret;
-mod seenjournal;
-mod selfsync;
-mod selfsyncrot;
 mod songsuggest;
-mod store;
-mod wire;
-#[cfg(test)]
-mod covtest_util;
-#[cfg(test)]
-mod tests_store;
 #[cfg(test)]
 mod tests_lib;
 
@@ -54,6 +38,41 @@ use tauri::tray::TrayIconBuilder;
 use tauri::{Emitter, Manager};
 
 use crate::engine::Engine;
+
+/// The web client this build carries (`web-client/dist`), if any: `HAVEN_WEB_APP_DIR` for a
+/// development build, else the `web-client` directory among the app's bundled resources. A build
+/// without one simply has no "Web access" switch.
+fn load_web_client(app: &tauri::AppHandle) -> Option<haven_client::net::WebBundle> {
+    let dir = std::env::var_os("HAVEN_WEB_APP_DIR")
+        .map(std::path::PathBuf::from)
+        .or_else(|| app.path().resource_dir().ok().map(|d| d.join("web-client")))?;
+    if !dir.is_dir() {
+        return None;
+    }
+    match haven_client::net::load_web_bundle(&dir) {
+        Ok(b) => {
+            log::info!("web client available ({} files, digest {})", b.len(), &b.digest()[..16]);
+            Some(b)
+        }
+        Err(e) => {
+            log::warn!("web client at {} not usable: {e}", dir.display());
+            None
+        }
+    }
+}
+
+/// The engine's view of this application: UI events go to the webview, notifications to the OS.
+struct TauriHost(tauri::AppHandle);
+
+impl haven_client::host::Host for TauriHost {
+    fn emit(&self, event: &str, payload: serde_json::Value) -> Result<(), String> {
+        self.0.emit(event, payload).map_err(|e| e.to_string())
+    }
+    fn notify(&self, title: &str, body: &str) {
+        use tauri_plugin_notification::NotificationExt;
+        let _ = self.0.notification().builder().title(title).body(body).show();
+    }
+}
 use crate::store::Paths;
 
 /// Minimal stderr backend for the `log` facade. The crate logged through `log::info!`/`warn!`
@@ -346,6 +365,9 @@ fn startup_identity() -> Result<Option<Startup>> {
 
 /// Run the full GUI app.
 pub fn run() {
+    // The shared client layer spawns its background work here — on Tauri's runtime, exactly where
+    // it ran when the engine lived in this crate.
+    haven_client::rt::set_runtime(tauri::async_runtime::handle().inner().clone());
     init_logging();
     // Fresh install → no engine; the frontend shows the welcome screen and `onboard_*` relaunches.
     let existing = startup_identity().expect("resolve identity");
@@ -384,7 +406,18 @@ pub fn run() {
             builder.manage(engine).setup(move |app| {
                 let handle = app.handle().clone();
                 apply_window_chrome(&handle);
-                setup_engine.set_app(handle.clone());
+                // The engine reaches the UI and the OS through this app; its background work runs
+                // on Tauri's runtime (which, unlike a bare `tokio::spawn`, is reachable from the
+                // transport's callback threads).
+                setup_engine.set_app(haven_client::host::AppHandle::new(Arc::new(TauriHost(handle.clone()))));
+                // The web client, if this build ships it: handed to the engine so its hosted relay
+                // CAN serve it. Whether it does is the user's "Web access" switch (off by default).
+                if let Some(bundle) = load_web_client(&handle) {
+                    setup_engine.set_hosting_options(haven_client::engine::HostingOptions {
+                        web_app: Some(Arc::new(bundle)),
+                        ..Default::default()
+                    });
+                }
                 // haven:// deep links (a tapped invite, or a shared post) — surface the window and hand
                 // the URL to the frontend (parity with the iOS URL scheme / Android intent filter).
                 // Windows/Linux register the scheme at install time via the plugin; register_all covers
@@ -486,157 +519,20 @@ pub fn run() {
 
     builder
         .invoke_handler(tauri::generate_handler![
+            // Every engine command the browser build shares (haven_client::commands), by name.
+            commands::engine_invoke,
             commands::needs_onboarding,
             commands::demo_mode,
             commands::onboard_create,
             commands::onboard_link,
-            commands::bootstrap,
             commands::self_test,
-            commands::sweep_duplicate_imports,
-            commands::request_older_history,
-            commands::relay_history_start,
-            commands::relay_history_cancel,
-            commands::relay_history_dismiss,
-            commands::relay_history_status,
-            commands::get_profile,
-            commands::set_profile,
-            commands::circles,
-            commands::create_circle,
-            commands::pending_circle_upgrades,
-            commands::can_offer_circle_upgrade,
-            commands::upgrade_circle,
-            commands::accept_circle_upgrade,
-            commands::rename_circle,
-            commands::leave_circle,
-            commands::add_to_circle,
-            commands::remove_from_circle,
-            commands::feed,
-            commands::sensitive_refs,
-            commands::post,
-            commands::media_backup_rows,
-            commands::post_story,
-            commands::comment,
-            commands::react,
-            commands::unreact,
-            commands::edit_post,
-            commands::unsend_post,
-            commands::report,
-            commands::reports,
-            commands::dm_threads,
-            commands::mark_dm_read,
-            commands::pinned_dms,
-            commands::set_pinned_dms,
-            commands::activity,
-            commands::activity_seen,
-            commands::mark_activity_seen,
-            commands::delete_conversation,
-            commands::start_dm,
-            commands::start_group_dm,
-            commands::sync_status,
-            commands::video_sound_on,
-            commands::set_video_sound,
-            commands::privacy_prefs,
-            commands::set_privacy_prefs,
-            commands::mint_preview,
-            commands::qa_set_call_state,
-            commands::low_data_state,
-            commands::set_low_data_level,
-            commands::low_data_allowance,
-            commands::add_file,
-            commands::grant_circle_admin,
-            commands::circle_admins,
-            commands::device_roster,
-            commands::enable_device_roster,
-            commands::request_device_enrollment,
-            commands::revoke_device,
-            commands::step_down_as_primary,
-            commands::seedless_status,
             commands::onboard_link_seedless,
-            commands::enroll_mint_ticket,
-            commands::enroll_pending,
-            commands::enroll_approve,
-            commands::enroll_reject,
             commands::finish_enroll,
-            commands::messages,
-            commands::send_dm,
-            commands::connect_by_link,
             commands::take_deep_links,
-            commands::pending,
-            commands::approve,
-            commands::dismiss,
-            commands::contacts,
-            commands::blocked,
-            commands::block,
-            commands::unblock,
-            commands::relay_status,
-            commands::start_hosting,
-            commands::stop_hosting,
-            commands::relay_public_settings,
-            commands::set_relay_public_settings,
-            commands::adopt_relay,
-            commands::relays,
-            commands::forget_relay,
-            commands::reactivate_relay,
-            commands::rename_relay,
-            commands::set_default_relay,
-            commands::erase_relay,
-            commands::erased_relays,
-            commands::restore_erased_relay,
-            commands::drop_erased_relay,
-            commands::set_circle_relay,
-            commands::circle_relays,
-            commands::add_s3_relay,
             commands::autostart_status,
             commands::set_autostart,
-            commands::add_media,
-            commands::media_reseal_for_circles,
-            commands::post_multi,
             commands::read_media_file_b64,
-            commands::add_audio,
-            commands::media_data_url,
-            commands::schedule_message,
-            commands::scheduled,
-            commands::cancel_scheduled,
-            commands::call_group_invite,
-            commands::call_accept,
-            commands::call_hangup,
-            commands::call_handled_elsewhere,
-            commands::call_signal,
-            commands::call_camera_state,
-            commands::my_node_hex,
-            commands::identities,
-            commands::add_identity,
-            commands::import_identity,
-            commands::rename_identity,
-            commands::remove_identity,
             commands::switch_identity,
-            commands::s3_status,
-            commands::s3_configure,
-            commands::s3_clear,
-            commands::media_cleanup,
-            commands::media_inventory,
-            commands::reoptimize_scan,
-            commands::reoptimize_targets,
-            commands::reoptimize_accept,
-            commands::reoptimize_apply,
-            commands::reoptimize_skip,
-            commands::reoptimize_headroom,
-            commands::media_delete_selected,
-            commands::media_pin,
-            commands::media_unpin,
-            commands::media_pinned_count,
-            commands::media_evicted_size,
-            commands::media_download,
-            commands::media_request_when_available,
-            commands::media_is_wanted,
-            commands::media_finding_relay,
-            commands::message_author,
-            commands::kept_stories,
-            commands::toggle_kept_story,
-            commands::get_relay_media_limits,
-            commands::set_relay_media_limits,
-            commands::get_media_limits,
-            commands::set_media_limits,
             commands::instagram_read,
             commands::instagram_status,
             commands::instagram_run,
@@ -648,8 +544,6 @@ pub fn run() {
             commands::music_search,
             commands::music_suggestions,
             commands::music_resolve,
-            commands::set_foreground,
-            commands::reset,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Haven")
@@ -674,6 +568,7 @@ pub fn run_headless() {
         .enable_all()
         .build()
         .expect("tokio runtime");
+    haven_client::rt::set_runtime(rt.handle().clone());
     rt.block_on(async {
         let (seed, paths) = ensure_active_identity().expect("load or create identity");
 

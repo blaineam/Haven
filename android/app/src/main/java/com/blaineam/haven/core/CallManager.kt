@@ -116,6 +116,8 @@ object CallManager {
     /// it joined at all. Four attempts at the stuck-call bug were reasoned from source because these
     /// two facts were not observable.
     val qaSessionId: String get() = sessionId
+    /** DEBUG dump: each peer's ICE state, by account hex (Apple's `call.peers` parity). */
+    val qaPeerIce: Map<String, String> get() = runCatching { lastIce.mapValues { it.value.name.lowercase() } }.getOrDefault(emptyMap())
     @Volatile var qaLastCallEvent: String = "none"
         private set
     fun qaNoteCallEvent(what: String) { qaLastCallEvent = what }
@@ -234,6 +236,9 @@ object CallManager {
     private val hairpinPeers = HashSet<String>()
     /** Last ICE state per peer (call thread) — what [scheduleHairpinRace] reads. */
     private val lastIce = HashMap<String, PeerConnection.IceConnectionState>()
+    /** The newest camera-state stamp applied from each peer, and the last one I sent. */
+    private val cameraStampSeen = HashMap<String, Long>()
+    private var cameraStampSent = 0L
 
     // Active-speaker detection (Apple parity). Same threshold and debounce, so a group call
     // highlights the same person on every platform at the same moment.
@@ -353,14 +358,26 @@ object CallManager {
         // nothing is transmitted and nothing is recorded. For an ACCEPT that is indistinguishable from
         // the network eating it: the callee has already flipped itself in-call, so it looks connected
         // while the caller waits out the full invite timer. Say so. iOS parity.
-        val sealed = runCatching { HavenNet.engine.sealCallFrame(to, type.toUByte(), body) }.getOrNull()
-        if (sealed == null || sealed.isEmpty()) {
-            val known = runCatching { HavenNet.engine.deviceNodeIdsFor(to).size }.getOrDefault(0)
-            Log.i(TAG, "call frame type=$type NOT SENT to ${to.take(8)} — seal failed " +
-                "(recipient unresolvable: $known known device id(s), ${if (sealed == null) "threw" else "empty"})")
-            return
+        //
+        // ONE SEAL PER DEVICE. A frame sealed to the callee's ACCOUNT key opens only on a device that
+        // holds that key — a linked device that never received the seed (every browser, and any
+        // device linked the seedless way) got the frame and could not open it, so it never rang.
+        // Each device the account's signed roster names gets its own copy, sealed to that device's
+        // key and addressed to its id; an account with no known devices, and any device whose key
+        // is not known yet, keeps the account-sealed frame. Desktop/iOS parity.
+        val seal = { hex: String -> runCatching { HavenNet.engine.sealCallFrame(hex, type.toUByte(), body) }.getOrNull()?.takeIf { it.isNotEmpty() } }
+        val accountSealed = seal(to)
+        val known = runCatching { HavenNet.engine.deviceNodeIdsFor(to) }.getOrDefault(emptyList())
+        var sent = 0
+        for (dest in known.ifEmpty { listOf(to) }) {
+            val sealed = (if (dest.equals(to, ignoreCase = true)) null else seal(dest)) ?: accountSealed ?: continue
+            HavenNet.sendCallFrame(type, sealed, dest)
+            sent++
         }
-        HavenNet.sendCallFrame(type, sealed, to)
+        if (sent == 0) {
+            Log.i(TAG, "call frame type=$type NOT SENT to ${to.take(8)} — seal failed " +
+                "(recipient unresolvable: ${known.size} known device id(s))")
+        }
     }
 
     /** Seal + send a NON-call frame that must be as unforgeable as a call frame — today the media
@@ -771,9 +788,21 @@ object CallManager {
         connectPeerIfNeeded(a.from)
     }
 
+    /** Strictly later than the last one sent: two toggles in one millisecond are still ordered. */
+    private fun nextCameraStamp(): Long {
+        cameraStampSent = maxOf(System.currentTimeMillis(), cameraStampSent + 1)
+        return cameraStampSent
+    }
+
     private fun handleCameraState(body: ByteArray) {
         val (from, on) = CallWire.parseCameraState(body) ?: return
         if (!roster.contains(from)) return   // only a participant
+        // A frame older than one already applied is a late copy off the slower lane: dropped, so
+        // "on" cannot overwrite the "off" that followed it. No stamp (an older sender) = apply.
+        CallWire.cameraStamp(body)?.let { stamp ->
+            if (stamp < (cameraStampSeen[from] ?: 0L)) return
+            cameraStampSeen[from] = stamp
+        }
         if (on) remoteCameraOff.remove(from) else if (!remoteCameraOff.contains(from)) remoteCameraOff.add(from)
     }
 
@@ -965,7 +994,7 @@ object CallManager {
         // know show the avatar instead. Only the toggle announced this before, so the state every
         // call actually STARTS in was the one never sent.
         runCatching {
-            send(CallWire.CAMERA, CallWire.cameraState(myHex, sessionId, cameraOn.value), peer)
+            send(CallWire.CAMERA, CallWire.cameraState(myHex, sessionId, cameraOn.value, nextCameraStamp()), peer)
         }
         if (myHex < peer && mediaStarted) conn.makeOffer()   // smaller hex offers
         return conn
@@ -1442,7 +1471,8 @@ object CallManager {
             ?: Log.w(TAG, "camera: still no track after retry — this device cannot publish video")
         // Tell every peer so they swap to my avatar instead of freezing on my last camera frame.
         val on = cameraOn.value
-        invitees().forEach { send(CallWire.CAMERA, CallWire.cameraState(myHex, sessionId, on), it) }
+        val stamp = nextCameraStamp()
+        invitees().forEach { send(CallWire.CAMERA, CallWire.cameraState(myHex, sessionId, on, stamp), it) }
     }
     fun switchCamera() = onCall { if (!screenShare.value) capturer?.switchCamera(null) }
 
@@ -1644,6 +1674,7 @@ object CallManager {
         runCatching { CallHairpin.closeAll() }
         hairpinPeers.clear()
         lastIce.clear()
+        cameraStampSeen.clear()
         peers.values.forEach { it.close() }; peers.clear()
         releaseScreenCapture()
         screenShareStarting = false

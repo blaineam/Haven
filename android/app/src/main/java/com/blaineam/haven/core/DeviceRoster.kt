@@ -120,6 +120,9 @@ object DeviceRosterManager {
         return runCatching { issueDeviceCredential(accountSeed, bundle, name, now.toULong()) }.getOrNull()
     }
 
+    /** The name this account signed for one of its active devices (null when it is not one). */
+    fun nameOf(nodeHex: String): String? = entries[nodeHex]?.name
+
     /** Revoke a device: drop it, bump the version, re-sign — it can decrypt nothing posted afterward. */
     fun revoke(nodeHex: String, social: HavenSocial?, accountSeed: ByteArray): Boolean {
         if (nodeHex == primaryHex) return false   // never revoke the master key

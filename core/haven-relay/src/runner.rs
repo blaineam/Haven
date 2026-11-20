@@ -269,11 +269,31 @@ pub async fn run(cfg: Config, probation: bool) -> Result<bool> {
                     let derp_backend = derp_local_port
                         .map(|p| format!("127.0.0.1:{p}"))
                         .unwrap_or_default();
+                    // Web access (opt-in): load the web client once, into memory. The proxy
+                    // itself never reads the disk, so what it serves is exactly this snapshot.
+                    let web_app = match &cfg.web_app_dir {
+                        None => None,
+                        Some(dir) => match haven_net::webbundle_dir::load(dir) {
+                            Ok(b) => {
+                                println!(
+                                    "✓ web access ON — serving the web client ({} files, digest {}) under /app/",
+                                    b.len(),
+                                    &b.digest()[..16]
+                                );
+                                Some(std::sync::Arc::new(b))
+                            }
+                            Err(e) => {
+                                eprintln!("⚠ web access NOT enabled — {e}");
+                                None
+                            }
+                        },
+                    };
                     let rcfg = haven_net::PathRouterConfig {
                         bind: proxy_bind,
                         media_backend: format!("127.0.0.1:{port}"),
                         derp_backend,
                         http_token: cfg.http_token.clone(),
+                        web_app,
                     };
                     match haven_net::PathRouter::spawn(&rcfg).await {
                         Ok(Some(router)) => {

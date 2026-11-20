@@ -225,6 +225,9 @@ final class DeviceRosterManager: ObservableObject {
     /// here can bind them). What this DOES defeat: a device you no longer control whose keychain is
     /// intact — a lost or stolen phone, the ordinary case. For a device you believe was compromised,
     /// the only real remedy today is a new identity. See [`revocationCaveat`].
+    /// The name this account signed for one of its active devices (nil when it is not one).
+    func name(of nodeHex: String) -> String? { entries[nodeHex]?.name }
+
     @discardableResult
     func revoke(_ nodeHex: String, engine: Engine?, accountSeed: Data) async -> Bool {
         guard nodeHex != primaryHex else { return false }   // never revoke the master key

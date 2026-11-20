@@ -91,6 +91,24 @@ impl DeviceCredential {
         v
     }
 
+    /// Is this a WEB device (a browser)? Read from the account-signed name — see `crate::webpolicy`
+    /// for why the mark lives there and what it can and cannot do.
+    pub fn is_web(&self) -> bool {
+        crate::webpolicy::is_web_device_name(&self.device_name)
+    }
+
+    /// What a verifier that speaks only Ed25519 needs to check this credential: the exact bytes
+    /// the account signed, and the Ed25519 half of its signature over them. The push worker is
+    /// such a verifier (as it is for every registration): a browser, which holds no account key,
+    /// presents this to show that the account linked it. The layout the worker parses is
+    /// [`Self::signing_bytes`]' — `domain ‖ account(32) ‖ created(8) ‖ name_len(4) ‖ name ‖ bundle`,
+    /// the bundle beginning with the device's Ed25519 key — and is pinned by a vector shared with
+    /// `push/worker.test.mjs`.
+    pub fn ed25519_proof(&self) -> (Vec<u8>, Vec<u8>) {
+        let msg = Self::signing_bytes(&self.account_id, &self.device, &self.device_name, self.created_at);
+        (msg, self.sig[..64.min(self.sig.len())].to_vec())
+    }
+
     /// Issue a credential: the **account** identity vouches for `device`.
     pub fn issue(account: &Identity, device: &HavenId, name: &str, created_at: u64) -> Self {
         let account_id = account.public().node_id_bytes();
@@ -474,6 +492,17 @@ impl ContactDevices {
             .map(|c| c.device.clone())
             .collect()
     }
+
+    /// [`authorized_bundles`](Self::authorized_bundles) for a circle that does (`allow_web`) or does
+    /// not allow web devices: when it does not, a device whose account-signed name carries the web
+    /// mark (`crate::webpolicy`) is left out, so nothing is sealed to it for that circle.
+    pub fn authorized_bundles_where(&self, allow_web: bool) -> Vec<HavenId> {
+        self.credentials
+            .iter()
+            .filter(|c| self.list.is_authorized(&c.device_id()) && (allow_web || !c.is_web()))
+            .map(|c| c.device.clone())
+            .collect()
+    }
 }
 
 /// Expand a circle's account-level member set into the actual KEY-COMMIT recipients: each member's
@@ -485,6 +514,16 @@ impl ContactDevices {
 pub fn recipients_with_devices(
     members: &[HavenId],
     devices_by_account: &std::collections::HashMap<[u8; 32], ContactDevices>,
+) -> Vec<HavenId> {
+    recipients_with_devices_where(members, devices_by_account, true)
+}
+
+/// [`recipients_with_devices`] for a circle that does (`allow_web`) or does not allow web devices
+/// (`crate::webpolicy`). With `allow_web = true` it is the same function, byte for byte.
+pub fn recipients_with_devices_where(
+    members: &[HavenId],
+    devices_by_account: &std::collections::HashMap<[u8; 32], ContactDevices>,
+    allow_web: bool,
 ) -> Vec<HavenId> {
     let mut out: Vec<HavenId> = Vec::new();
     let mut seen: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
@@ -511,7 +550,7 @@ pub fn recipients_with_devices(
         // clients: a device linked that way holds only its device key + credential and never receives
         // the master seed. See MULTI-DEVICE.md and SEED-DROP-DESIGN.md.
         if let Some(d) = devices_by_account.get(&acct) {
-            for b in d.authorized_bundles() {
+            for b in d.authorized_bundles_where(allow_web) {
                 if seen.insert(b.node_id_bytes()) {
                     out.push(b);
                 }
@@ -783,17 +822,29 @@ pub fn recipients_with_devices_gated(
     capable: &std::collections::HashSet<[u8; 32]>,
     drop_account_key: bool,
 ) -> Vec<HavenId> {
+    recipients_with_devices_gated_where(members, devices_by_account, capable, drop_account_key, true)
+}
+
+/// [`recipients_with_devices_gated`] for a circle that does (`allow_web`) or does not allow web
+/// devices (`crate::webpolicy`). With `allow_web = true` it is the same function, byte for byte.
+pub fn recipients_with_devices_gated_where(
+    members: &[HavenId],
+    devices_by_account: &std::collections::HashMap<[u8; 32], ContactDevices>,
+    capable: &std::collections::HashSet<[u8; 32]>,
+    drop_account_key: bool,
+    allow_web: bool,
+) -> Vec<HavenId> {
     let drop = drop_account_key && circle_fully_seed_drop_capable(members, devices_by_account, capable);
     if !drop {
         // Gate closed (switch off, or a member not affirmatively capable): unchanged dual-seal.
-        return recipients_with_devices(members, devices_by_account);
+        return recipients_with_devices_where(members, devices_by_account, allow_web);
     }
     // Fully capable + gate ON: seal ONLY to authorized device bundles, no bare account key.
     let mut out: Vec<HavenId> = Vec::new();
     let mut seen: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
     for m in members {
         if let Some(d) = devices_by_account.get(&m.node_id_bytes()) {
-            for b in d.authorized_bundles() {
+            for b in d.authorized_bundles_where(allow_web) {
                 if seen.insert(b.node_id_bytes()) {
                     out.push(b);
                 }
@@ -1484,6 +1535,55 @@ mod tests {
         let stale = DeviceList::signed(&account, 2, 5, vec![phone], vec![mac]);
         assert!(!v1.adopt_if_newer(&stale));
         assert_eq!(v1.version, 3);
+    }
+
+    #[test]
+    fn a_web_device_is_a_recipient_only_where_the_circle_allows_it() {
+        let account = Identity::from_seed(&[41; 32]);
+        let phone = Identity::from_seed(&[42; 32]);
+        let browser = Identity::from_seed(&[43; 32]);
+        let ids = |v: &[HavenId]| v.iter().map(|b| b.node_id_bytes()).collect::<std::collections::HashSet<_>>();
+        let list = DeviceList::signed(
+            &account,
+            1,
+            0,
+            vec![phone.public().node_id_bytes(), browser.public().node_id_bytes()],
+            vec![],
+        );
+        let web_name = crate::webpolicy::mark_web_device_name("Chrome");
+        let creds = vec![
+            DeviceCredential::issue(&account, &phone.public(), "Phone", 0),
+            DeviceCredential::issue(&account, &browser.public(), &web_name, 0),
+        ];
+        assert!(!creds[0].is_web() && creds[1].is_web());
+        // The mark is under the account's signature: it cannot be taken off in transit.
+        let mut stripped = creds[1].clone();
+        stripped.device_name = "Chrome".into();
+        assert!(stripped.verify(&account.public()).is_err());
+
+        let cd = ContactDevices { list, credentials: creds };
+        assert_eq!(ids(&cd.authorized_bundles_where(true)), ids(&cd.authorized_bundles()));
+        let native = ids(&cd.authorized_bundles_where(false));
+        assert!(native.contains(&phone.public().node_id_bytes()));
+        assert!(!native.contains(&browser.public().node_id_bytes()));
+
+        let mut map = std::collections::HashMap::new();
+        map.insert(account.public().node_id_bytes(), cd);
+        let members = [account.public()];
+        let capable: std::collections::HashSet<[u8; 32]> = [account.public().node_id_bytes()].into_iter().collect();
+        for (allow, expect_browser) in [(true, true), (false, false)] {
+            for out in [
+                recipients_with_devices_where(&members, &map, allow),
+                recipients_with_devices_gated_where(&members, &map, &capable, false, allow),
+                recipients_with_devices_gated_where(&members, &map, &capable, true, allow),
+            ] {
+                let got = ids(&out);
+                assert_eq!(got.contains(&browser.public().node_id_bytes()), expect_browser, "allow={allow}");
+                assert!(got.contains(&phone.public().node_id_bytes()));
+            }
+        }
+        // The existing functions are the allow=true case exactly.
+        assert_eq!(ids(&recipients_with_devices(&members, &map)), ids(&recipients_with_devices_where(&members, &map, true)));
     }
 
     #[test]

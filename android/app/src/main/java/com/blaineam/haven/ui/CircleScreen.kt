@@ -645,6 +645,8 @@ private fun CircleManageSheet(circleId: String, onDismiss: () -> Unit) {
                 // Per-circle relay OVERRIDE: pick which CONFIGURED relays this circle uses. Adding /
                 // removing relays lives under Settings ▸ Relays — not here.
                 CircleRelaySection(circleId)
+                // Web browsers: whether browsers linked by members may read this circle.
+                CircleWebAccessRows(circleId)
                 Text(stringResource(R.string.circle_members_count, members.size), color = HavenTheme.textSecondary, fontSize = 12.sp)
                 if (members.isEmpty() && membersLoaded) {
                     Text(stringResource(R.string.circle_no_members), color = HavenTheme.textSecondary, fontSize = 13.sp)

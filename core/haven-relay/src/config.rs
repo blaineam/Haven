@@ -85,6 +85,11 @@ pub struct Config {
     /// Path proxy bind — single origin that routes by path to media + fabric.
     /// Default `127.0.0.1:8675`. `None` = disabled (`--no-proxy`).
     pub proxy_bind: Option<String>,
+    /// Directory holding a build of the web client (`web-client/dist`) to serve under `/app/` on
+    /// the path proxy, so circle members can link a browser as one of their devices. `None` (the
+    /// default) = this relay offers no web access. Opt-in on purpose: whoever serves the page's
+    /// code can change it (see docs/WEB-PARITY.md).
+    pub web_app_dir: Option<PathBuf>,
     /// Embed circle TURN for WebRTC ICE (default ON for local-disk). Own UDP socket.
     pub turn_enabled: bool,
     /// Local UDP bind for TURN (default 0.0.0.0:3478).
@@ -197,6 +202,9 @@ struct FileConfig {
     /// Path proxy bind (`127.0.0.1:8675` default; `"off"` disables).
     #[serde(default)]
     proxy_bind: Option<String>,
+    /// Directory of the web client to serve under `/app/` (absent = no web access).
+    #[serde(default)]
+    web_app: Option<String>,
     /// Embed TURN for WebRTC (default true for local storage).
     #[serde(default)]
     turn: Option<bool>,
@@ -337,6 +345,9 @@ impl Config {
             )
         };
 
+        // Web access: off unless the operator points at a built web client.
+        let web_app_dir = arg_value(args, "--web-app").filter(|d| !d.trim().is_empty()).map(PathBuf::from);
+
         // Circle TURN (WebRTC ICE): default ON for local-disk. Own UDP socket (not a second Endpoint).
         let turn_enabled = if args.iter().any(|a| a == "--no-turn") {
             false
@@ -368,7 +379,7 @@ impl Config {
         Ok(Self {
             link, data_dir, seed, backend, s3_port, rclone_bin, rclone_config, peers,
             http_bind, http_url, auto_tunnel, tunnel_token, http_token, retention,
-            derp_enabled, derp_bind, derp_url, proxy_bind,
+            derp_enabled, derp_bind, derp_url, proxy_bind, web_app_dir,
             turn_enabled, turn_bind, turn_public_ip, turn_urls, turn_token, maintenance,
         })
     }
@@ -418,6 +429,7 @@ impl Config {
             None if http_bind.is_some() => Some(haven_net::DEFAULT_PATH_ROUTER_BIND.to_string()),
             None => None,
         };
+        let web_app_dir = fc.web_app.filter(|d| !d.trim().is_empty()).map(PathBuf::from);
         let turn_enabled = fc.turn.unwrap_or(matches!(&backend, StoreBackend::Local));
         let turn_bind = fc.turn_bind.unwrap_or_else(|| "0.0.0.0:3478".to_string());
         let turn_public_ip = fc.turn_public_ip.filter(|u| !u.trim().is_empty());
@@ -462,6 +474,7 @@ impl Config {
             derp_bind,
             derp_url,
             proxy_bind,
+            web_app_dir,
             turn_enabled,
             turn_bind,
             turn_public_ip,

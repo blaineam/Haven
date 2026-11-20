@@ -9,6 +9,34 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+## 2.2.0 (2026-11-20)
+
+**Haven in a web browser.** A member can link a web browser as one more device of their own account. The page is served by a
+relay the circle's own members run, it reaches the network only through that relay, it never holds the account key, and each
+circle decides whether browsers may read it (off until its members say yes). It is weaker than an app and says so: the relay
+serves the page's code. `docs/WEB-PARITY.md` is the full account of what it does, what was tested, and what was not.
+Web access is off unless the person running a relay turns it on. Notifications in a closed browser need the push worker to be
+deployed with a Web Push key pair (`push/README.md`); until then that switch reads "not available right now".
+
+**Fixes that reach every app** are listed first below: two Android call fixes (one a privacy fix), an iPhone/Mac fix for friends
+added by taking their invite, a desktop screen-share fix, and call messages that now arrive in order.
+
+### Fixed - A camera or screen-share change could be undone by an older one arriving late (all platforms)
+A call message can reach the other person by two routes at once, and the slower copy of "camera on" could arrive after the
+"camera off" that followed it, leaving a picture where an avatar belonged (or the reverse). The camera-state message now says
+when it was made, and a state older than the one already applied is ignored. Apps that predate this read the message exactly as
+before. No security impact. Regression tests: `a_camera_state_frame_carries_its_order_and_old_readers_still_read_it`, and the
+camera-state cases in the Android and Apple call tests.
+
+### Fixed - In a call placed from the desktop app, later changes could fail to reach a phone (desktop; web client)
+The phone apps put every call-signalling message on the relay as well as sending it directly, and read the relay while they are
+in a call. The desktop engine only sent it directly. A call from the desktop app rang and connected, because the opening messages
+got through, and then anything sent later could be lost on a phone that had stopped listening on the direct path: turning the
+camera on, starting a screen share, hanging up (the call then ended only when the phone noticed the silence). Seen on iPhone;
+Android kept listening and was not affected. The desktop engine now leaves call messages on the relay too. This lives in the
+shared engine the web client introduced, so it ships with that. No security impact: the messages are sealed to each of the
+recipient's devices exactly as before. Regression test: `a_call_frame_is_left_on_the_relays_live_lane_for_the_recipient`.
+
 ### Fixed - A friend you added by taking THEIR invite could be out of reach for minutes (iPhone, iPad, Mac)
 When someone's hello arrives, the app answers with its recent posts. On Android that answer has always included where the
 circle's relays are; on Apple devices it did not — a new friend learned the relays only from a broadcast repeated every ten
@@ -25,6 +53,12 @@ off" when a call began and did not correct that when a screen share started, so 
 at its word — drew the avatar over the screen being shared. The app now announces that its video is live while it is sharing,
 and goes back to the camera's state when the share stops. A screen can also be shared from a computer with no camera at all.
 No security impact. Regression test: `call screen share: with the camera off, peers are told the video slot is live while sharing`.
+### Added - The web client is tested with the iPhone app, in video and group calls, and with a Mac as its host (not shipped; `feat/web-client`)
+Calls between browsers and the Android and iPhone apps now cover video and a three-way group call, in both call directions, and
+pass; this was the first run of the iPhone's and Android's per-device call sealing. The Mac app was run as a web host for the
+first time (as the isolated QA build) and passes the linking test; its "Web access" switch turns the page on and off at once.
+Two Android call bugs found this way are fixed on `main` (above). One thing is open and recorded in `docs/WEB-PARITY.md`: an
+iPhone that takes the invite of someone who has no relay of their own was not seen to finish connecting within several minutes.
 
 ### Fixed - After a video call, the next call could start with your camera already on (Android)
 The Android app never reset the camera switch when a call ended. If you had your camera on when a call finished, your next call
@@ -33,6 +67,34 @@ call now starts with the camera off, as it always has on iPhone, iPad, Mac and d
 chosen to share could be sent to the people in your next call; only people you were in a call with could see it. Found by running
 a browser-to-Android call test twice in a row. Regression test:
 `a_call_that_ended_with_the_camera_on_leaves_the_next_call_starting_with_it_off`.
+### Changed - In a browser, a very large video is saved to the computer instead of played (not shipped; `feat/web-client`)
+A browser tab has no disk, and a relay cannot decrypt a video to stream it. So in the web client a video over 64 MB is no longer
+pulled into the page on its own: it shows its size and a "Save to this computer" button, which fetches it once, decrypts it, puts
+it in your downloads, and keeps nothing in the tab. Smaller media is unchanged, and so is every app.
+
+### Added - Notifications in a browser while Haven is closed (not shipped; `feat/web-client`, and it needs the push worker deployed)
+A linked browser can now be rung when something new arrives and no Haven tab is open. It is off by default, lives in Settings →
+Privacy, and is offered only in a browser you chose to stay linked in. What the browser receives is a doorbell with nothing in it:
+the notification says only that something is waiting, and the page fetches and decrypts the real thing from your circle's relay
+when you open it. The browser's push service (Google, Mozilla, Apple or Microsoft) learns that your browser was rung and when,
+not by whom or about what. A browser holds no account key, so it registers with its own device key and the credential your
+account signed for it; nobody can file their own browser under your account (proved, `haven_web_push.spthy`). The same change
+lets a post made in a browser wake other members' phones.
+Revoking a browser from another device tells the push worker to drop it and to refuse it from then on; unlinking from the browser
+itself stops it at once. **Known limit:** until the device you revoked it from has been online once afterwards, a revoked browser
+can still be rung — it would learn that something happened, never what. Nothing changes for anyone until the push worker is deployed with a Web Push key pair
+(`push/README.md`); until then the switch reads "not available right now".
+
+### Changed - The web client's module is a quarter smaller (not shipped; `feat/web-client`)
+The release build now runs `wasm-opt -Oz` on the WebAssembly module (10.9 MB to 8.3 MB; about 3.2 MB as served). CI requires the
+tool and runs the browser smoke against the optimized module.
+
+### Added - The web client is tested against the Android app, and in calls with it (not shipped; `feat/web-client`)
+The browser-against-a-real-app test now also drives the Android app (over adb), and passes: linking by the browser's code, the web
+mark, per-circle consent, posts each way. A new test places a call between a browser and the Android app in each direction, and the
+browser call test now covers the camera, screen sharing, and a group call of three with a person added mid-call. The Android app's per-device call sealing ran for the first time
+here and works. Test-only additions to the debug driver: `connect_link` on Android, and `web_access` without `allow` reads a
+circle's standing without changing it (Apple and Android). The call test found the Android hang-up bug recorded above.
 
 ### Fixed - A call could hang itself up six seconds after a brief connection blip (Android)
 When a call's connection went quiet, the Android app scheduled a check for six seconds later and, if the other person was still
@@ -87,6 +149,37 @@ device reached another before that device's key announcement did (each message t
 receiving device tried the key it already had, failed, discarded the post, and then ignored every later copy of it for as long as the
 app stayed open. The post is now kept and opened as soon as the key arrives. No security impact: nothing was readable that should not
 have been. Regression test: `s4_ffi_own_device_events_open_in_any_delivery_order`.
+
+### Fixed - A call did not ring on a linked device that holds no account key (not shipped; `feat/web-client`)
+A call's signalling was sealed to the account being called, so only a device holding that account's master key could open it. A
+device linked the newer, safer way never receives that key: it got the call and could not read it, so it never rang. Callers now
+seal a copy to each of the other person's devices. This is what makes calls work in a browser, and it also applies to phones,
+tablets and computers linked without the master key. Changed in the desktop engine, the Apple app and the Android app; tested
+between two browsers, compiled on Apple and Android. Also fixed in the desktop interface: two copies of the same call offer
+arriving together, or an invite re-sent mid-setup, could break the connection's negotiation.
+
+### Added - Web client (not shipped; `feat/web-client`)
+Haven can run in a web browser. A circle's relay can serve the web client under `/app/`, and a member links the browser as one more
+of their own devices with a secure link code from a device they already use; the browser never holds the account's master key and
+can be removed like any device. It is the desktop app's interface and engine (the engine compiled to WebAssembly), laid out for
+phones, tablets and desktops. Web access is **off by default** on every relay: `haven-relay --web-app <dir>`, or the Web access
+switch in the desktop app's and the Mac app's relay settings (phones do not host it: their relays have no public front door).
+Proven end to end in headless Chromium against a native device hosting the relay: linking, staying linked across a reload, posts
+and pictures in both directions, everything stored in the browser encrypted, a shared-computer session wiped on leaving. Phones
+and the Mac teach the account's other devices the relay address (frame 37) the same way the desktop does, so a browser can be
+linked from any of them. A browser can also be linked the other way round: it shows a code, and a device that has the account
+scans or is given it (desktop: Devices ▸ Add a device ▸ Scan its code; iPhone, iPad, Mac and Android: Link a device) — the
+ticket it answers with enrolls only the device that code names. Pictures and videos can be dropped onto the page. Still missing:
+video and group calls in a browser (a one-to-one audio call between two browsers is tested), and a store build that carries the
+bundle.
+
+**A circle decides whether browsers may read it.** Linking a browser does not let it read anything: a circle's keys reach a
+browser only while that circle allows web devices. A circle with a creator follows its admins; an older circle or a direct
+message needs every member to agree, and one person withdrawing closes it again. The switch is in each circle's settings and in
+each conversation, on every platform, and a browser cannot flip it (it holds no account key). Turning it off stops anything new
+reaching browsers; it does not take back what they were already shown. An app from before this change does not know the rule
+and treats a browser like any other device until it is updated. Design, trust statement and progress: [`docs/WEB-PARITY.md`](docs/WEB-PARITY.md) and D21 in
+[`docs/DECISIONS.md`](docs/DECISIONS.md).
 
 ## 2.1.3 (security release, 2026-11-19)
 

@@ -167,7 +167,7 @@ encryption boundary; it's just more sealed bytes.
   - **In-band chunk frames** (type 5, direct P2P / nearby): **32 KB** on iOS
     (`apple/HavenApp/FeedView.swift:103`) and Android (`core/HavenNet.kt:2171`) — reduced from
     512 KB after a MultipeerConnectivity buffer overflow — but still **512 KB on desktop**
-    (`desktop/src-tauri/src/engine.rs:141`). This doc previously claimed a flat "512 KB"; that
+    (`core/haven-client/src/engine.rs:141`). This doc previously claimed a flat "512 KB"; that
     is only true of desktop. The mismatch is interoperable (the receiver doesn't care) but the
     inconsistency is unintentional.
   - **Manifest chunking for large blobs** (relay/S3): blobs over **8 MB** split into 8 MB parts

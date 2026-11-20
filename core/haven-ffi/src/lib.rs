@@ -8,16 +8,23 @@ use std::sync::{Arc, Mutex};
 
 use std::collections::{HashMap, HashSet};
 
+#[cfg(not(target_arch = "wasm32"))]
 use haven_net::Node;
+#[cfg(not(target_arch = "wasm32"))]
 use haven_net::blobstore::BlobClient;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
 use haven_p2p::crypto::{decapsulate, encapsulate_to, open, seal, Encapsulation};
 use haven_p2p::device::{
     admin_closure, circle_fully_compact_wire_capable, circle_fully_mls_capable,
     circle_fully_seed_drop_capable, circle_id_binds_creator,
-    mint_owned_circle_id, recipients_with_devices, recipients_with_devices_gated, AdminGrant,
+    mint_owned_circle_id, recipients_with_devices_gated_where, recipients_with_devices_where, AdminGrant,
     CircleUpgrade, ContactDevices, DeviceCredential, DeviceList, SeedDropCapability,
 };
+use haven_p2p::webpolicy::{current_positions, web_allowed, CircleWebPolicy};
+// Only the golden reference bundle builder (`bundle_reference.rs`, tests) still calls the unfiltered form.
+#[cfg(test)]
+use haven_p2p::device::recipients_with_devices_gated;
 use haven_p2p::treekem;
 use haven_p2p::transport;
 use haven_p2p::identity::{Identity, HavenId};
@@ -94,6 +101,9 @@ const TAG_MLS_PROPOSAL: u8 = 0x07; // a treekem::Proposal (reserved; unbundled p
 const TAG_MLS_JOIN: u8 = 0x08; // a signed join ack: "device D holds genesis G's Welcome" (the §7.2 gate)
 const TAG_ADMIN_GRANT: u8 = 0x09; // an account-signed device::AdminGrant riding the circle control lane
 const TAG_CIRCLE_UPGRADE: u8 = 0x0a; // a device::CircleUpgrade offer: legacy circle → creator-bound successor
+// Per-circle consent to web devices (docs/WEB-PARITY.md). Same additive contract as the tags above:
+// a build that predates it fails the raw-JSON parse of this envelope and moves on.
+const TAG_WEB_POLICY: u8 = 0x0b; // an account-signed webpolicy::CircleWebPolicy riding the circle control lane
 // Version 2 of the tree (docs/formal/PROTOCOL-SPEC.md §16, `keying_v2.rs`). Its OWN tag family, so a
 // build that only speaks the v1 tree never parses a v2 wire: there an unknown tag falls to the
 // raw-JSON `receive_legacy` arm, fails the parse and returns a per-envelope error — it is neither
@@ -192,6 +202,7 @@ uniffi::setup_scaffolding!();
 /// `<dir>/iroh-trace.log`, so a specific relay dial can be watched step-by-step (candidate paths,
 /// hole-punch attempts, DERP fallback, connect, and the blob accept/serve on the far side). Idempotent;
 /// safe no-op if a subscriber is already set. Never panics (falls back to a sink on file error).
+#[cfg(not(target_arch = "wasm32"))]
 #[uniffi::export]
 pub fn init_logging(dir: String) {
     use std::sync::Once;
@@ -231,18 +242,21 @@ pub fn init_logging(dir: String) {
 /// [`HavenNode::shutdown`]) to pick up a new map — desktop does this via soft rebind when fabric
 /// is first learned mid-session. WebRTC ICE still follows app-side fabric prefs
 /// (Apple `HavenFabric` / Android `haven.fabric`).
+#[cfg(not(target_arch = "wasm32"))]
 #[uniffi::export]
 pub fn apply_derp_urls(urls: Vec<String>) {
     haven_net::apply_derp_urls(urls);
 }
 
 /// True when ≥1 Haven DERP URL is installed in the process policy (n0 is not sole fabric).
+#[cfg(not(target_arch = "wasm32"))]
 #[uniffi::export]
 pub fn haven_fabric_active() -> bool {
     haven_net::haven_fabric_active()
 }
 
 /// Active custom DERP URLs from the process policy (empty when n0-only).
+#[cfg(not(target_arch = "wasm32"))]
 #[uniffi::export]
 pub fn active_derp_urls() -> Vec<String> {
     haven_net::active_derp_urls()
@@ -382,6 +396,15 @@ pub fn low_data_allowance_on(link: LinkConstraint, traffic: Traffic) -> Allowanc
 #[uniffi::export]
 pub fn low_data_active() -> bool {
     !matches!(link_constraint(), LinkConstraint::Normal)
+}
+
+/// Wall and monotonic clocks. `std::time` has no clock on `wasm32-unknown-unknown` (both `now()`s
+/// panic), so the browser build reads the page's clock instead; every other target is `std`.
+mod clock {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) use std::time::{Instant, SystemTime, UNIX_EPOCH};
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) use web_time::{Instant, SystemTime, UNIX_EPOCH};
 }
 
 /// Multi-device (D16): device-credential + account-state self-sync FFI surface.
@@ -810,7 +833,8 @@ pub fn parse_relay_link(uri: String) -> Option<RelayLinkInfo> {
 #[uniffi::export]
 pub fn http_auth_header(seed: Vec<u8>, token: String, method: String, key: String, body: Vec<u8>) -> Result<String, HavenError> {
     let seed: [u8; 32] = seed.try_into().map_err(|_| HavenError::Invalid { msg: "seed must be 32 bytes".into() })?;
-    Ok(haven_net::httprelay::auth_header(&auth_node_secret(&seed), &token, &method, &key, &body))
+    let ts = clock::SystemTime::now().duration_since(clock::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    Ok(haven_p2p::httpauth::auth_header_at(&auth_node_secret(&seed), &token, &method, &key, &body, ts))
 }
 
 /// seed → node-signing-secret, cached. `Identity::from_seed` derives the FULL hybrid identity —
@@ -837,6 +861,7 @@ fn auth_node_secret(seed: &[u8; 32]) -> [u8; 32] {
 /// Client to a circle's blob mailbox (a relay's local-disk store, reached over Haven Net /
 /// iroh). Used to upload a circle-sealed media blob and fetch it later — no shared bucket
 /// credentials, just the relay's node id. The relay never sees content (blobs are sealed).
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(uniffi::Object)]
 pub struct RelayClient {
     /// Shared with the node's per-peer cache (`blob_client_cached`) so the app and the relay mesh use
@@ -846,6 +871,7 @@ pub struct RelayClient {
     inner: Arc<BlobClient>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[uniffi::export(async_runtime = "tokio")]
 impl RelayClient {
     /// Tell this relay who ELSE serves `circleId`, so it mesh-replicates with them instead of only
@@ -952,11 +978,13 @@ impl RelayClient {
 /// in-process iroh node made iroh's path manager churn unboundedly (the tens-of-GB leak). Its
 /// `node_id_hex` is therefore the ACCOUNT node id; that's the `volunteer_node_id` for the relay link.
 /// Hold the object to keep serving; drop it (or call `disable`) to stop.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(uniffi::Object)]
 pub struct RelayServerHandle {
     node: Arc<HavenNode>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[uniffi::export(async_runtime = "tokio")]
 impl RelayServerHandle {
     /// Attach the relay/mailbox to a running [`HavenNode`], serving blobs from `dir` on that node's
@@ -1076,6 +1104,7 @@ impl RelayServerHandle {
 ///
 /// Separate listen socket from the messaging node (same-key second-endpoint scar). Hold this
 /// object while hosting; drop stops the server. Desktop / macOS hosts call this; iOS usually does not.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(uniffi::Object)]
 pub struct DerpServerHandle {
     public_url: String,
@@ -1084,6 +1113,7 @@ pub struct DerpServerHandle {
     _server: haven_net::DerpServer,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[uniffi::export(async_runtime = "tokio")]
 impl DerpServerHandle {
     /// Start DERP on `bind` (e.g. `127.0.0.1:3340`). `public_url` may be empty until a tunnel is up.
@@ -1133,6 +1163,7 @@ impl DerpServerHandle {
 ///
 /// `/relay`, `/derp`, `/ping` → DERP backend; everything else → media. Used so free trycloudflare
 /// and single-hostname named tunnels front both roles without a second cloudflared process.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(uniffi::Object)]
 pub struct PathRouterHandle {
     local_addr: String,
@@ -1140,6 +1171,7 @@ pub struct PathRouterHandle {
     _router: haven_net::PathRouter,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[uniffi::export(async_runtime = "tokio")]
 impl PathRouterHandle {
     /// Bind `bind` (e.g. `127.0.0.1:8675`) and proxy to media/derp host:port backends.
@@ -1157,6 +1189,7 @@ impl PathRouterHandle {
             media_backend,
             derp_backend,
             http_token,
+            web_app: None,
         };
         let router = haven_net::PathRouter::spawn(&cfg)
             .await
@@ -1175,6 +1208,36 @@ impl PathRouterHandle {
         }))
     }
 
+    /// [`spawn`](Self::spawn), also serving the Haven web client under `/app/` from `web_app_dir`
+    /// (a built `web-client/dist`, read into memory once, here). For a host whose user turned
+    /// "Web access" ON — it is off unless the host calls this instead of `spawn`. Fails, rather
+    /// than quietly serving without it, if the directory is not a web client build.
+    #[uniffi::constructor]
+    pub async fn spawn_with_web_app(
+        bind: String,
+        media_backend: String,
+        derp_backend: String,
+        http_token: String,
+        web_app_dir: String,
+    ) -> Result<Arc<Self>, HavenError> {
+        let bundle = haven_net::webbundle_dir::load(std::path::Path::new(&web_app_dir))
+            .map_err(|e| HavenError::Invalid { msg: format!("web client: {e}") })?;
+        let cfg = haven_net::PathRouterConfig {
+            bind,
+            media_backend,
+            derp_backend,
+            http_token,
+            web_app: Some(Arc::new(bundle)),
+        };
+        let router = haven_net::PathRouter::spawn(&cfg)
+            .await
+            .map_err(|e| HavenError::Invalid { msg: format!("path router spawn: {e}") })?
+            .ok_or_else(|| HavenError::Invalid { msg: "path router disabled".into() })?;
+        let local_addr = router.local_addr.to_string();
+        let local_port = router.local_port();
+        Ok(Arc::new(Self { local_addr, local_port, _router: router }))
+    }
+
     pub fn local_addr(&self) -> String {
         self.local_addr.clone()
     }
@@ -1182,6 +1245,16 @@ impl PathRouterHandle {
     pub fn local_port(&self) -> u16 {
         self.local_port
     }
+}
+
+/// The digest of a web client build on disk (what a relay serving it reports in `/_haven`), or an
+/// error if the directory is not one. Lets a host show the user exactly which build it would serve.
+#[cfg(not(target_arch = "wasm32"))]
+#[uniffi::export]
+pub fn web_app_digest(web_app_dir: String) -> Result<String, HavenError> {
+    haven_net::webbundle_dir::load(std::path::Path::new(&web_app_dir))
+        .map(|b| b.digest())
+        .map_err(|e| HavenError::Invalid { msg: format!("web client: {e}") })
 }
 
 // ===== Live social demo =====
@@ -1499,6 +1572,7 @@ fn short(node_hex: &str) -> String {
 // ===== Networking: a live P2P node =====
 
 /// Foreign listener that receives inbound sealed-envelope bytes.
+#[cfg(not(target_arch = "wasm32"))]
 #[uniffi::export(with_foreign)]
 pub trait InboundListener: Send + Sync {
     /// `from_hex` is the sender's AUTHENTICATED transport node id (the iroh connection's remote
@@ -1511,11 +1585,13 @@ pub trait InboundListener: Send + Sync {
 
 /// A live peer-to-peer node: listens for inbound sealed posts and dials peers by
 /// ticket. The bytes it moves are already E2E-encrypted by `haven-p2p`.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(uniffi::Object)]
 pub struct HavenNode {
     node: Node,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[uniffi::export(async_runtime = "tokio")]
 impl HavenNode {
     /// Start a node bound to the given transport seed (so its node id == that seed's Haven id); inbound
@@ -1630,6 +1706,20 @@ impl HavenNode {
     pub async fn send_to_node(&self, node_id_hex: String, payload: Vec<u8>) -> Result<(), HavenError> {
         self.node
             .send_to_node(&node_id_hex, &payload)
+            .await
+            .map_err(|e| HavenError::Invalid { msg: e.to_string() })
+    }
+
+    /// Send bytes to a node listening on a named relay (`relay_url`), which need not be one this
+    /// node knows. For the scan-to-link offer: see [`crate::pair`].
+    pub async fn send_to_node_via(
+        &self,
+        node_id_hex: String,
+        relay_url: String,
+        payload: Vec<u8>,
+    ) -> Result<(), HavenError> {
+        self.node
+            .send_to_node_via(&node_id_hex, &relay_url, &payload)
             .await
             .map_err(|e| HavenError::Invalid { msg: e.to_string() })
     }
@@ -1793,6 +1883,11 @@ struct Circle {
     /// `admin_closure` walks from the creator. Higher-version-wins per (admin_account); a forged/stale
     /// grant never reaches this vec (verified at ingest). Persisted (additive) and re-broadcast.
     admin_grants: Vec<Vec<u8>>,
+    /// Verified [`CircleWebPolicy`] wire bytes — each account's signed position on web devices in
+    /// this circle, at most one per signer (its highest version). Evaluated by `circle_allows_web`;
+    /// nothing here is trusted beyond "this signer said this" (who may decide is checked there).
+    /// Persisted (additive) and re-broadcast like the admin grants.
+    web_policies: Vec<Vec<u8>>,
     /// Verified [`CircleUpgrade`] offers seen on THIS (legacy) circle's lane — "my creator-bound
     /// successor is X". Each is signature-verified and successor-binding-checked at ingest, but is
     /// deliberately NOT acted on: a legacy circle has no authority root, so nothing can prove the
@@ -1839,8 +1934,8 @@ const ROTATE_INTERVAL_SECS: u64 = 7 * 24 * 60 * 60;
 /// Wall clock in unix seconds (0 if the clock predates the epoch — treated as "unstamped").
 /// Rotation is time-driven, so tests override this to jump weeks ahead without sleeping.
 fn now_secs() -> u64 {
-    let real = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let real = clock::SystemTime::now()
+        .duration_since(clock::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     #[cfg(test)]
@@ -1937,6 +2032,7 @@ impl Circle {
             creator: None,
             creator_pinned: false,
             admin_grants: vec![],
+            web_policies: vec![],
             upgrade_offers: vec![],
             followed_upgrade: None,
             mls_live_epoch: None,
@@ -2902,10 +2998,19 @@ fn shadow_device_leaves(st: &NetState, idx: usize) -> Vec<(HavenId, DeviceCreden
     let accounts = circle_mls_accounts(st, idx);
     let mut out: Vec<(HavenId, DeviceCredential)> = Vec::new();
     let mut seen: HashSet<[u8; 32]> = HashSet::new();
+    // A web device is a leaf only where the circle allows web devices (asked once, and only if a
+    // web device is actually among them).
+    let mut allow_web: Option<bool> = None;
     for a in &accounts {
         if let Some(cd) = st.device_lists.get(&a.node_id_bytes()) {
             for c in &cd.credentials {
-                if cd.list.is_authorized(&c.device_id()) && seen.insert(c.device_id()) {
+                if !cd.list.is_authorized(&c.device_id()) {
+                    continue;
+                }
+                if c.is_web() && !*allow_web.get_or_insert_with(|| circle_allows_web(st, idx)) {
+                    continue;
+                }
+                if seen.insert(c.device_id()) {
                     out.push((c.device.clone(), c.clone()));
                 }
             }
@@ -3523,6 +3628,106 @@ fn receive_circle_upgrade(st: &mut NetState, idx: usize, body: &[u8]) -> Result<
         }
     }
     offers.push(up.to_bytes());
+    Ok(false)
+}
+
+// ── Per-circle consent to web devices (docs/WEB-PARITY.md; `haven_p2p::webpolicy`) ─────────────
+
+/// Does this circle allow web devices? Recomputed from verified state every time it is asked:
+/// the stored positions, the circle's admins (a creator-bound circle) or its whole membership (a
+/// circle nobody provably owns). Nothing stored, or anything short of the rule, is NO.
+fn circle_allows_web(st: &NetState, idx: usize) -> bool {
+    let c = &st.circles[idx];
+    if c.web_policies.is_empty() {
+        return false;
+    }
+    let gid = c.id.as_bytes();
+    let records: Vec<CircleWebPolicy> = c
+        .web_policies
+        .iter()
+        .filter_map(|w| CircleWebPolicy::from_bytes(w).ok())
+        .filter(|p| p.circle_id == gid)
+        .collect();
+    let admins = circle_admin_set(st, idx);
+    let members: Vec<[u8; 32]> = circle_mls_accounts(st, idx).iter().map(|a| a.node_id_bytes()).collect();
+    web_allowed(admins.as_ref(), &members, &records)
+}
+
+/// Is `device_hex` a web device of any account whose roster I hold (mine included)?
+fn device_is_web(st: &NetState, device_hex: &str) -> bool {
+    let Ok(id) = decode_hex32(device_hex) else { return false };
+    st.device_lists.values().any(|cd| cd.credentials.iter().any(|c| c.device_id() == id && c.is_web()))
+}
+
+/// Is this a web device in a circle that has not allowed web devices — so key material offered to
+/// it for this circle is held unopened?
+fn web_keys_held(st: &NetState, idx: usize) -> bool {
+    self_is_web(st) && !circle_allows_web(st, idx)
+}
+
+/// Is THIS device a web device — does my own account-signed credential carry the web mark?
+fn self_is_web(st: &NetState) -> bool {
+    let Some(me) = st.device.as_ref().map(|d| d.public().node_id_bytes()) else { return false };
+    st.device_lists
+        .get(&st.me().node_id_bytes())
+        .is_some_and(|cd| cd.credentials.iter().any(|c| c.device_id() == me && c.is_web()))
+}
+
+/// Verify one [`CircleWebPolicy`] wire against its signer's pinned bundle and keep it if it is that
+/// signer's newest word on this circle. Returns whether the circle's ANSWER changed as a result —
+/// the caller then re-keys, exactly as it would for a device joining or leaving the roster, so a
+/// web device stops (or starts) receiving this circle's keys from the next commit on.
+///
+/// The signer must be me or a member whose bundle is pinned; anyone else's record is dropped.
+/// Whether the signer is ENTITLED to decide is not judged here — `circle_allows_web` does that
+/// from current state, so a member who becomes an admin later is already on record.
+fn store_web_policy(st: &mut NetState, idx: usize, body: &[u8]) -> bool {
+    let Ok(p) = CircleWebPolicy::from_bytes(body) else { return false };
+    if p.circle_id != st.circles[idx].id.as_bytes() {
+        return false;
+    }
+    let Some(signer_pub) = mls_account_bundle(st, idx, &p.signer) else { return false };
+    if p.verify(&signer_pub).is_err() {
+        return false;
+    }
+    let before = circle_allows_web(st, idx);
+    let records = &mut st.circles[idx].web_policies;
+    let mut placed = false;
+    for w in records.iter_mut() {
+        let Ok(existing) = CircleWebPolicy::from_bytes(w) else { continue };
+        if existing.signer != p.signer {
+            continue;
+        }
+        placed = true;
+        // Newer wins. The same version saying the opposite is kept as the NO (a signer who has
+        // said both has not said yes), so every device settles on the same record.
+        if p.version > existing.version || (p.version == existing.version && existing.allow && !p.allow) {
+            *w = p.to_bytes();
+        }
+        break;
+    }
+    if !placed {
+        records.push(p.to_bytes());
+    }
+    let after = circle_allows_web(st, idx);
+    if before != after {
+        // Same step a roster change takes: a fresh epoch, sealed to the new recipient set.
+        st.circles[idx].rotate_epoch();
+    }
+    before != after
+}
+
+/// Ingest a web-device position riding the control lane. Never touches content: returns `false`.
+fn receive_web_policy(st: &mut NetState, idx: usize, body: &[u8]) -> Result<bool, HavenError> {
+    if store_web_policy(st, idx, body) {
+        // The answer changed. On a web device that was holding this circle's keys unopened, they
+        // can be opened now (and if the answer went the other way, the replay holds them again).
+        drain_pending_commits(st, idx);
+        drain_pending_tree(st, idx);
+        // The leaf set just changed for this circle; let the tree catch up and re-drain.
+        mls_refresh_keying(st, idx);
+        drain_pending(st, idx);
+    }
     Ok(false)
 }
 
@@ -4933,10 +5138,14 @@ fn mls_sync_roster_to_tree(st: &mut NetState, idx: usize) {
     // Then ADD authorized devices missing from the tree (the register_device→Add wiring) — but NEVER
     // a device that was deliberately Removed (removal-sticky): re-admitting a cut-off device is an
     // explicit act, not an automation side effect of it still lingering in a roster view.
+    // The one exception is a WEB device: it is in `authorized` only while the circle allows web
+    // devices, and it was Removed (if it was) because the circle stopped allowing them. The circle
+    // saying yes again IS the explicit act, signed by whoever may decide.
     let missing: Vec<(HavenId, DeviceCredential)> = authorized
         .into_iter()
-        .filter(|(b, _)| {
-            !tree_devices.contains(&b.node_id_bytes()) && !cur.removed_devices.contains(&b.node_id_bytes())
+        .filter(|(b, cred)| {
+            !tree_devices.contains(&b.node_id_bytes())
+                && (cred.is_web() || !cur.removed_devices.contains(&b.node_id_bytes()))
         })
         .collect();
     if !missing.is_empty() {
@@ -5153,12 +5362,27 @@ fn receive_key_commit(st: &mut NetState, idx: usize, body: &[u8]) -> Result<bool
         .map_err(|e| HavenError::Invalid { msg: format!("bad commit: {e}") })?;
     let sender_hex = env.sender_hex();
     let me_hex = hex(&st.me().node_id_bytes());
+    // On a web device, in a circle that has not allowed web devices: hold the commit unopened (see
+    // `receive_locked`). Replayed from here when the circle's answer changes.
+    if web_keys_held(st, idx) {
+        park_pending_commit(&mut st.circles[idx], body);
+        return Ok(false);
+    }
     let Some((committer, committer_account_hex)) = resolve_committer(st, idx, &sender_hex, &me_hex) else {
         // Committer not resolvable YET (a new friend whose bundle/roster hasn't landed). Park it —
         // the mailbox already marked its key seen, so dropping it here lost the key until a resend.
         park_pending_commit(&mut st.circles[idx], body);
         return Ok(false);
     };
+    // A WEB device has no say in a circle's keys unless the circle allows web devices. Devices of
+    // one account converge on the larger of the keys they each mint, so without this a browser
+    // could simply OFFER a key for the next epoch, have its account's other devices adopt it, and
+    // read everything they then seal under it — leaving it out of the recipients would mean
+    // nothing. Terminal, not parked: when the circle's answer changes it re-keys, and the browser
+    // commits afresh.
+    if device_is_web(st, &sender_hex) && !circle_allows_web(st, idx) {
+        return Ok(false);
+    }
     // Dual-open: try this DEVICE's key first (content sealed to my device bundle — Option 1), then fall
     // back to the ACCOUNT key (older account-sealed content, or peers who don't know my roster yet). On a
     // SEEDLESS device the account arm is simply ABSENT (`me_secret` is `None`) — everything relevant is
@@ -5589,6 +5813,11 @@ fn drain_pending_tree(st: &mut NetState, idx: usize) {
         let mut progressed = false;
         for raw in pending {
             TREE_RETRYABLE.with(|f| f.set(false));
+            // A Welcome held on a web device stays held until its circle allows web devices.
+            if matches!(raw.first(), Some(&TAG_MLS_WELCOME | &TAG_MLS2_WELCOME)) && web_keys_held(st, idx) {
+                park_pending_tree(&mut st.circles[idx], &raw);
+                continue;
+            }
             let applied = match raw.first() {
                 Some(&TAG_MLS_COMMIT) => receive_mls_commit(st, idx, &raw[1..]).unwrap_or(false),
                 Some(&TAG_MLS_WELCOME) => receive_mls_welcome(st, idx, &raw[1..]).unwrap_or(false),
@@ -6164,6 +6393,38 @@ pub struct MlsShadowStatusFfi {
 ///                  KeyCommit within one bundle (§7.3), tree state preserved for a later re-flip.
 ///   * `"live"`   — flipped: content is keyed by the tree (§4.5), the legacy KeyCommit has stopped.
 /// `epoch` is the tree epoch (1 = genesis; +1 per applied Remove) when live, else 0.
+/// `name` carrying the web-device mark (idempotent) — what a primary signs into the credential of
+/// a device it knows to be a browser (one that linked by showing a code), and what a browser calls
+/// itself. See `haven_p2p::webpolicy` for what the mark is and is not.
+#[uniffi::export]
+pub fn web_device_name(name: String) -> String {
+    haven_p2p::webpolicy::mark_web_device_name(&name)
+}
+
+/// Does this device name carry the web-device mark?
+#[uniffi::export]
+pub fn is_web_device_name(name: String) -> bool {
+    haven_p2p::webpolicy::is_web_device_name(&name)
+}
+
+/// Where a circle stands on web devices (browsers linked to a member's account).
+#[derive(uniffi::Record)]
+pub struct CircleWebAccessFfi {
+    /// The circle's answer right now: web devices receive its keys only when this is true.
+    pub allowed: bool,
+    /// My account's own current position.
+    pub mine: bool,
+    /// This device can state a position (it holds the account seed). A linked device cannot.
+    pub can_sign: bool,
+    /// True: a creator-bound circle, decided by its admins' newest word. False: a circle nobody
+    /// provably owns (a legacy circle, a direct message), where every member has to say yes.
+    pub decided_by_admins: bool,
+    /// My position counts toward the answer (I am an admin, or every member's does).
+    pub i_decide: bool,
+    /// Where every member has to agree: the accounts (hex) that have not said yes, me included.
+    pub waiting_on: Vec<String>,
+}
+
 #[derive(uniffi::Record)]
 pub struct MlsKeyingStatusFfi {
     pub state: String,
@@ -6411,6 +6672,11 @@ struct PersistCircle {
     #[serde(default)]
     #[serde(with = "persist_bytes")]
     admin_grants: Vec<Vec<u8>>,
+    /// Each account's signed position on web devices in this circle (`Circle::web_policies`).
+    /// Defaulted so old state loads with none — which means "not allowed".
+    #[serde(default)]
+    #[serde(with = "persist_bytes")]
+    web_policies: Vec<Vec<u8>>,
 }
 /// One persisted roster: `(account_bundle, device_list_bytes, credential_bytes)`.
 type PersistRoster = (Vec<u8>, Vec<u8>, Vec<Vec<u8>>);
@@ -6611,7 +6877,7 @@ struct EngineLock<T> {
 
 struct EngineGuard<'a, T> {
     guard: std::sync::MutexGuard<'a, T>,
-    taken: std::time::Instant,
+    taken: clock::Instant,
     taken_cpu: Option<std::time::Duration>,
     site: &'static std::panic::Location<'static>,
 }
@@ -6641,7 +6907,7 @@ impl<T> EngineLock<T> {
     fn lock(&self) -> Result<EngineGuard<'_, T>, std::sync::PoisonError<std::sync::MutexGuard<'_, T>>> {
         let site = std::panic::Location::caller();
         let guard = self.inner.lock()?;
-        Ok(EngineGuard { guard, taken: std::time::Instant::now(), taken_cpu: thread_cpu_time(), site })
+        Ok(EngineGuard { guard, taken: clock::Instant::now(), taken_cpu: thread_cpu_time(), site })
     }
 }
 
@@ -7237,6 +7503,82 @@ impl HavenSocial {
         true
     }
 
+    /// State MY account's position on web devices in a circle: allowed (`true`) or not. Signed with
+    /// the account key, so only a device that holds the account seed can — a linked (seedless)
+    /// device, and so every browser, returns `false` and changes nothing. Whether my position
+    /// DECIDES anything depends on the circle (`circle_web_access`): in a creator-bound circle only
+    /// an admin's does; in a circle nobody provably owns, every member has to say yes. If the
+    /// circle's answer changes, it re-keys at once.
+    pub fn set_circle_web_access(&self, circle_id: String, allow: bool) -> bool {
+        let mut st = self.state.lock().unwrap();
+        let Some(idx) = st.circles.iter().position(|c| c.id == circle_id) else { return false };
+        let Some(acct) = st.me_secret.as_ref().map(|m| Identity::from_seed(&m.secret_seed())) else { return false };
+        let me = acct.public().node_id_bytes();
+        let gid = circle_id.as_bytes().to_vec();
+        let mut version = 1u64;
+        for w in &st.circles[idx].web_policies {
+            if let Ok(p) = CircleWebPolicy::from_bytes(w) {
+                if p.signer == me {
+                    if p.allow == allow {
+                        return true; // already my position: nothing to sign, nothing to re-key
+                    }
+                    version = version.max(p.version + 1);
+                }
+            }
+        }
+        let wire = CircleWebPolicy::issue(&acct, &gid, allow, version).to_bytes();
+        if store_web_policy(&mut st, idx, &wire) {
+            mls_refresh_keying(&mut st, idx);
+        }
+        true
+    }
+
+    /// Where a circle stands on web devices, for its settings screen.
+    pub fn circle_web_access(&self, circle_id: String) -> CircleWebAccessFfi {
+        let st = self.state.lock().unwrap();
+        let none = CircleWebAccessFfi {
+            allowed: false,
+            mine: false,
+            can_sign: false,
+            decided_by_admins: false,
+            i_decide: false,
+            waiting_on: vec![],
+        };
+        let Some(idx) = st.circles.iter().position(|c| c.id == circle_id) else { return none };
+        let gid = circle_id.as_bytes();
+        let records: Vec<CircleWebPolicy> = st.circles[idx]
+            .web_policies
+            .iter()
+            .filter_map(|w| CircleWebPolicy::from_bytes(w).ok())
+            .filter(|p| p.circle_id == gid)
+            .collect();
+        let positions = current_positions(&records);
+        let me = st.me().node_id_bytes();
+        let admins = circle_admin_set(&st, idx);
+        let members: Vec<[u8; 32]> = circle_mls_accounts(&st, idx).iter().map(|a| a.node_id_bytes()).collect();
+        let waiting_on = match &admins {
+            Some(_) => vec![],
+            None => members
+                .iter()
+                .filter(|m| !positions.get(*m).copied().unwrap_or(false))
+                .map(|m| hex(m))
+                .collect(),
+        };
+        CircleWebAccessFfi {
+            allowed: web_allowed(admins.as_ref(), &members, &records),
+            mine: positions.get(&me).copied().unwrap_or(false),
+            can_sign: st.me_secret.is_some(),
+            decided_by_admins: admins.is_some(),
+            i_decide: admins.as_ref().is_none_or(|a| a.contains(&me)),
+            waiting_on,
+        }
+    }
+
+    /// Is this device a web device (its own account-signed credential carries the web mark)?
+    pub fn is_web_device(&self) -> bool {
+        self_is_web(&self.state.lock().unwrap())
+    }
+
     /// The current admin accounts of a circle (hex) — the creator plus every creator-delegated admin
     /// (`admin_closure`). Empty when no creator is pinned.
     pub fn circle_admins(&self, circle_id: String) -> Vec<String> {
@@ -7717,7 +8059,9 @@ impl HavenSocial {
         let st = self.state.lock().unwrap();
         let Some(c) = st.circles.iter().find(|c| c.id == circle_id) else { return vec![] };
         let members: Vec<HavenId> = c.members.clone();
-        recipients_with_devices(&members, &st.device_lists)
+        let idx = st.circles.iter().position(|c| c.id == circle_id).unwrap_or(0);
+        // Nothing of this circle's is sent to a web device unless the circle allows web devices.
+        recipients_with_devices_where(&members, &st.device_lists, circle_allows_web(&st, idx))
             .iter()
             .map(|h| hex(&h.node_id_bytes()))
             .collect()
@@ -9117,6 +9461,7 @@ impl HavenSocial {
                 creator: c.creator,
                 creator_pinned: c.creator_pinned,
                 admin_grants: c.admin_grants.clone(),
+                web_policies: c.web_policies.clone(),
             }).collect(),
             seedless_roster_wire: st.seedless_roster_wire.clone(),
             cached_profile: st.cached_profile.clone(),
@@ -9194,7 +9539,7 @@ impl HavenSocial {
 
 /// Names the envelope kind behind a long `receive_locked` hold (the lock watchdog only knows the site).
 struct SlowApply {
-    at: std::time::Instant,
+    at: clock::Instant,
     tag: u8,
     len: usize,
 }
@@ -9283,8 +9628,12 @@ impl HavenSocial {
             let full_bundle = !head_only && mine_only && limit == 0;
             let shadow_wires = shadow_emit_bundle(&mut st, idx, full_bundle);
             let join = keying_emit_join_plan(&mut st, idx);
-            let admin_wires: Vec<Vec<u8>> =
+            let mut admin_wires: Vec<Vec<u8>> =
                 st.circles[idx].admin_grants.iter().map(|g| tagged(TAG_ADMIN_GRANT, g)).collect();
+            // Every position on web devices I hold for this circle rides the same lane, after the
+            // grants (a receiver needs the admin set before it can weigh an admin's word). A circle
+            // nobody has spoken for adds nothing here, so its bundle is byte-identical to before.
+            admin_wires.extend(st.circles[idx].web_policies.iter().map(|p| tagged(TAG_WEB_POLICY, p)));
             // Upgrade offers ride the legacy circle's lane so its members see them. Only re-broadcast the
             // ones I authored: relaying someone else's would lend it my circulation, and an offer is a
             // claim to be judged, not a fact to spread.
@@ -9337,11 +9686,13 @@ impl HavenSocial {
             // Seed-drop S5 GATE: when retirement is ON *and* every member is affirmatively capable, the bare
             // per-member account key is dropped (seal to device bundles only), cutting off a revoked device
             // even from a seed-holding member. Default (retire=false) is byte-identical to the ungated call.
-            let members = recipients_with_devices_gated(
+            let members = recipients_with_devices_gated_where(
                 &accounts,
                 &st.device_lists,
                 &st.seed_drop_capable,
                 st.retire_account_key,
+                // A web device gets this circle's key only where the circle allows web devices.
+                circle_allows_web(&st, idx),
             );
             // Seed-drop S3: author the commit + events under this DEVICE's key (`signer_of`) — BUT only once the
             // whole circle is affirmatively seed-drop-capable. This is the backwards-compat gate: a device-signed
@@ -9479,6 +9830,7 @@ impl HavenSocial {
     ///
     /// NOT exported — the seed must never cross the FFI boundary a second time. `None` on a seedless
     /// device (seed-drop S4), which therefore cannot publish; the primary publishes for the account.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))] // only the native node publishes discovery
     pub(crate) fn account_secret_bytes(&self) -> Option<[u8; 32]> {
         let st = self.state.lock().unwrap();
         st.me_secret.as_ref().map(|id| id.node_secret_bytes())
@@ -9488,6 +9840,7 @@ impl HavenSocial {
     /// definitely running), then the rest of my authorized roster. Excludes the account id: an
     /// account key is an identity, never a transport address, so publishing it as a dial target
     /// would only buy contacts a connect timeout.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))] // only the native node publishes discovery
     pub(crate) fn discovery_device_ids(&self) -> Vec<String> {
         let acct = self.my_node_hex().to_lowercase();
         let mut out = vec![self.my_device_node_hex()];
@@ -9679,8 +10032,31 @@ impl HavenSocial {
     ) -> Option<Result<bool, HavenError>> {
         let mut st = self.state.lock().unwrap();
         // Declared after the guard, so it drops first: times the hold, not the wait for the lock.
-        let _slow = SlowApply { at: std::time::Instant::now(), tag: envelope[0], len: envelope.len() };
+        let _slow = SlowApply { at: clock::Instant::now(), tag: envelope[0], len: envelope.len() };
         let idx = st.circles.iter().position(|c| c.id == circle_id)?;
+        // A WEB device takes no keys for a circle that has not allowed web devices — even when a
+        // sender offers them (an app that predates the rule seals to every device in the roster).
+        // Only the envelopes that carry key material are held back; the control lane (rosters,
+        // grants, the policy itself) still has to arrive, or this device could never learn that
+        // the answer changed.
+        //
+        // HELD, not dropped. A circle's yes and the key that follows it travel in the same bundle
+        // — the key first — and separately through the mailbox in no order at all. Dropping a key
+        // that arrived a moment before the yes lost it for good (its mailbox entry is already
+        // marked seen): the browser knew it was allowed and never read a thing. So the sealed
+        // bytes wait, unopened, in the same buffers that hold a key whose sender is not known yet,
+        // and are replayed when the circle's answer changes (`receive_web_policy`). A key commit
+        // is held inside `receive_key_commit`, which the replay also goes through.
+        if web_keys_held(&st, idx) {
+            match envelope[0] {
+                TAG_MLS_WELCOME | TAG_MLS2_WELCOME => {
+                    park_pending_tree(&mut st.circles[idx], envelope);
+                    return Some(Ok(false));
+                }
+                b'{' => return Some(Ok(false)), // legacy per-recipient seal: nothing re-sends it
+                _ => {}
+            }
+        }
         Some(match envelope[0] {
             TAG_KEY_COMMIT => receive_key_commit(&mut st, idx, &envelope[1..]),
             TAG_EPOCH_EVENT => receive_epoch_event(&mut st, idx, &envelope[1..], pre_parsed),
@@ -9763,6 +10139,7 @@ impl HavenSocial {
                 Ok(false)
             }
             TAG_ADMIN_GRANT => receive_admin_grant(&mut st, idx, &envelope[1..]),
+            TAG_WEB_POLICY => receive_web_policy(&mut st, idx, &envelope[1..]),
             TAG_CIRCLE_UPGRADE => receive_circle_upgrade(&mut st, idx, &envelope[1..]),
             // Unbundled proposals (§4.2 roster path) are reserved for M4; a stray one is inert.
             TAG_MLS_PROPOSAL => Ok(false),
@@ -9852,6 +10229,7 @@ impl HavenSocial {
                 creator: None,
                 creator_pinned: false,
                 admin_grants: vec![],
+                web_policies: vec![],
             }, vec![]);
         }
     }
@@ -9996,6 +10374,12 @@ impl HavenSocial {
             if !st.circles[idx].admin_grants.iter().any(|e| *e == g) {
                 st.circles[idx].admin_grants.push(g);
             }
+        }
+        // Web-device positions from my other devices / my own saved state: re-verified and merged
+        // per signer exactly as one arriving on the lane is (a stale "yes" cannot ride back in over
+        // a newer "no").
+        for w in pc.web_policies {
+            let _ = store_web_policy(st, idx, &w);
         }
         // §6.3-5: import UNIONS epoch keys, so an OLD exported blob could re-inject keys the pruner
         // already deleted — benign redundancy today, but a regression under the one-way-schedule
@@ -10511,7 +10895,12 @@ impl HavenSocial {
         // `accounts` may now repeat a member who is in several circles; wrap once per node id.
         let mut seen = std::collections::HashSet::new();
         accounts.retain(|a| seen.insert(a.node_id_bytes()));
-        let recipients = recipients_with_devices(&accounts, &st.device_lists);
+        // Media going to several circles at once is wrapped to a web device only if EVERY one of
+        // those circles allows web devices.
+        let allow_web = circle_ids.iter().all(|id| {
+            st.circles.iter().position(|c| &c.id == id).is_some_and(|i| circle_allows_web(&st, i))
+        });
+        let recipients = recipients_with_devices_where(&accounts, &st.device_lists, allow_web);
         Some(MediaSealPlan {
             signer_seed: signer_of(&st, under_device).secret_seed(),
             group: Group::new(primary.clone(), recipients),
@@ -10739,6 +11128,9 @@ fn profile_signing_bytes(payload: &[u8]) -> Vec<u8> {
 
 #[cfg(test)]
 mod bundle_reference;
+
+#[cfg(test)]
+mod web_consent_tests;
 
 #[cfg(test)]
 mod net_tests {
@@ -14761,6 +15153,93 @@ mod net_tests {
         sync_all(&[a, b, c], &cid, 6);
         assert!(b.feed(cid.clone(), 4_000, None).iter().any(|m| m.body == "post-revoke"), "a remaining member reads post-revoke content");
         assert!(!c.feed(cid.clone(), 4_000, None).iter().any(|m| m.body == "post-revoke"), "the revoked device is cut off");
+    }
+
+    /// Per-circle consent on a TREE-keyed circle (docs/WEB-PARITY.md): a member's browser is a leaf
+    /// only while the circle allows web devices. The creator's word adds it (a chained Add at the
+    /// live epoch), taking it back Removes it (a re-key it cannot follow), and saying yes again
+    /// re-admits it — the one case where a Removed device comes back without anyone re-adding it by
+    /// hand, because the signed policy IS the explicit act.
+    #[test]
+    fn mls_a_web_device_is_a_leaf_only_while_the_circle_allows_web_devices() {
+        let _clk = clock_guard();
+        let (base, cid) = mls_capable_fleet(&[[1u8; 32], [2u8; 32]], &[[11u8; 32], [12u8; 32]], 0);
+        let (a, b) = (base[0].clone(), base[1].clone());
+        let a_hex = hex(&Identity::from_seed(&[1u8; 32]).public().node_id_bytes());
+
+        // B's browser: a second device of B's account whose credential carries the web mark.
+        let w = HavenSocial::new([2u8; 32].to_vec()).unwrap();
+        assert!(w.use_device_identity([14u8; 32].to_vec()));
+        w.create_circle(cid.clone(), "fleet".into());
+        w.add_contact_bundle(cid.clone(), a.my_bundle()).unwrap();
+        assert!(w.set_circle_creator(cid.clone(), a_hex));
+        let dev_id = |s: &HavenSocial| HavenId::from_bytes(&s.my_device_bundle()).unwrap().node_id_bytes().to_vec();
+        let list = crate::multidevice::sign_device_list([2u8; 32].to_vec(), 2, 5, vec![dev_id(&b), dev_id(&w)], vec![]).unwrap();
+        let creds = vec![
+            crate::multidevice::issue_device_credential([2u8; 32].to_vec(), b.my_device_bundle(), "device".into(), 1).unwrap(),
+            crate::multidevice::issue_device_credential(
+                [2u8; 32].to_vec(),
+                w.my_device_bundle(),
+                haven_p2p::webpolicy::mark_web_device_name("Chrome"),
+                2,
+            )
+            .unwrap(),
+        ];
+        for s in [&b, &w] {
+            assert!(s.set_my_device_roster(list.clone(), creds.clone()));
+        }
+        assert!(a.ingest_device_roster(b.my_bundle(), list, creds));
+        let (a_list, a_creds) = device_only_roster_wire(&a, [1u8; 32]);
+        assert!(w.ingest_device_roster(a.my_bundle(), a_list, a_creds));
+        w.profile_seed_drop_version(a.my_bundle(), card(&a, "m0"));
+        assert!(w.is_web_device() && !b.is_web_device());
+
+        let all = [&a, &b, &w];
+        let reads = |s: &HavenSocial, body: &str| s.feed(cid.clone(), 9_000_000, None).iter().any(|m| m.body == body);
+        for s in all {
+            s.set_mls_keying(true);
+        }
+        sync_all(&all, &cid, 8);
+
+        // Not allowed: the tree is A's and B's phone. The browser is not waited for, and not let in.
+        assert_eq!(a.mls_keying_status(cid.clone()).state, "live", "the circle keys from the tree without the browser");
+        assert_eq!(b.mls_keying_status(cid.clone()).state, "live");
+        assert_ne!(w.mls_keying_status(cid.clone()).state, "live");
+        let genesis = a.mls_keying_status(cid.clone()).epoch;
+        a.post(cid.clone(), "tree-before".into(), vec![], None, None, false, false, 1_000).unwrap();
+        sync_all(&all, &cid, 4);
+        assert!(reads(&b, "tree-before"));
+        assert!(!reads(&w, "tree-before"), "a browser reads nothing from a circle that has not allowed web devices");
+
+        // The creator allows web devices: the browser is Added at the live epoch and reads history.
+        assert!(a.set_circle_web_access(cid.clone(), true));
+        sync_all(&all, &cid, 12);
+        assert!(b.circle_web_access(cid.clone()).allowed && w.circle_web_access(cid.clone()).allowed);
+        assert!(a.mls_keying_status(cid.clone()).epoch > genesis, "the Add advanced the tree");
+        assert_eq!(w.mls_keying_status(cid.clone()).state, "live", "the browser joined the live tree");
+        a.post(cid.clone(), "tree-allowed".into(), vec![], None, None, false, false, 2_000).unwrap();
+        sync_all(&all, &cid, 6);
+        assert!(reads(&w, "tree-allowed") && reads(&b, "tree-allowed"));
+        assert!(reads(&w, "tree-before"), "and it reads what came before, via the re-seal");
+
+        // The creator takes it back: the browser's leaf is Removed and it cannot follow the re-key.
+        let allowed_epoch = a.mls_keying_status(cid.clone()).epoch;
+        assert!(a.set_circle_web_access(cid.clone(), false));
+        sync_all(&all, &cid, 12);
+        assert!(a.mls_keying_status(cid.clone()).epoch > allowed_epoch, "the Remove re-keyed the tree");
+        assert_ne!(w.mls_keying_status(cid.clone()).state, "live");
+        a.post(cid.clone(), "tree-closed".into(), vec![], None, None, false, false, 3_000).unwrap();
+        sync_all(&all, &cid, 6);
+        assert!(reads(&b, "tree-closed"), "B's phone is untouched by all of this");
+        assert!(!reads(&w, "tree-closed"), "the browser is cut off from the next key on");
+
+        // …and yes again brings it back, although its leaf was Removed.
+        assert!(a.set_circle_web_access(cid.clone(), true));
+        sync_all(&all, &cid, 14);
+        assert_eq!(w.mls_keying_status(cid.clone()).state, "live", "a signed yes re-admits the browser");
+        a.post(cid.clone(), "tree-reopened".into(), vec![], None, None, false, false, 4_000).unwrap();
+        sync_all(&all, &cid, 6);
+        assert!(reads(&w, "tree-reopened") && reads(&b, "tree-reopened"));
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════════════

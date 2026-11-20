@@ -146,7 +146,7 @@ own entry point, not at whatever starts it.
 |---|---|---|---|
 | Apple | `HAVEN_NO_NET=1` (process env) | `apple/Shared/OfflineGate.swift` → `HavenNet.offline` | yes |
 | Android | `haven_no_net` (launch-intent extra, or the test runner) | `core/OfflineGate.kt` → `HavenOffline.enabled` | **no** |
-| desktop | `HAVEN_NO_NET=1` (process env; `HAVEN_DEMO=1` implies it) | `src-tauri/src/netgate.rs` → `netgate::offline()` | **no** |
+| desktop | `HAVEN_NO_NET=1` (process env; `HAVEN_DEMO=1` implies it) | `core/haven-client/src/netgate.rs` → `netgate::offline()` | **no** |
 
 Android and desktop stay debug-only on purpose. iOS reads a process environment variable nothing
 outside the harness can set; Android reads an Intent extra on an **exported** activity, which any
@@ -459,7 +459,8 @@ leftovers of the old channel.
 ```json
 {"op":"post|story|dm|react|comment|profile|circle_create|circle_invite|file|music_post|dump|mark_read|link_constraint
       |call|call_accept|call_end|call_speaker|call_route_legacy|perf_reset|heavy_work_override|media_ask
-      |relay_backoff_reset|screen_share|screen_perturb|relay_link|add_relay|forget_relay|host_relay|remove_member|relay_probe",
+      |relay_backoff_reset|screen_share|screen_perturb|relay_link|add_relay|forget_relay|host_relay|remove_member|relay_probe
+      |pair_answer|enroll_confirm|web_access",
  "body":"…","media":"photo|video","photo_path":"…","video_path":"…","file_path":"…",
  "target_id":"<event id>","emoji":"❤️","dm_to":"<64hex>","name":"…","circle_id":"…",
  "music":{"title":"…","artist":"…"},"caption":"…","level":"normal|low|ultra|auto","on":true}
@@ -629,6 +630,79 @@ Android and the Apple apps link a release core, and an unoptimized core made one
 `receive()` hold the engine lock 17–49 s — which is where the desktop's "materially longer
 convergence cycle" (the 6× budget multiplier) came from. Keep those overrides when adding a
 crypto dependency to the core.
+
+### The browser against a real app (`web-client/smoke/phone.mjs`)
+
+The web client's own smoke (`web-client/smoke/engine.mjs`, run by the `web-client` workflow)
+uses the desktop engine as the primary. This one uses a REAL app — its Swift or Kotlin code — and
+is run by hand, because it needs a simulator or emulator:
+
+1. Build the app DEBUG **with signing** (`CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO` for a
+   simulator). An unsigned build (`CODE_SIGNING_ALLOWED=NO`) cannot use the keychain, so it has no
+   stored seed and every "primary only" action answers `notPrimary`.
+2. In a fresh simulator: install, launch, get through onboarding once.
+3. `{"op":"relay_link"}` → start `haven-relay run --link <relay_link> --data <dir>
+   --http 127.0.0.1:18674 --proxy-bind 127.0.0.1:18675 --derp-bind 127.0.0.1:18340
+   --http-url http://127.0.0.1:18675 --no-tunnel --web-app web-client/dist` → `{"op":"add_relay",
+   "relay":<its interface.json>,"default":true}`. (A relay re-created at the same address leaves
+   a stale entry with the old token in the app; use a fresh simulator instead.)
+4. `PHONE_QA_DIR="<container>/Library/Application Support" ORIGIN=http://127.0.0.1:18675
+   node web-client/smoke/phone.mjs`
+
+**Android.** The same test drives the Android app over adb — its QA channel is `files/qa/`,
+reached with `run-as` — when `PHONE_ADB_PKG=com.blaineam.haven` is set instead of `PHONE_QA_DIR`:
+
+1. `ABIS=arm64-v8a android/build-rust.sh`, `./gradlew assembleDebug`, boot the emulator
+   (`emulator -avd haven_phone -read-only -no-window` leaves the fleet's saved state untouched),
+   `adb install -r -g` the debug APK. `-g` matters: a permission prompt in front of the app
+   pauses it, and a paused app does not read commands.
+2. A throwaway account: write `haven-seed:<base64 of 32 random bytes>` to `files/qa/qa-seed.txt`
+   (via `/data/local/tmp` and `run-as`) before the first launch, then
+   `adb shell am start -n com.blaineam.haven/.MainActivity`.
+3. Relay as in step 3 above, then `adb reverse tcp:<port> tcp:<port>` for its three ports — inside
+   the emulator `127.0.0.1` is the emulator, and the browser's code names the relay by that address.
+4. `PHONE_ADB_PKG=com.blaineam.haven ORIGIN=http://127.0.0.1:18675 node web-client/smoke/phone.mjs`
+
+**A call with the app** (`web-client/smoke/phone-call.mjs <web_primary_engine binary>`, same
+setup): a second account becomes the app's contact by invite link (`connect_link`), links a
+browser through the app's relay, and the two call each other, each way. The two accounts find
+each other by public discovery, and the fleet's emulator is kept in airplane mode:
+`adb shell cmd connectivity airplane-mode disable` first (harmless under `-read-only`).
+
+It goes on to video each way and a three-way group call with a second browser
+(`PHONE_CALL_ONLY=1` keeps it to the two-party call). `PHONE_INVITES=app|theirs` picks whose
+invite is taken: Android runs with `theirs` (the app takes the other accounts' invites), the
+iPhone app with `app` (they take the app's `invite_link` and the app approves) — see the open
+item in docs/WEB-PARITY.md for why. For the iPhone app: a fresh simulator, the signed-ad-hoc
+build, the relay as in step 3, then `PHONE_QA_DIR="<container>/Library/Application Support"`.
+
+Driver ops it uses, on Apple and Android: `connect_link` (`uri`: take a `haven://` invite — new
+on Android), `call` / `call_accept` / `call_end`, `call_video` (`on`: the camera button; new on
+Android), and `web_access` without `allow`, which only re-reads the circle's standing (another
+member's answer changes it after the switch was flipped). It reads the dump's `call.participants`,
+`call.remote_video_tracks` and `call.peers` (new on Android, Apple's names).
+
+**The Mac app as the web host.** Never launch a Mac build from a worktree under the real bundle
+id — it would open the real account. Use the fleet's isolated build, from this branch:
+
+1. `web-client/build.sh`, then `MATRIX_DD=<dir> Scripts/qa-e2e-build-stub.sh` (the build embeds
+   `web-client/dist`). Check nothing else is using the stub, ports 8674/8675/3340 are free, and no
+   `cloudflared` is running: starting a Mac host sweeps tunnel helpers.
+2. Launch `<dir>/Build/Products/Debug/HavenStub.app/Contents/MacOS/Haven` with
+   `HOME=<scratch> TMPDIR=<scratch> HAVEN_SKIP_ONBOARDING=1 HAVEN_QA_STUB_RESET=1` and the arguments
+   `-ApplePersistenceIgnoreState YES -haven.relay.host.enabled YES -haven.relay.frontDoor manual
+   -haven.relay.publicURL http://127.0.0.1:8675` (manual front door: no tunnel is started). Do not
+   pass `-haven.relay.host.webAccess YES`: a launch argument overrides the stored setting, so the
+   switch could then not be turned off.
+3. `{"op":"host_web_access","on":true}` in `~/Library/Application Support/HavenQA/stub/`; the dump's
+   `host_web` reads `{available, enabled, serving, hosting}`.
+4. `PHONE_QA_DIR="$HOME/Library/Application Support/HavenQA/stub" ORIGIN=http://127.0.0.1:8675
+   node web-client/smoke/phone.mjs`. Stop the app by its pid afterwards.
+
+Three driver ops exist for the linking test, on Apple and Android: `pair_answer` (`code`: answer the
+`haven-pair:` code a browser shows → dump `pair_answer`, then `enroll_pending`), `enroll_confirm`
+(the confirmation's "Link this device"), and `web_access` (`circle_id`, `allow`: the circle's
+"Allow in web browsers" switch → dump `web_access`). Shut the simulator down afterwards.
 
 ### Dump-channel freshness — the harness will not believe a stale dump
 

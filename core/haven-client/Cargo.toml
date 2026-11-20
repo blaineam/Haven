@@ -1,0 +1,67 @@
+[package]
+name = "haven-client"
+version = "0.0.1"
+edition = "2021"
+publish = false
+description = "The Haven client layer shared by the desktop app and the browser build: app wire protocol, sync, media and relay policy, and the engine that drives them"
+
+[features]
+# Test helpers (`covtest_util`) for the crates that host the engine — a throwaway data dir and an
+# engine on it. Never enabled in a shipped build.
+test-util = []
+
+# Everything here builds for every target, wasm32 included.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Clocks that exist in a browser too (std's on native — the same types).
+web-time = "1"
+# Non-poisoning mutexes. See the StdMutex alias in engine.rs for why.
+parking_lot = "0.12"
+haven_ffi = { path = "../haven-ffi" }
+haven-p2p = { path = "../haven-p2p" }
+haven-s3 = { path = "../haven-s3" }
+anyhow = "1"
+thiserror = "1"
+sha2 = "0.10"
+hkdf = "0.12"
+rand = "0.8"
+hex = "0.4"
+data-encoding = "2"
+base64 = "0.22"
+log = "0.4"
+rgb = "0.8"
+# Decoding/resizing for the preview and still tiers (pure Rust).
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+
+# Native only: the OS keyring, the data directory, the native node / relay hosting, the S3 client,
+# the AVIF preview encoder, and tokio's runtime.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+haven-net = { path = "../haven-net" }
+# The 512px AVIF preview tier (docs/PREVIEW-TIER-DESIGN.md). asm OFF (pure-Rust rav1e) on every
+# target: the assembly cannot assemble under the MSVC arm64 cross toolchain.
+ravif = { version = "0.11", default-features = false, features = ["threading"] }
+tokio = { version = "1", features = ["full"] }
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+dirs = "5"
+
+# Browser: fetch-backed HTTP, and tokio's runtime-free primitives only.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+reqwest = { version = "0.12", default-features = false }
+tokio = { version = "1", features = ["sync"] }
+# The AVIF preview encoder without its thread pool — a tab has one thread.
+ravif = { version = "0.11", default-features = false }
+# The page's event loop as a runtime: spawn + timers.
+n0-future = "0.3"
+# The relay-only node (`transport::web`): no UDP, no listener — every path rides a relay's WebSocket.
+iroh = { version = "1", default-features = false, features = ["tls-ring"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }

@@ -31,6 +31,9 @@ tauri-build = { version = "2", features = [] }
 parking_lot = "0.12"
 # The shared engine (identity, circles, feed, sealing, iroh node, relay/mailbox).
 haven_ffi = { path = "../../core/haven-ffi" }
+# The platform-independent client layer (app wire protocol, relay/media policy) — shared with the
+# browser build.
+haven-client = { path = "../../core/haven-client" }
 # The 512px AVIF preview tier (docs/PREVIEW-TIER-DESIGN.md). Desktop encodes images in the WEBVIEW
 # today (canvas.toDataURL), and Chromium's canvas has no AVIF writer — so the preview encode lives
 # in Rust instead. ravif is rav1e-backed, royalty-free (no HEVC packaging problem on Windows/Linux),
@@ -102,6 +105,8 @@ libc = "0.2"
 windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
+# The engine test helpers (throwaway data dir + engine) the command/QA/import tests build on.
+haven-client = { path = "../../core/haven-client", features = ["test-util"] }
 # `tauri::test::mock_app()` lets the command bodies be called with a real `State<Arc<Engine>>`
 # (tests only — the shipped binary does not get the mock runtime).
 tauri = { version = "2", features = ["test"] }

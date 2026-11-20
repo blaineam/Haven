@@ -32,6 +32,12 @@ struct Fleet {
 /// advertising `ml: versions[i]` (per device, in order). The circle is owned by the account with
 /// the lowest id — the one the tree elects as committer. The keying switch is ON everywhere.
 fn fleet_with(accounts: &[([u8; 32], &[[u8; 32]])], versions: &[u32]) -> Fleet {
+    fleet_with_web(accounts, versions, &[])
+}
+
+/// [`fleet_with`], where the devices in `web` (by device seed) are WEB devices: their credentials
+/// carry the web mark in the account-signed name (`haven_p2p::webpolicy`).
+fn fleet_with_web(accounts: &[([u8; 32], &[[u8; 32]])], versions: &[u32], web: &[[u8; 32]]) -> Fleet {
     let ids: Vec<[u8; 32]> = accounts.iter().map(|(a, _)| Identity::from_seed(a).public().node_id_bytes()).collect();
     let creator = *ids.iter().min().unwrap();
     let cid = mint_owned_circle_id(&creator);
@@ -47,8 +53,9 @@ fn fleet_with(accounts: &[([u8; 32], &[[u8; 32]])], versions: &[u32]) -> Fleet {
             let s = HavenSocial::new(account_seed.to_vec()).unwrap();
             assert!(s.use_device_identity(device_seed.to_vec()));
             s.create_circle(cid.clone(), "fleet".into());
+            let name = if web.contains(device_seed) { haven_p2p::webpolicy::mark_web_device_name("d") } else { "d".into() };
             creds.push(
-                crate::multidevice::issue_device_credential(account_seed.to_vec(), s.my_device_bundle(), "d".into(), 1)
+                crate::multidevice::issue_device_credential(account_seed.to_vec(), s.my_device_bundle(), name, 1)
                     .unwrap(),
             );
             dev_ids.push(Identity::from_seed(device_seed).public().node_id_bytes().to_vec());
@@ -191,6 +198,52 @@ const A2: [u8; 32] = [52u8; 32];
 const B1: [u8; 32] = [53u8; 32];
 const B2: [u8; 32] = [55u8; 32];
 const C1: [u8; 32] = [54u8; 32];
+
+/// Per-circle consent on the v2 tree (docs/WEB-PARITY.md): a member's browser is a leaf only while
+/// the circle allows web devices. Same four steps as on the v1 tree — out, in, out, back in — and
+/// the member's phone is never disturbed.
+#[test]
+fn a_web_device_is_a_v2_leaf_only_while_the_circle_allows_web_devices() {
+    let f = fleet_with_web(&[(A, &[A1]), (B, &[B1, B2])], &[2, 2, 2], &[B2]);
+    let (a, b, w) = (&f.devs[0].s, &f.devs[1].s, &f.devs[2].s);
+    assert!(w.is_web_device() && !b.is_web_device());
+    sync_fleet(&f, 8);
+
+    // Not allowed: the circle keys from the v2 tree without waiting for the browser.
+    assert_eq!(lane(a, &f.cid), 2);
+    assert_eq!(lane(b, &f.cid), 2);
+    assert_ne!(lane(w, &f.cid), 2, "the browser is not a leaf");
+    post(a, &f.cid, "v2-before", 1_000);
+    sync_fleet(&f, 4);
+    assert!(reads(b, &f.cid, "v2-before"));
+    assert!(!reads(w, &f.cid, "v2-before"));
+
+    // An admin (the creator's device) allows web devices: the browser's key package is used.
+    let admin = &f.devs[committer_index(&f)].s;
+    assert!(admin.set_circle_web_access(f.cid.clone(), true));
+    sync_fleet(&f, 12);
+    assert_eq!(lane(w, &f.cid), 2, "the browser entered the v2 tree");
+    post(a, &f.cid, "v2-allowed", 2_000);
+    sync_fleet(&f, 6);
+    assert!(reads(w, &f.cid, "v2-allowed") && reads(b, &f.cid, "v2-allowed"));
+
+    // Taken back: its leaf is Removed, and it cannot follow.
+    assert!(admin.set_circle_web_access(f.cid.clone(), false));
+    sync_fleet(&f, 12);
+    assert_ne!(lane(w, &f.cid), 2);
+    post(a, &f.cid, "v2-closed", 3_000);
+    sync_fleet(&f, 6);
+    assert!(reads(b, &f.cid, "v2-closed"), "the member's phone is untouched");
+    assert!(!reads(w, &f.cid, "v2-closed"));
+
+    // Allowed again: re-admitted although it was Removed — the signed yes is the explicit act.
+    assert!(admin.set_circle_web_access(f.cid.clone(), true));
+    sync_fleet(&f, 14);
+    assert_eq!(lane(w, &f.cid), 2, "a signed yes brings the browser back");
+    post(a, &f.cid, "v2-reopened", 4_000);
+    sync_fleet(&f, 6);
+    assert!(reads(w, &f.cid, "v2-reopened") && reads(b, &f.cid, "v2-reopened"));
+}
 
 /// THE MIGRATION. A fully upgraded fleet (3 accounts, one with two devices) whose circle is already
 /// keyed by the v1 tree goes v1-live → v2-live. At every step every device posts, and every post

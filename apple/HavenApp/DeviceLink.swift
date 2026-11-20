@@ -131,6 +131,12 @@ struct EnrollDeviceView: View {
     @State private var ticket: EnrollTicketFfi?
     @State private var code = ""
     @State private var copied = false
+    // Scan-to-link: answering a code the OTHER device shows.
+    @State private var theirCode = ""
+    @State private var scanningTheirs = false
+    @State private var answering = false
+    @State private var pairNote: String?
+    @State private var pairSent = false
 
     private var canPrimary: Bool { AccountStore.storedSeed() != nil }
 
@@ -164,11 +170,38 @@ struct EnrollDeviceView: View {
                             Label("This code links one device, once, and expires after a few minutes. Only scan it onto a device you own.",
                                   systemImage: "exclamationmark.triangle.fill")
                                 .font(.caption).foregroundStyle(.orange).multilineTextAlignment(.center).padding(.horizontal)
-                        } else {
+                        } else if !pairSent {
                             ProgressView().padding(.vertical, 40)
                         }
                         Label("Your primary device keeps handling notifications for the new device for now.",
                               systemImage: "bell.badge").font(.caption2).foregroundStyle(.secondary)
+
+                        // Scan-to-link, the other way round: a device that cannot scan or be typed
+                        // into (a browser on a borrowed computer) shows a code of its own, and THIS
+                        // device answers it. Its request still raises the confirmation below.
+                        Divider().padding(.vertical, 4)
+                        Text("Is the other device showing a code of its own — a browser, for example? Scan it, or paste it here.")
+                            .font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                        Button { scanningTheirs = true } label: {
+                            Label("Scan its code", systemImage: "qrcode.viewfinder")
+                        }
+                        .buttonStyle(.bordered).tint(HavenTheme.pink)
+                        .disabled(answering)
+                        TextField("haven-pair:…", text: $theirCode, axis: .vertical)
+                            .havenAutocap(.never).autocorrectionDisabled()
+                            .textFieldStyle(.plain).padding(12)
+                            .havenGlass(in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                        Button { answer(theirCode) } label: {
+                            Label("Use this code", systemImage: "link.badge.plus")
+                        }
+                        .buttonStyle(.bordered).tint(HavenTheme.pink)
+                        .disabled(theirCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || answering)
+                        if answering { ProgressView() }
+                        if let note = pairNote {
+                            Text(note).font(.caption)
+                                .foregroundStyle(pairSent ? Color.secondary : Color.orange)
+                                .multilineTextAlignment(.center)
+                        }
                     }
                 }
                 .padding(20).frame(maxWidth: 520).frame(maxWidth: .infinity)
@@ -176,6 +209,19 @@ struct EnrollDeviceView: View {
         }
         .navigationTitle("Link device").havenInlineNavTitle()
         .onAppear { mint() }
+        .sheet(isPresented: $scanningTheirs) {
+            VStack(spacing: 14) {
+                Text("Scan its code").font(.headline).padding(.top, 16)
+                QRScannerView { found in
+                    scanningTheirs = false
+                    answer(found)
+                }
+                .frame(minWidth: 280, minHeight: 280)
+                .clipShape(RoundedRectangle(cornerRadius: 18))
+                Button("Cancel") { scanningTheirs = false }.padding(.bottom, 16)
+            }
+            .padding(.horizontal, 16)
+        }
         // The confirmation the plan requires: a frame-28 request pops a sheet naming the device; only
         // the user's confirm issues the grant.
         .confirmationDialog(store.pendingEnrollRequest.map { "Link “\($0.name)”?" } ?? "",
@@ -195,6 +241,36 @@ struct EnrollDeviceView: View {
         guard canPrimary, let t = store.mintEnrollTicket() else { return }
         ticket = t
         code = (try? enrollTicketEncode(ticket: t)) ?? ""
+    }
+
+    /// Answer a `haven-pair:` code another device is showing. The ticket on screen above is replaced
+    /// by the one sent to that device, so the QR is cleared rather than left showing a dead code.
+    private func answer(_ text: String) {
+        guard !answering else { return }
+        answering = true
+        pairNote = nil
+        Task { @MainActor in
+            let result = await store.answerPairCode(text)
+            answering = false
+            pairSent = result == .sent
+            switch result {
+            case .sent:
+                theirCode = ""
+                // The ticket that QR encoded was replaced by the one just sent: take it off screen.
+                code = ""
+                ticket = nil
+                pairNote = String(localized: "Sent. Approve the device here when it asks to link.")
+            case .notACode:
+                pairNote = String(localized: "That is not a Haven device code.")
+            case .expired:
+                pairNote = String(localized: "That code has expired. Show a fresh one on the other device.")
+            case .notPrimary:
+                pairNote = String(localized: "Only your primary device can link new devices.")
+            case .unreachable:
+                pairNote = String(localized: "Couldn't reach that device. Keep its page open and try again.")
+                mint()   // the unsent ticket was dropped; show a live code again
+            }
+        }
     }
 }
 

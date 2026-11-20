@@ -95,9 +95,9 @@ const MAX_HEAD: usize = 16 * 1024;
 /// Cap on a TOUCH body (newline-joined keys) — matches the iroh TOUCH verb.
 const MAX_TOUCH_BODY: u64 = 256 * 1024;
 
-/// Domain tag on the request signature, so a node-key signature minted for Haven's HTTP relay can
-/// never be lifted from (or replayed into) any other context that signs with the same key.
-pub const REQUEST_DOMAIN: &str = "haven-httprelay-v1";
+/// Domain tag on the request signature (defined with the client half, in the IO-free core).
+pub use haven_p2p::httpauth::REQUEST_DOMAIN;
+use haven_p2p::httpauth::{body_digest, transcript};
 /// LIST delta header (request AND response): a hex digest of a prefix's sorted key set. Echoing
 /// the last-seen value turns an unchanged LIST into a bodiless `204` (the radio saver).
 pub const LIST_DIGEST_HEADER: &str = "X-Haven-List-Digest";
@@ -120,16 +120,6 @@ fn unhex(s: &str) -> Option<Vec<u8>> {
     (0..s.len() / 2).map(|i| u8::from_str_radix(s.get(i * 2..i * 2 + 2)?, 16).ok()).collect()
 }
 
-/// The exact bytes a request signature covers. Every field that decides what the request DOES is
-/// in here — flip the verb, the key, or a byte of the body and the signature stops verifying.
-fn transcript(token: &str, method: &str, key: &str, ts: u64, nonce: &str, body_hex: &str) -> Vec<u8> {
-    format!("{REQUEST_DOMAIN}\n{token}\n{method}\n{key}\n{ts}\n{nonce}\n{body_hex}").into_bytes()
-}
-
-fn body_digest(body: &[u8]) -> String {
-    hex(blake3::hash(body).as_bytes())
-}
-
 /// The digest a LIST answer advertises in [`LIST_DIGEST_HEADER`]: blake3 over the newline-joined
 /// SORTED key set — i.e. exactly the bytes of the 200 body. Public so the client half can verify
 /// or precompute; the server computes it per request (the keys are already in memory from the
@@ -142,19 +132,11 @@ pub fn list_digest(sorted_keys_joined: &str) -> String {
 /// (`Identity::node_secret_bytes`) — the same key the iroh transport authenticates the node under,
 /// so the relay's membership check sees one identity per node regardless of transport.
 ///
-/// This is the client half of the protocol; it lives here so every platform's HTTP client signs
-/// byte-identically to what the server verifies.
+/// This is the client half of the protocol. The transcript and header are built by
+/// [`haven_p2p::httpauth`], which the server's verifier below shares, so every platform's HTTP
+/// client — the browser build included — signs byte-identically to what is verified here.
 pub fn auth_header(node_secret: &[u8; 32], token: &str, method: &str, key: &str, body: &[u8]) -> String {
-    use ed25519_dalek::{Signer, SigningKey};
-    let sk = SigningKey::from_bytes(node_secret);
-    let node = hex(sk.verifying_key().as_bytes());
-    let ts = now();
-    let mut n = [0u8; 16];
-    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut n);
-    let nonce = hex(&n);
-    let digest = body_digest(body);
-    let sig = sk.sign(&transcript(token, method, key, ts, &nonce, &digest));
-    format!("Haven {node}.{ts}.{nonce}.{digest}.{}", hex(&sig.to_bytes()))
+    haven_p2p::httpauth::auth_header_at(node_secret, token, method, key, body, now())
 }
 
 /// Verify an `Authorization: Haven …` value against the request head it claims to authorize.

@@ -1,0 +1,13 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Haven web smoke</title>
+<script type="module">
+  import init, * as haven from "/pkg/haven_web.js";
+  import { attachStorage, eraseStorage } from "/storage.js";
+  await init();
+  // The smoke drivers (smoke/*.mjs) call into these from the outside.
+  window.haven = haven;
+  window.attachStorage = attachStorage;
+  window.eraseStorage = eraseStorage;
+  window.havenReady = true;
+</script>

@@ -321,7 +321,7 @@ export function makeTimers() {
  * and hand back handles. `backend` maps a Tauri command name to `(args) => result | Promise`;
  * an unmapped command resolves to `undefined` (and is recorded in `calls`).
  */
-export async function loadApp({ backend = {}, lang = 'en-US', ua = 'Mozilla/5.0 (Macintosh; Intel Mac OS X) Haven', boot = true, local = {} } = {}) {
+export async function loadApp({ backend = {}, lang = 'en-US', ua = 'Mozilla/5.0 (Macintosh; Intel Mac OS X) Haven', boot = true, local = {}, host = undefined } = {}) {
   const document = new Document();
   const html = readFileSync(join(here, 'index.html'), 'utf8');
   const bodyHtml = html.slice(html.indexOf('<body>') + 6, html.indexOf('</body>'));
@@ -339,6 +339,9 @@ export async function loadApp({ backend = {}, lang = 'en-US', ua = 'Mozilla/5.0 
     removeItem: (k) => store.delete(k), clear: () => store.clear(), get length() { return store.size; }, key: (i) => [...store.keys()][i] ?? null,
   };
   const invoke = async (cmd, args = {}) => {
+    // The frontend reaches shared engine commands through `engine_invoke`; to a test that is the
+    // same call as before, so it is recorded and answered under the command's own name.
+    if (cmd === 'engine_invoke') return invoke(args.name, args.args ?? {});
     calls.push({ cmd, args });
     const fn = backend[cmd];
     if (fn === undefined) return undefined;
@@ -354,12 +357,16 @@ export async function loadApp({ backend = {}, lang = 'en-US', ua = 'Mozilla/5.0 
   class FakeStream { constructor(tracks = []) { this._t = [...tracks]; this.id = 'stream'; } getTracks() { return [...this._t]; } getAudioTracks() { return this._t.filter((t) => t.kind === 'audio'); } getVideoTracks() { return this._t.filter((t) => t.kind === 'video'); } addTrack(t) { this._t.push(t); } removeTrack(t) { this._t = this._t.filter((x) => x !== t); } }
   const rtc = [];
   class FakePC {
-    constructor(cfg) { this.cfg = cfg; this.senders = []; this.tr = []; this.connectionState = 'new'; this.closed = false; this.remote = null; this.local = null; this.ice = []; rtc.push(this); }
+    // Signalling state is modelled the way a real connection moves through it, because the page
+    // decides what to do from it (one offer per connection, duplicate offers/answers ignored).
+    constructor(cfg) { this.cfg = cfg; this.senders = []; this.tr = []; this.connectionState = 'new'; this.closed = false; this.remote = null; this.local = null; this.ice = []; this.signalingState = 'stable'; this.localDescription = null; this.remoteDescription = null; this.currentRemoteDescription = null; rtc.push(this); }
     addTrack(t) { const sn = { track: t, replaceTrack: async (x) => { sn.track = x; } }; this.senders.push(sn); return sn; }
     addTransceiver(kind) { const tr = { sender: { track: null, replaceTrack: async (x) => { tr.sender.track = x; } }, receiver: { track: { kind } } }; this.tr.push(tr); return tr; }
     getSenders() { return this.senders; } getTransceivers() { return this.tr; }
     async createOffer() { return { type: 'offer', sdp: 'offer-sdp' }; } async createAnswer() { return { type: 'answer', sdp: 'answer-sdp' }; }
-    async setLocalDescription(d) { this.local = d; } async setRemoteDescription(d) { this.remote = d; } async addIceCandidate(c) { this.ice.push(c); }
+    async setLocalDescription(d) { this.local = d; this.localDescription = d; if (d.type === 'offer') this.signalingState = 'have-local-offer'; else { this.signalingState = 'stable'; this.currentRemoteDescription = this.remoteDescription; } }
+    async setRemoteDescription(d) { this.remote = d; this.remoteDescription = d; if (d.type === 'offer') this.signalingState = 'have-remote-offer'; else { this.signalingState = 'stable'; this.currentRemoteDescription = d; } }
+    async addIceCandidate(c) { this.ice.push(c); }
     async getStats() { const m = new Map(); (this.statsRows ?? []).forEach((r, i) => m.set(i, r)); return m; }
     close() { this.closed = true; }
   }
@@ -381,6 +388,8 @@ export async function loadApp({ backend = {}, lang = 'en-US', ua = 'Mozilla/5.0 
     fetch: async () => { throw new Error('domstub: no network'); },
     RTCPeerConnection: FakePC, MediaStream: FakeStream,
     performance: { now: () => 0 },
+    // `host: { web: true }` loads the page as the browser client does (web-client/web-host.js).
+    __HAVEN_HOST__: host,
     __TAURI__: { core: { invoke }, event: { listen }, opener: { openUrl: (u) => { opened.push(u); } }, dialog: { open: async (o) => { dialogOpens.push(o); return sandbox.__pick ?? null; } } },
   };
   sandbox.innerWidth = 1280; sandbox.innerHeight = 800; sandbox.devicePixelRatio = 1;

@@ -165,6 +165,7 @@ async fn path_proxy_status_lists_hairpin() -> Result<()> {
         media_backend: String::new(),
         derp_backend: String::new(),
         http_token: String::new(),
+        web_app: None,
     })
     .await?
     .expect("router");
@@ -185,6 +186,7 @@ async fn hairpin_pairs_and_forwards_binary() -> Result<()> {
         media_backend: String::new(),
         derp_backend: String::new(),
         http_token: String::new(),
+        web_app: None,
     })
     .await?
     .expect("router");

@@ -1,2 +1,5 @@
-2.1.3 — Mise à jour de sécurité. Mettez à jour tous vos appareils.
-• Protection renforcée des clés de chiffrement de vos cercles si un appareil venait à être compromis. Elle s'applique automatiquement dès que tous les membres d'un cercle ont fait la mise à jour. Vos publications restent intactes.
+2.2.0 — Utilisez Haven dans un navigateur web.
+• Ajoutez un navigateur web comme l'un de vos appareils : scannez le code affiché (Réglages → Appareils). Chaque cercle décide si les navigateurs peuvent le lire.
+• Correctif de confidentialité : après un appel vidéo, l'appel suivant pouvait commencer caméra allumée. Chaque appel commence désormais caméra éteinte.
+• Un appel ne raccroche plus juste après une brève coupure de connexion.
+• Les changements de caméra arrivent dans le bon ordre.

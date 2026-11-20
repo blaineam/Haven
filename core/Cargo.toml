@@ -1,7 +1,38 @@
 [workspace]
-members = ["haven-p2p", "demo", "haven-ffi", "haven-net", "haven-relay", "haven-relay-sign", "haven-s3"]
+members = ["haven-p2p", "demo", "haven-ffi", "haven-net", "haven-relay", "haven-relay-sign", "haven-s3", "haven-web", "haven-client"]
 resolver = "2"
 
 [profile.release]
 lto = true
 codegen-units = 1
+
+# The engine's tests (haven_ffi, and haven-client's, which drive it) spend their time in ML-KEM /
+# ML-DSA. Unoptimized, one receive() of a key commit takes seconds; the desktop workspace has
+# always optimized the core and its crypto in the dev profile for that reason, and the client
+# layer's tests moved here from there. Same list, same reason; these only recompile when they change.
+[profile.dev.package.haven-p2p]
+opt-level = 3
+[profile.dev.package.haven_ffi]
+opt-level = 3
+[profile.dev.package.haven-net]
+opt-level = 3
+[profile.dev.package.ml-kem]
+opt-level = 3
+[profile.dev.package.ml-dsa]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3
+[profile.dev.package.sha3]
+opt-level = 3
+[profile.dev.package.blake3]
+opt-level = 3
+[profile.dev.package.aes-gcm]
+opt-level = 3
+[profile.dev.package.aes]
+opt-level = 3
+[profile.dev.package.curve25519-dalek]
+opt-level = 3
+[profile.dev.package.ed25519-dalek]
+opt-level = 3
+[profile.dev.package.x25519-dalek]
+opt-level = 3

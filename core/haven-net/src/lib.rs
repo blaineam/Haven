@@ -33,6 +33,8 @@ pub mod relay;
 pub mod s3tunnel;
 pub mod statuspage;
 pub mod turn;
+pub mod webbundle;
+pub mod webbundle_dir;
 pub mod ws_hairpin;
 
 pub use derp::{DerpConfig, DerpServer, DEFAULT_DERP_BIND};
@@ -44,6 +46,7 @@ pub use endpoint_builder::{
 pub use path_router::{
     classify_path, PathRouter, PathRouterConfig, RouteKind, DEFAULT_PATH_ROUTER_BIND,
 };
+pub use webbundle::WebBundle;
 pub use ws_hairpin::HairpinHub;
 pub use turn::{
     host_from_http_url, parse_turn_urls, suggest_turn_urls, turn_url, TurnConfig, TurnServer,
@@ -610,6 +613,17 @@ impl Node {
         let bytes = decode_hex32(node_id_hex)?;
         let id = EndpointId::from_bytes(&bytes).map_err(|e| anyhow!("{e:?}"))?;
         self.send(self.dial_addr(id), payload).await
+    }
+
+    /// Send a payload to a node that is listening on a NAMED relay (`relay_url`, an `https://…`
+    /// front door), which need not be in this node's relay map and which discovery knows nothing
+    /// about. Scan-to-link uses it: a browser that is not linked to any account yet is reachable
+    /// only through the relay that served it, and says so in the code it shows.
+    pub async fn send_to_node_via(&self, node_id_hex: &str, relay_url: &str, payload: &[u8]) -> Result<()> {
+        let bytes = decode_hex32(node_id_hex)?;
+        let id = EndpointId::from_bytes(&bytes).map_err(|e| anyhow!("{e:?}"))?;
+        let url: iroh::RelayUrl = relay_url.trim().parse().map_err(|e| anyhow!("bad relay url: {e}"))?;
+        self.send(EndpointAddr::new(id).with_relay_url(url), payload).await
     }
 
     /// Send a payload to a peer address (reusing a live connection if one exists).

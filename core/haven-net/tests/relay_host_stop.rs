@@ -161,6 +161,7 @@ async fn dropping_the_path_router_stops_it() {
         media_backend: "127.0.0.1:9".into(),
         derp_backend: String::new(),
         http_token: String::new(),
+        web_app: None,
     })
     .await
     .unwrap()

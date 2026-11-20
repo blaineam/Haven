@@ -1,0 +1,119 @@
+name: web-client
+
+# Build the Haven web client (core/haven-web compiled to WebAssembly + the desktop UI with a
+# browser host shim) into one archive, `haven-web-client.tar.gz`, and — when run on its own —
+# drive it end to end in headless Chromium against a native engine hosting a real relay.
+#
+# The archive is what a relay serves under /app/ when its host turns Web access on:
+#   * the desktop installers unpack it into their resources (desktop.yml, release.yml);
+#   * `haven-relay run … --web-app <dir>` takes the unpacked directory;
+#   * a Release carries it as an asset, so a relay operator gets the build that matches the tag.
+#
+# CALLED from the installer workflows with `packaging_only: true`. There the build step is allowed
+# to fail without failing the job: an installer without the web client is a complete app that has
+# no "Web access" switch, and a toolchain hiccup here must never hold a release back. Run on its
+# own (push / dispatch) the same failure is a failure.
+
+on:
+  workflow_call:
+    inputs:
+      packaging_only:
+        description: "Called from an installer workflow: never fail, skip the browser smoke"
+        type: boolean
+        default: false
+  workflow_dispatch:
+  push:
+    branches: [main, feat/web-client]
+    paths:
+      - "web-client/**"
+      - "push/**"
+      - "core/**"
+      - "desktop/ui/**"
+      - ".github/workflows/web-client.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      built: ${{ steps.build.outcome == 'success' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+          key: web-client
+
+      - name: Build the web client
+        id: build
+        continue-on-error: ${{ inputs.packaging_only == true }}
+        run: |
+          set -euo pipefail
+          # ring's C needs a clang that can target wasm32 (Ubuntu's can), and its archiver.
+          sudo apt-get update
+          sudo apt-get install -y clang llvm binaryen
+          # The CLI and the crate must be the same version: read it from the lockfile.
+          want=$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/version = |"/, ""); print; exit }' core/Cargo.lock)
+          cargo install wasm-bindgen-cli --version "$want" --locked
+          HAVEN_REQUIRE_WASM_OPT=1 CC_wasm32_unknown_unknown=clang AR_wasm32_unknown_unknown=llvm-ar web-client/build.sh
+          ls -l web-client/dist/pkg/haven_web_bg.wasm
+          gzip -9 -c web-client/dist/pkg/haven_web_bg.wasm | wc -c
+          tar -C web-client/dist -czf haven-web-client.tar.gz .
+          sha256sum haven-web-client.tar.gz
+          ls -la web-client/dist web-client/dist/pkg
+
+      # ONE file, on purpose: release.yml's publish job merges every artifact of the run into the
+      # Release's assets, so a directory here would spill index.html and friends into the Release.
+      - name: Upload the archive
+        if: steps.build.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-client
+          path: haven-web-client.tar.gz
+          if-no-files-found: error
+
+  # The browser end to end: link by ticket and by code, per-circle consent, posts and pictures
+  # both ways, storage at rest, and no crash in the page (web-client/smoke/engine.mjs).
+  smoke:
+    needs: build
+    if: ${{ inputs.packaging_only != true }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+          key: web-client-smoke
+      - name: Native build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev pkg-config nasm
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-client
+      - name: Unpack the web client
+        run: |
+          mkdir -p web-client/dist
+          tar -C web-client/dist -xzf haven-web-client.tar.gz
+      - name: Build the native primary
+        working-directory: core
+        run: cargo build -p haven-client --features test-util --example web_primary_engine --locked
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install Chromium
+        run: |
+          npm install --no-save --prefix "$RUNNER_TEMP/pw" playwright
+          "$RUNNER_TEMP/pw/node_modules/.bin/playwright" install --with-deps chromium
+      - name: Service worker and push worker tests
+        run: node --test web-client/sw.test.mjs push/worker.test.mjs
+      - name: Browser smoke
+        env:
+          NODE_PATH: ${{ runner.temp }}/pw/node_modules
+        run: node web-client/smoke/engine.mjs core/target/debug/examples/web_primary_engine

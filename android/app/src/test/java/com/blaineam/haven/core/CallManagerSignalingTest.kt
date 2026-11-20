@@ -316,6 +316,14 @@ class CallManagerSignalingTest {
         handle(CallWire.CAMERA, CallWire.cameraState(stranger, sid, on = false))
         assertEquals(listOf(peer), CallManager.remoteCameraOff.toList())
         handle(CallWire.CAMERA, CallWire.cameraState(peer, sid, on = true))
+        // A late copy of an OLDER state (off the slower lane) must not overwrite a newer one.
+        val later = System.currentTimeMillis() + 60_000
+        handle(CallWire.CAMERA, CallWire.cameraState(peer, sid, on = false, stamp = later + 2))
+        assertTrue(CallManager.remoteCameraOff.contains(peer))
+        handle(CallWire.CAMERA, CallWire.cameraState(peer, sid, on = true, stamp = later + 1))
+        assertTrue("a stale 'on' is dropped", CallManager.remoteCameraOff.contains(peer))
+        handle(CallWire.CAMERA, CallWire.cameraState(peer, sid, on = true, stamp = later + 3))
+        assertFalse(CallManager.remoteCameraOff.contains(peer))
         assertTrue(CallManager.remoteCameraOff.isEmpty())
     }
 

@@ -1,0 +1,196 @@
+/*
+  Haven per-circle consent to web devices — who can make a circle's key reach a browser.
+  Symbolic model (Tamarin).
+
+  A browser linked to an account is a device in that account's signed roster, but its code was
+  delivered by a relay. So a circle's key is sealed to a web device only when the circle allows web
+  devices (docs/WEB-PARITY.md). Two signed facts carry that, and this model checks both:
+
+   - WHICH devices are web devices: the account signs the device's CLASS into its credential
+     (as built: a mark in the account-signed device name — core/haven-p2p/src/webpolicy.rs,
+     DeviceCredential::is_web).
+   - WHETHER a circle allows them: account-signed positions (CircleWebPolicy). Modelled here is
+     the rule for a circle nobody provably owns (a legacy circle, a direct message): EVERY member
+     must have said yes.
+
+  Code: core/haven-p2p/src/webpolicy.rs (web_allowed, CircleWebPolicy), core/haven-p2p/src/device.rs
+  (authorized_bundles_where, recipients_with_devices_where), core/haven-ffi/src/lib.rs
+  (circle_allows_web, shadow_device_leaves, store_web_policy). Spec: docs/WEB-PARITY.md.
+
+  Run:  tamarin-prover --prove docs/formal/haven_web_consent.spthy
+        tamarin-prover --prove -DSTRIPPABLE docs/formal/haven_web_consent.spthy
+
+  What is modelled
+   - An ACCOUNT has a signing key; a DEVICE has a key to be sealed to. The account ENROLS a device
+     with a class, 'app' or 'web', and signs a credential.
+     AS BUILT the class is inside the signed credential.
+   - -DSTRIPPABLE models the alternative that was NOT built: the class travels next to the
+     credential, outside the signature (a roster trailer). C2 is falsified there — whoever carries
+     the roster (a relay) relabels the browser as an app and it is sealed to in every circle.
+   - A circle has two members. A member says YES to web devices by signing a position.
+   - A member's device SEALS the circle's key to a device of a member: to an 'app' device
+     always; to a 'web' device only with a verified yes from BOTH members.
+   - The adversary controls the network and every relay, may take everything any device holds
+     (RevealDevice — a browser whose page was replaced, any number of them) and an account's key
+     (RevealAccount).
+
+  What is NOT modelled, and is covered by tests instead: versions (a newer no beating an older
+  yes, replay), the admin rule for creator-bound circles, re-keying when the answer changes, and
+  the refusal of a key OFFERED by a web device (core/haven-ffi/src/web_consent_tests.rs,
+  webpolicy.rs unit tests). An app that predates the rule seals to every device in the roster; no
+  model of the new rule can speak for it.
+*/
+
+theory HavenWebConsent
+begin
+
+builtins: signing, asymmetric-encryption
+
+restriction Eq:   "All x y #i. Eq(x, y)@i ==> x = y"
+restriction Once: "All t #i #j. Once(t)@i & Once(t)@j ==> #i = #j"
+restriction Neq:  "All x y #i. Neq(x, y)@i ==> not (x = y)"
+
+/* ---- Keys ---------------------------------------------------------------------------------- */
+
+rule Account:
+  [ Fr(~ask) ]
+  --[ Once(<'acct', $A>) ]->
+  [ !Acct($A, ~ask), !Pin($A, pk(~ask)), Out(pk(~ask)) ]
+
+rule RevealAccount:
+  [ !Acct(A, ask) ] --[ RevealAccount(A) ]-> [ Out(ask) ]
+
+rule Device:
+  [ Fr(~dek) ]
+  --[ Once(<'dev', $D>) ]->
+  [ !Dev($D, ~dek), Out(pk(~dek)) ]
+
+rule RevealDevice:       /* everything a device holds: a browser running a replaced page */
+  [ !Dev(D, dek) ] --[ RevealDevice(D) ]-> [ Out(dek) ]
+
+/* ---- Enrollment: the account signs the device's class -------------------------------------- */
+
+#ifdef STRIPPABLE
+/* NOT BUILT: the class rides beside the credential, unsigned. */
+rule EnrolApp:
+  let cred = <'cred', $A, $D, pk(dek)> in
+  [ !Acct($A, ask), !Dev($D, dek) ]
+  --[ Enrolled($A, $D, 'app'), Once(<'enrol', $D>) ]->
+  [ Out(<cred, sign(cred, ask), 'app'>) ]
+
+rule EnrolWeb:
+  let cred = <'cred', $A, $D, pk(dek)> in
+  [ !Acct($A, ask), !Dev($D, dek) ]
+  --[ Enrolled($A, $D, 'web'), Once(<'enrol', $D>) ]->
+  [ Out(<cred, sign(cred, ask), 'web'>) ]
+#else
+/* AS BUILT: the class is inside what the account signs. */
+rule EnrolApp:
+  let cred = <'cred', $A, $D, pk(dek), 'app'> in
+  [ !Acct($A, ask), !Dev($D, dek) ]
+  --[ Enrolled($A, $D, 'app'), Once(<'enrol', $D>) ]->
+  [ Out(<cred, sign(cred, ask)>) ]
+
+rule EnrolWeb:
+  let cred = <'cred', $A, $D, pk(dek), 'web'> in
+  [ !Acct($A, ask), !Dev($D, dek) ]
+  --[ Enrolled($A, $D, 'web'), Once(<'enrol', $D>) ]->
+  [ Out(<cred, sign(cred, ask)>) ]
+#endif
+
+/* ---- The circle and its members' positions -------------------------------------------------- */
+
+rule Circle:             /* two members; nobody owns it */
+  [ !Pin($A, pka), !Pin($B, pkb) ]
+  --[ Once(<'circle', $C>), Neq($A, $B), Members($C, $A, $B) ]->
+  [ !Circle($C, $A, $B) ]
+
+rule SayYesFirst:
+  [ !Circle($C, $A, $B), !Acct($A, ask) ]
+  --[ Yes($C, $A) ]->
+  [ Out(sign(<'web-yes', $C, $A>, ask)) ]
+
+rule SayYesSecond:
+  [ !Circle($C, $A, $B), !Acct($B, ask) ]
+  --[ Yes($C, $B) ]->
+  [ Out(sign(<'web-yes', $C, $B>, ask)) ]
+
+/* ---- Sealing the circle's key --------------------------------------------------------------- */
+
+#ifdef STRIPPABLE
+rule SealToApp:
+  let cred = <'cred', X, D, dpk> in
+  [ !Circle($C, $A, $B), In(<cred, sg, 'app'>), !Pin(X, pkx), Fr(~k) ]
+  --[ Eq(verify(sg, cred, pkx), true), MemberOf($C, X), SealedAsApp($C, X, D), Key($C, X, ~k, D) ]->
+  [ Out(aenc(~k, dpk)) ]
+
+rule SealToWeb:
+  let cred = <'cred', X, D, dpk> in
+  [ !Circle($C, $A, $B), In(<cred, sg, 'web'>), !Pin(X, pkx),
+    In(ya), In(yb), !Pin($A, pka), !Pin($B, pkb), Fr(~k) ]
+  --[ Eq(verify(sg, cred, pkx), true), MemberOf($C, X),
+      Eq(verify(ya, <'web-yes', $C, $A>, pka), true), Eq(verify(yb, <'web-yes', $C, $B>, pkb), true),
+      SealedAsWeb($C, X, D), Key($C, X, ~k, D) ]->
+  [ Out(aenc(~k, dpk)) ]
+#else
+rule SealToApp:
+  let cred = <'cred', X, D, dpk, 'app'> in
+  [ !Circle($C, $A, $B), In(<cred, sg>), !Pin(X, pkx), Fr(~k) ]
+  --[ Eq(verify(sg, cred, pkx), true), MemberOf($C, X), SealedAsApp($C, X, D), Key($C, X, ~k, D) ]->
+  [ Out(aenc(~k, dpk)) ]
+
+rule SealToWeb:
+  let cred = <'cred', X, D, dpk, 'web'> in
+  [ !Circle($C, $A, $B), In(<cred, sg>), !Pin(X, pkx),
+    In(ya), In(yb), !Pin($A, pka), !Pin($B, pkb), Fr(~k) ]
+  --[ Eq(verify(sg, cred, pkx), true), MemberOf($C, X),
+      Eq(verify(ya, <'web-yes', $C, $A>, pka), true), Eq(verify(yb, <'web-yes', $C, $B>, pkb), true),
+      SealedAsWeb($C, X, D), Key($C, X, ~k, D) ]->
+  [ Out(aenc(~k, dpk)) ]
+#endif
+
+/* A recipient must be a device of one of the circle's two members. */
+restriction MemberOf:
+  "All C X #i. MemberOf(C, X)@i ==> (Ex A B #m. Members(C, A, B)@m & (X = A | X = B))"
+
+/* ---- Sanity -------------------------------------------------------------------------------- */
+
+lemma executable_web_device_keyed_after_both_agree:
+  exists-trace
+  "Ex C X D #i. SealedAsWeb(C, X, D)@i
+     & not (Ex B #r. RevealAccount(B)@r) & not (Ex E #r. RevealDevice(E)@r)"
+
+lemma executable_app_device_keyed_without_any_position:
+  exists-trace
+  "Ex C X D #i. SealedAsApp(C, X, D)@i & not (Ex C2 A #y. Yes(C2, A)@y)
+     & not (Ex B #r. RevealAccount(B)@r) & not (Ex E #r. RevealDevice(E)@r)"
+
+/* ---- Properties ---------------------------------------------------------------------------- */
+
+/* C1 — a web device is keyed only with every member's yes. Whenever a circle's key is sealed to a
+   device as a web device, both members of that circle really said yes — unless one of their
+   account keys leaked. No number of compromised devices (browsers included) can stand in for a
+   member's yes: a device holds no account key. */
+lemma C1_a_web_device_is_keyed_only_with_every_members_yes:
+  "All C X D #i. SealedAsWeb(C, X, D)@i ==>
+      (Ex A B #m #ya #yb. Members(C, A, B)@m & Yes(C, A)@ya & Yes(C, B)@yb)
+    | (Ex A B #m #r. Members(C, A, B)@m & RevealAccount(A)@r)
+    | (Ex A B #m #r. Members(C, A, B)@m & RevealAccount(B)@r)"
+
+/* C2 — a browser cannot pass as an app. A device treated as an app by a sealing member was
+   enrolled as an app by its account — unless that account's key leaked. The network and the
+   relays, which carry every roster, cannot relabel a web device.
+   Under -DSTRIPPABLE this is FALSIFIED: the label is theirs to change. */
+lemma C2_a_web_device_cannot_pass_as_an_app:
+  "All C X D #i. SealedAsApp(C, X, D)@i ==>
+      (Ex #e. Enrolled(X, D, 'app')@e) | (Ex #r. RevealAccount(X)@r)"
+
+/* C3 — the key goes where it was sealed. A circle key is learned by the adversary only by taking
+   the device it was sealed to — or the account that device belongs to, whose key can sign a
+   credential for a device of the adversary's own. Together with C1 and C2: taking a browser
+   yields a circle's key only if every member of that circle agreed to browsers. */
+lemma C3_a_circle_key_is_read_only_by_the_device_it_was_sealed_to:
+  "All C X k D #i #j. Key(C, X, k, D)@i & K(k)@j ==>
+      (Ex #r. RevealDevice(D)@r) | (Ex #r. RevealAccount(X)@r)"
+
+end

@@ -431,3 +431,94 @@ France and mainland China stay excluded (`docs/EXPORT-COMPLIANCE.md`); the web, 
 copy say free; the Microsoft Store submission can now be automated (`msstore publish` supports
 free products over Actions — `MSSTORE_PUBLISH`). D12's licensing reasoning is unchanged: the
 code stays PolyForm Noncommercial, the official binaries stay the copyright holder's.
+
+
+## D21 — A web client, as a seedless relay-only device (2026-11-19)
+
+**Decision:** Reverse the 2026-06-22 abandonment and build a full-featured web client. A browser
+tab is a **seedless linked device** (D16) running the same Rust engine compiled to WebAssembly,
+whose only network path is the circle's own relay front door (mailbox over HTTPS, iroh DERP over
+WebSocket). It is enrolled from an existing device and revocable from it. There is no web sign-up,
+and the master seed never enters a browser. Details and progress: [`WEB-PARITY.md`](WEB-PARITY.md).
+
+**Why now:** the original objection was that a web client needs a public server every circle
+depends on. Circle relays now expose exactly the HTTPS/WSS front door a tab needs, seedless
+enrollment exists, and iroh runs relay-only in a browser — so the dependency is the circle's own
+relay, which it already has.
+
+**Security posture — the honest trade:** whoever delivers the page's code can change it: the relay
+host, the tunnel provider that terminates TLS, or a TLS-inspecting network. No browser mechanism
+fully closes that. The design therefore bounds it: a compromised web session acts as one device
+until revoked — never the account, never the seed, no authority over other devices, cut off from
+new content on revocation. The maker hosts nothing (D15, and the mandate that the maker is never a
+bypass vector), so the bundle is served by the circle's relay. Web access is opt-in per circle by
+its owner, and labelled as weaker than a native app. The relay still writes no logs.
+
+**Consequences:** `haven_ffi` builds for `wasm32` with its native networking compiled out; the
+request-signing transcript moved to `haven_p2p::httpauth` so relay, native clients and browser
+share one implementation; a new `core/haven-web` crate holds the browser transport. Before any
+release the web device class needs Tamarin coverage and CI guards (the security release bar).
+
+## D22 — A circle decides whether browsers may read it (2026-11-19)
+
+**Decision:** A web device (D21) receives a circle's keys only while that circle allows web
+devices. A creator-bound circle follows its admins' newest signed position. A circle with no
+provable owner — a legacy circle, a direct message — needs a signed yes from **every** member.
+Positions are signed with the account key (`CircleWebPolicy`), so a linked device, and therefore
+any browser, cannot state one. Silence is no. Spec and limits: [`WEB-PARITY.md`](WEB-PARITY.md).
+
+**Why two rules:** the creator-bound circles already have a verifiable authority (admin grants,
+`TREEKEM-DESIGN.md` §4.3) and people expect its admins to run it. The older circles and every conversation have
+none, and inventing one would repeat the first-claim-wins problem that circle upgrades exist to
+avoid. Where nobody can speak for a circle, nobody is spoken for.
+
+**Why the class lives in the device name:** every shipped app verifies device credentials and
+rosters over a fixed set of bytes. A new signed field would make them reject the roster of anyone
+who linked a browser; an unsigned trailer could be stripped by the same relay that serves the
+page (the model's `-DSTRIPPABLE` variant shows the result). The device name is already inside the
+signed bytes, so a mark there is tamper-proof and an old app simply displays it.
+
+**Consequences and limits:** the engine filters web devices out of key commits, the key trees,
+the dial set and media wraps per circle, re-keys on a change of answer, and refuses a key offered
+by a web device in a circle that has not agreed. An app that predates this ignores it; an
+up-to-date browser refuses what such an app offers. The mark is applied at approval — always when
+the browser linked by showing a code, by the browser itself otherwise. Circle names and member
+lists still reach a browser through the account's own device sync.
+
+
+## D23 — A browser is rung with a content-free doorbell, filed by its own device key (2026-11-20)
+
+**Decision.** A linked browser can be notified while its tab is closed (Web Push). The push worker
+sends it an empty request — no payload — and the browser's service worker shows a line that says
+only that something is waiting. The browser registers its push endpoint under its account with its
+DEVICE key and the credential the account signed for it; the worker verifies the account's
+signature on the credential, the web mark in it, and that it names the key that signed.
+
+**Why this shape.**
+- *No payload.* Anything put in a push is handed to a third party's push service. With nothing in
+  it there is nothing to encrypt, nothing to get wrong, and the service learns only timing — the
+  same as the Android wake. The cost is that the notification cannot say who or what, or tell a
+  call from a post.
+- *The device key, not the account key.* A browser never holds the account key (D21). The two
+  alternatives were to have a seed-holding device register on the browser's behalf (works only
+  when that device is online, and needs new code in all three apps) or to let the worker take any
+  key's word for its account (anyone could file their own endpoint under your account and learn
+  when you are active — falsified in the model as `-DNO_CREDENTIAL`). The credential already
+  exists, is account-signed, and names both the device key and the class.
+- *Only where the person chose to stay linked.* A browser linked "just for this visit" must not
+  keep a subscription after the tab closes.
+- *A service worker with no `fetch` handler.* Web Push requires a service worker; ours does
+  nothing but show the notification, so D21's "the page always runs what the relay serves now"
+  still holds.
+
+**Revocation.** The worker holds no device list, so revoking a browser does not by itself
+remove its registration. The account says so: a device holding the account key sends the worker
+`webpush-revoke-v1:<device>`, signed with the account key (queued until the worker answers). The
+worker drops the endpoint and bars that device id, so the credential the browser kept files
+nothing again. **What it does not give:** until an account device has been online once after the
+revocation, the revoked browser can still be rung. It learns that something happened and nothing
+else. A registration also lapses after 30 days unless that browser renews it.
+
+**Proof and tests.** `docs/formal/haven_web_push.spthy` (R1–R4, the window as a trace, and the
+looser rule falsified); a real push through Chrome and its push service (`web-client/smoke/push.mjs`); `push/worker.test.mjs`; a registration vector shared between the Rust core
+and the worker (`push/webpush-vector.json`).

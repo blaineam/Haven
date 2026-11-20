@@ -9,16 +9,12 @@ name = "haven_ffi"
 crate-type = ["lib", "staticlib", "cdylib"]
 
 [dependencies]
-haven-net = { version = "0.0.1", path = "../haven-net" }
 haven-p2p = { path = "../haven-p2p" }
-haven-s3 = { path = "../haven-s3" }
 blake3 = "1"
 data-encoding = "2.11.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 thiserror = "1"
-tokio = { version = "1.52.3", features = ["rt-multi-thread"] }
-uniffi = { version = "0.31.2", features = ["cli", "tokio"] }
 # Diagnostic: capture iroh/noq connection-level tracing to a file so a relay dial can be watched
 # step-by-step (path selection, DERP fallback, connect, serve). Version pinned to iroh's.
 tracing = "0.1"
@@ -37,6 +33,22 @@ serde_json = "1.0.150"
 # Declaring it in both tables adds a second graph edge that exists only under `cargo test`, which is
 # how `cargo check` and `cargo test` end up resolving the same crate differently. One edge, one
 # resolution.
+
+# Native-only: the iroh node, relay/DERP/path-proxy hosting and the S3 client. A browser build
+# (wasm32) gets the sans-IO engine — sealing, keying, state — and supplies its own transport
+# (`haven-web`), because tokio's net/multi-thread runtime and a listening socket do not exist there.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+haven-net = { version = "0.0.1", path = "../haven-net" }
+haven-s3 = { path = "../haven-s3" }
+tokio = { version = "1.52.3", features = ["rt-multi-thread"] }
+uniffi = { version = "0.31.2", features = ["cli", "tokio"] }
+
+# Browser build: UniFFI still expands the same `#[uniffi::export]` items (one source of truth for
+# the API), but in its single-threaded wasm mode — no CLI/bindgen, no tokio.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+uniffi = { version = "0.31.2", default-features = false, features = ["wasm-unstable-single-threaded"] }
+# The page clock behind `clock` (already in the tree via iroh).
+web-time = "1"
 
 # Android-only: wire the JavaVM + Context into ndk-context so iroh's rustls platform
 # verifier can reach the system trust store (otherwise the node panics with

@@ -428,12 +428,57 @@ struct RelayFrontDoorControls: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
+        if relay.webAccessAvailable {
+            webAccess
+        }
         #endif
         Text(help)
             .font(.caption)
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
     }
+
+    #if os(macOS)
+    /// "Web access": let members open Haven in a browser through this relay. Off by default, and
+    /// the reason is on screen next to the switch, not behind a link.
+    @ViewBuilder
+    private var webAccess: some View {
+        Toggle(isOn: Binding(get: { relay.webAccessEnabled }, set: { relay.setWebAccess($0) })) {
+            Text("Offer Haven in a browser from this relay")
+        }
+        .tint(HavenTheme.pink)
+        Text("Let people in your circles open Haven in a web browser through this relay, and add that browser as one of their own devices (from You ▸ Devices on a device they already use).")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        if relay.webAccessEnabled {
+            if relay.webAccessServing, let base = tunnel.publicURL, !base.isEmpty {
+                let address = base.hasSuffix("/") ? base + "app/" : base + "/app/"
+                HStack(spacing: 6) {
+                    Text("Address:")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(address)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .lineLimit(2)
+                }
+            } else if relay.serving && !relay.webAccessServing {
+                // On, but this front door is not serving it (no path proxy: a separate DERP
+                // hostname is configured, or the proxy could not start).
+                Text("Web access needs the single front door (path proxy), which is not running.")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        Text("Off by default for a reason: this relay, and whatever sits in front of it (a tunnel or proxy), delivers the web page's code and could change it. A browser can never hold an account's master key, and its owner can remove it at any time.")
+            .font(.caption2)
+            .foregroundStyle(.tertiary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+    #endif
 
     @ViewBuilder
     private var liveTunnelStatus: some View {

@@ -326,6 +326,16 @@ export default {
       description: 'Push relay worker tests (node --test, no network)',
     },
 
+    // ── The web client's service worker (web-client/sw.js): it shows a content-free notification
+    //    for a push, and nothing else — in particular it has no fetch handler. Run offline in a
+    //    fake ServiceWorkerGlobalScope.
+    'web-push-sw': {
+      type: 'cmd',
+      cmd: 'node',
+      args: ['--test', 'web-client/sw.test.mjs'],
+      description: 'Web client service worker tests (node --test, no network)',
+    },
+
     // ── Desktop (Tauri) BINARY. `desktop` above runs the crate's tests and `desktop-ui` is a JS
     //    syntax check — neither of them ever produces the app. A crate whose tests pass can still
     //    fail to link an actual binary (a native dependency that resolves for `cargo test` but not

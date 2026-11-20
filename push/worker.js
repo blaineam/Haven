@@ -16,13 +16,24 @@
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    // A browser (the web client, served from any circle's relay) calls this worker from a page, so
+    // it needs CORS. `*` is safe here: the worker holds no cookies and no ambient authority — every
+    // route that changes anything is authorized by a signature in the body, not by who is asking.
+    if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS_PREFLIGHT });
+    // The VAPID public key a browser needs to subscribe. 404 until the owner configures Web Push.
+    if (request.method === "GET" && url.pathname === "/webpush") {
+      return webPushConfigured(env) ? json({ key: env.VAPID_PUBLIC_KEY }) : json({ error: "web push is not configured" }, 404);
+    }
     if (request.method !== "POST") return json({ ok: true, service: "haven-push" });
 
     try {
       if (url.pathname === "/register") {
         // A node id can have MULTIPLE devices (multi-device / linked devices) — keep a list of
         // tokens, not one, so a push reaches every device on that identity.
-        const { nodeId, token, sandbox, platform, ts, sig } = await request.json();
+        const reg = await request.json();
+        // A browser registers a Web Push endpoint, under its own device key (see registerWeb).
+        if (reg.platform === "web") return await registerWeb(env, reg);
+        const { nodeId, token, sandbox, platform, ts, sig } = reg;
         // Android registers an FCM token (not hex). Its signature covers `fcm-v1:<token>` so a
         // signature made for an APNs token or a /flag can never be replayed as an Android
         // registration (the prefix keeps the message spaces disjoint — see flagMaterial).
@@ -42,9 +53,14 @@ export default {
         // unconditional put spent a KV WRITE per launch per device for a byte-identical record —
         // and the free tier allows just 1,000 writes/day, so idle relaunch churn alone could exhaust
         // it. Reads are 100x cheaper than writes here; compare first.
-        const next = JSON.stringify({ tokens });
-        if (next !== JSON.stringify({ tokens: rec.tokens || [] })) await env.TOKENS.put(nodeId, next);
+        const next = JSON.stringify(webRecord(tokens, rec.revokedWeb));
+        if (next !== JSON.stringify(webRecord(rec.tokens || [], rec.revokedWeb))) await env.TOKENS.put(nodeId, next);
         return json({ ok: true, devices: tokens.length });
+      }
+
+      if (url.pathname === "/unregister-web") {
+        // The ACCOUNT revoked a browser: forget its endpoint and refuse it from now on.
+        return await unregisterWeb(env, await request.json());
       }
 
       if (url.pathname === "/register-owner") {
@@ -106,7 +122,13 @@ export default {
           const dead = await sendFcmWake(env, droids, { c: "1" }, 45);
           if (dead.length) await pruneTokens(env, nodeId, dead);
         }
-        const nonDroid = allTokens.filter((t) => t.platform !== "android");
+        // A browser gets the same content-free doorbell; the page (or its notification) does the rest.
+        const callWebs = allTokens.filter((t) => t.platform === "web");
+        if (callWebs.length) {
+          const dead = await sendWebPushWake(env, callWebs, 45);
+          if (dead.length) await pruneTokens(env, nodeId, dead);
+        }
+        const nonDroid = allTokens.filter((t) => t.platform !== "android" && t.platform !== "web");
         const jwt = (voip.length || nonDroid.length) ? await providerToken(env) : null;
         const survivors = [];
         let anyOk = false;
@@ -227,7 +249,15 @@ export default {
           droidOk = dead.length < droids.length;
           if (dead.length) await pruneTokens(env, nodeId, dead);
         }
-        const apnsTokens = tokens.filter((t) => t.platform !== "android");
+        // Browsers: a content-free Web Push. A browser must SHOW something for every push it is sent,
+        // so a `silent` notify (my own post syncing to my other devices) skips them.
+        const webs = tokens.filter((t) => t.platform === "web");
+        if (webs.length && !silent) {
+          const dead = await sendWebPushWake(env, webs, 300);
+          if (dead.length < webs.length) droidOk = true;   // "a non-APNs device was reached"
+          if (dead.length) await pruneTokens(env, nodeId, dead);
+        }
+        const apnsTokens = tokens.filter((t) => t.platform !== "android" && t.platform !== "web");
         if (!apnsTokens.length) return json({ ok: droidOk, devices: tokens.length }, droidOk ? 200 : 502);
         const jwt = await providerToken(env);
         // Payload is per-token: macOS has no Notification Service Extension, so instead of an
@@ -284,9 +314,9 @@ export default {
         }
         if (survivors.length !== apnsTokens.length) {
           // Re-read so a concurrent Android prune above isn't undone, then keep every live token.
-          const keep = [...survivors, ...((await env.TOKENS.get(nodeId, "json"))?.tokens || []).filter((t) => t.platform === "android")];
-          if (keep.length) await env.TOKENS.put(nodeId, JSON.stringify({ tokens: keep }));
-          else await env.TOKENS.delete(nodeId);
+          const cur = await env.TOKENS.get(nodeId, "json");
+          const keep = [...survivors, ...(cur?.tokens || []).filter((t) => t.platform === "android" || t.platform === "web")];
+          await putOrDelete(env, nodeId, keep, cur?.revokedWeb);
         }
         return json({ ok: anyOk, devices: tokens.length }, anyOk ? 200 : 502);
       }
@@ -330,8 +360,18 @@ export default {
   },
 };
 
+const CORS_PREFLIGHT = {
+  "access-control-allow-origin": "*",
+  "access-control-allow-methods": "GET, POST, OPTIONS",
+  "access-control-allow-headers": "content-type",
+  "access-control-max-age": "86400",
+};
+
 function json(obj, status = 200) {
-  return new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } });
+  return new Response(JSON.stringify(obj), {
+    status,
+    headers: { "content-type": "application/json", "access-control-allow-origin": "*" },
+  });
 }
 
 /// The material a /flag signature covers, slotted into verifyReg's `token` position. The core FFI
@@ -439,8 +479,179 @@ const fcmToken = (t) => /^[A-Za-z0-9_:\-]{50,4096}$/.test(t || "");
 async function pruneTokens(env, nodeId, dead) {
   const rec = await env.TOKENS.get(nodeId, "json");
   const keep = (rec?.tokens || []).filter((t) => !dead.includes(t.token));
-  if (keep.length) await env.TOKENS.put(nodeId, JSON.stringify({ tokens: keep }));
+  await putOrDelete(env, nodeId, keep, rec?.revokedWeb);
+}
+
+/// Write a node's record, or delete it when nothing is left to remember — no tokens AND no revoked
+/// browsers (that list must outlive the last token, or a revoked browser could simply file again).
+async function putOrDelete(env, nodeId, tokens, revokedWeb) {
+  if (tokens.length || (revokedWeb && revokedWeb.length)) await env.TOKENS.put(nodeId, JSON.stringify(webRecord(tokens, revokedWeb)));
   else await env.TOKENS.delete(nodeId);
+}
+
+// ---- Web Push (browsers), optional: no-op unless the VAPID key pair and subject are set ----
+//
+// A browser linked to an account holds NO account key — only its own device key and the
+// credential the account signed for it. So a browser's registration is authorized differently
+// from a phone's: it presents that credential (which names the account, and the device's key) and
+// signs the registration with the device key. The worker checks the account's signature on the
+// credential, that the credential is for a WEB device, and the device's signature on the
+// endpoint. Nobody can register an endpoint under an account that has not linked them.
+//
+// What is sent is a doorbell with no payload at all: the push service (Google, Mozilla, Apple,
+// Microsoft) learns that this browser was rung and when, never by whom or about what. The page —
+// or the notification the service worker shows — does the rest through the circle's relay.
+//
+// REVOCATION: the worker cannot see an account's device list, so the account tells it. A device
+// that holds the account key signs `webpush-revoke-v1:<device>` (`/unregister-web`); the worker
+// drops that browser's endpoint and remembers the device id, so the credential the browser kept
+// can never file an endpoint again. Until an account device has said so — it has to be online
+// once — a revoked browser can still be rung: it learns that something happened, nothing else.
+// A registration also lapses on its own (WEB_REG_TTL_SECS; a live browser renews it each visit).
+const WEB_REG_TTL_SECS = 30 * 24 * 3600;
+const WEB_REVOKED_MAX = 64;   // revoked browsers remembered per account (newest kept)
+const CRED_DOMAIN = new TextEncoder().encode("haven-device-cred-v1");   // core/haven-p2p/src/device.rs
+const WEB_MARK = new Uint8Array([0xf0, 0x9f, 0x8c, 0x90, 0x20]);        // "🌐 " — webpolicy::WEB_DEVICE_MARK
+
+const webPushConfigured = (env) => !!(env.VAPID_PUBLIC_KEY && env.VAPID_PRIVATE_KEY && env.VAPID_SUBJECT);
+
+/// The push services a subscription may point at. The worker POSTs to whatever endpoint it is
+/// given, so without this list a registration would make it a request forwarder to any host.
+const WEB_PUSH_HOSTS = [
+  /^fcm\.googleapis\.com$/,                         // Chrome, Edge, Brave, Opera, Samsung
+  /^updates\.push\.services\.mozilla\.com$/,       // Firefox
+  /^([a-z0-9-]+\.)?push\.apple\.com$/,              // Safari (web.push.apple.com)
+  /^[a-z0-9-]+\.notify\.windows\.com$/,             // Edge on Windows (WNS)
+];
+function webEndpoint(e) {
+  if (typeof e !== "string" || e.length > 1024) return null;
+  let u;
+  try { u = new URL(e); } catch { return null; }
+  if (u.protocol !== "https:" || u.port || u.username || u.password || u.hash) return null;
+  return WEB_PUSH_HOSTS.some((h) => h.test(u.hostname)) ? u : null;
+}
+
+/// The device key a credential names, if the account (`nodeId`) really signed it for a web device.
+/// `cred` is the credential's signed bytes — `domain ‖ account(32) ‖ created(8) ‖ name_len(4 LE) ‖
+/// name ‖ device bundle`, the bundle starting with the device's Ed25519 key — and `credSig` the
+/// Ed25519 half of the account's signature over them (the half this worker can check, as for every
+/// other registration).
+async function webDeviceOf(nodeId, credB64, credSigB64) {
+  try {
+    const acct = hexToBytes(nodeId), cred = base64ToBytes(credB64), sig = base64ToBytes(credSigB64);
+    const d = CRED_DOMAIN.length;
+    if (acct.length !== 32 || sig.length !== 64 || cred.length < d + 44 + 32 || cred.length > 16384) return null;
+    for (let i = 0; i < d; i++) if (cred[i] !== CRED_DOMAIN[i]) return null;
+    for (let i = 0; i < 32; i++) if (cred[d + i] !== acct[i]) return null;
+    const nameLen = new DataView(cred.buffer, cred.byteOffset + d + 40, 4).getUint32(0, true);
+    const nameAt = d + 44, devAt = nameAt + nameLen;
+    if (nameLen < WEB_MARK.length || devAt + 32 > cred.length) return null;
+    for (let i = 0; i < WEB_MARK.length; i++) if (cred[nameAt + i] !== WEB_MARK[i]) return null;   // a browser, by the account's word
+    const key = await crypto.subtle.importKey("raw", acct, { name: "Ed25519" }, false, ["verify"]);
+    if (!(await crypto.subtle.verify("Ed25519", key, sig, cred))) return null;
+    return [...cred.slice(devAt, devAt + 32)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  } catch {
+    return null;
+  }
+}
+
+async function registerWeb(env, { nodeId, token, ts, sig, deviceId, cred, credSig }) {
+  if (!webPushConfigured(env)) return json({ error: "web push is not configured" }, 404);
+  if (!nodeId || !deviceId || !webEndpoint(token)) return json({ error: "nodeId + deviceId + endpoint required" }, 400);
+  const named = await webDeviceOf(nodeId, cred, credSig);
+  // The credential must name THIS device, and the device must have signed THIS endpoint. The
+  // `webpush-v1:` prefix keeps the message apart from every other registration's.
+  if (!named || named !== String(deviceId).toLowerCase() || !(await verifyReg(named, `webpush-v1:${token}`, ts, sig))) {
+    return json({ error: "unauthorized" }, 401);
+  }
+  const now = Math.floor(Date.now() / 1000);
+  const rec = (await env.TOKENS.get(nodeId, "json")) || { tokens: [] };
+  // The account has revoked this browser: its credential is still a valid signature, and is no
+  // longer the account's word.
+  if ((rec.revokedWeb || []).includes(named)) return json({ error: "unauthorized" }, 401);
+  const before = rec.tokens || [];
+  const same = before.find((t) => t.platform === "web" && t.token === token && t.device === named);
+  // Renewing an unchanged registration costs a KV write only once a day (see /register).
+  if (same && same.exp - now > WEB_REG_TTL_SECS - 86400) return json({ ok: true, devices: before.length });
+  // One endpoint per browser: a new subscription replaces that device's old one.
+  const tokens = before.filter((t) => t.token !== token && !(t.platform === "web" && t.device === named));
+  tokens.push({ token, platform: "web", device: named, exp: now + WEB_REG_TTL_SECS });
+  if (tokens.length > 10) tokens.splice(0, tokens.length - 10);
+  await env.TOKENS.put(nodeId, JSON.stringify(webRecord(tokens, rec.revokedWeb)));
+  return json({ ok: true, devices: tokens.length });
+}
+
+/// A node's record: its tokens, plus the browsers its account has revoked (only when there are any,
+/// so a record with none is byte-identical to what it always was).
+function webRecord(tokens, revokedWeb) {
+  return revokedWeb && revokedWeb.length ? { tokens, revokedWeb } : { tokens };
+}
+
+/// The account revokes a browser. Signed by the ACCOUNT key (the node id), like a phone's
+/// registration — a browser cannot do this to another browser, and nobody can do it to an account
+/// that is not theirs. Idempotent, and answers the same whether or not the device was registered.
+async function unregisterWeb(env, { nodeId, deviceId, ts, sig }) {
+  const device = String(deviceId || "").toLowerCase();
+  if (!nodeId || !/^[0-9a-f]{64}$/.test(device)) return json({ error: "nodeId + deviceId required" }, 400);
+  if (!(await verifyReg(nodeId, `webpush-revoke-v1:${device}`, ts, sig))) return json({ error: "unauthorized" }, 401);
+  const rec = (await env.TOKENS.get(nodeId, "json")) || { tokens: [] };
+  const tokens = (rec.tokens || []).filter((t) => !(t.platform === "web" && t.device === device));
+  const revokedWeb = [...(rec.revokedWeb || []).filter((d) => d !== device), device].slice(-WEB_REVOKED_MAX);
+  const next = JSON.stringify(webRecord(tokens, revokedWeb));
+  if (next !== JSON.stringify(webRecord(rec.tokens || [], rec.revokedWeb))) await env.TOKENS.put(nodeId, next);
+  return json({ ok: true });
+}
+
+let _vapid = new Map();   // audience → { jwt, at }
+async function vapidAuth(env, audience) {
+  const now = Math.floor(Date.now() / 1000);
+  const hit = _vapid.get(audience);
+  if (hit && now - hit.at < 3600) return hit.jwt;
+  const pub = b64urlToBytes(env.VAPID_PUBLIC_KEY);
+  if (pub.length !== 65 || pub[0] !== 4) throw new Error("VAPID_PUBLIC_KEY is not an uncompressed P-256 point");
+  const key = await crypto.subtle.importKey("jwk", {
+    kty: "EC", crv: "P-256", d: env.VAPID_PRIVATE_KEY.trim(),
+    x: b64urlBytes(pub.slice(1, 33)), y: b64urlBytes(pub.slice(33, 65)),
+  }, { name: "ECDSA", namedCurve: "P-256" }, false, ["sign"]);
+  const input = `${b64url(JSON.stringify({ typ: "JWT", alg: "ES256" }))}.${b64url(JSON.stringify({ aud: audience, exp: now + 12 * 3600, sub: env.VAPID_SUBJECT }))}`;
+  const sig = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, key, new TextEncoder().encode(input));
+  const jwt = `${input}.${b64urlBytes(new Uint8Array(sig))}`;
+  if (_vapid.size > 16) _vapid.clear();
+  _vapid.set(audience, { jwt, at: now });
+  return jwt;
+}
+
+/// Ring each browser: an empty Web Push (no payload, so nothing to encrypt and nothing to read).
+/// Returns the endpoints that are gone or expired so the caller can prune them. Never throws.
+async function sendWebPushWake(env, tokens, ttlSeconds) {
+  const dead = [];
+  if (!webPushConfigured(env)) return dead;
+  const now = Math.floor(Date.now() / 1000);
+  for (const t of tokens) {
+    const u = webEndpoint(t.token);
+    if (!u || !(t.exp > now)) { dead.push(t.token); continue; }
+    try {
+      const res = await fetch(t.token, {
+        method: "POST",
+        headers: {
+          authorization: `vapid t=${await vapidAuth(env, u.origin)}, k=${env.VAPID_PUBLIC_KEY}`,
+          ttl: String(ttlSeconds),
+          urgency: "high",
+          "content-length": "0",
+        },
+      });
+      if (res.ok) continue;
+      console.error(`WEBPUSH FAIL status=${res.status} host=${u.hostname}`);
+      if (res.status === 404 || res.status === 410) dead.push(t.token);
+    } catch (e) {
+      console.error(`WEBPUSH FAIL ${String(e).slice(0, 120)}`);
+    }
+  }
+  return dead;
+}
+
+function b64urlToBytes(s) {
+  return base64ToBytes(String(s || "").trim().replace(/-/g, "+").replace(/_/g, "/"));
 }
 
 // ---- FCM (HTTP v1) data-only wake, optional: no-op unless FCM_SERVICE_ACCOUNT is set ----

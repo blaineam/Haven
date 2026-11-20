@@ -433,6 +433,7 @@ struct DMContactPicker: View {
 struct DMThreadView: View {
     let circleId: String
     @ObservedObject private var store = FeedStore.shared
+    @State private var showWebAccess = false
     @State private var text = ""
     @State private var secret = false
     @State private var editingId: String?      // editing one of my sent messages
@@ -1048,6 +1049,9 @@ struct DMThreadView: View {
                         Button { disappearSecs = 86_400 } label: { Text("After 1 day") }
                         Button { disappearSecs = 604_800 } label: { Text("After 1 week") }
                     } label: { Label("Disappearing", systemImage: "timer") }
+                    // A conversation is a circle of two with no owner: a browser reads it only if
+                    // BOTH people agree.
+                    Button { showWebAccess = true } label: { Label("Web browsers", systemImage: "globe") }
                 } label: {
                     Image(systemName: "plus.circle.fill").font(.title2).foregroundStyle(HavenTheme.pink)
                 }
@@ -1080,6 +1084,7 @@ struct DMThreadView: View {
         // contentShape keeps the whole bar tappable without one.
         .contentShape(Rectangle())
         .sheet(isPresented: $showMedia) { MediaPicker { refs in attachedMedia.append(contentsOf: refs) }.macSheetFrame() }
+        .sheet(isPresented: $showWebAccess) { ConversationWebAccessSheet(circleId: circleId).macSheetClose() }
         .sheet(isPresented: $showSongs) {
             SongPicker(onPick: { t in attachedTrack = t },
                        suggestFor: (media: attachedMedia, caption: text)).macSheetFrame()

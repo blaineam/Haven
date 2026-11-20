@@ -13,7 +13,7 @@
 //! no TURN, no push. Prints `ORIGIN=` (the relay's front door — the page is at `<origin>/app/`),
 //! `ACCOUNT=`, `TICKET=`; approves every enrollment request made with one of its tickets
 //! (`ENROLLED <device>`); posts each line it reads on stdin (`!img <caption>` attaches a tiny PNG,
-//! `!ticket` mints another ticket as `TICKET<n>=`); and prints `FEED <me|other> <body>[ [media N]]`
+//! `!ticket` mints another ticket as `TICKET<n>=`, `!pair <code>` answers a `haven-pair:` code); and prints `FEED <me|other> <body>[ [media N]]`
 //! for every post once it holds the post's attachments.
 
 use std::collections::HashSet;
@@ -130,6 +130,15 @@ async fn run() -> AnyResult<()> {
             if line == "!ticket" {
                 tickets += 1;
                 println!("TICKET{tickets}={}", engine.mint_enroll_ticket().map_err(|e| e.to_string())?);
+                continue;
+            }
+            // `!pair <haven-pair: code>` answers a code another device is showing (scan-to-link):
+            // `PAIRED` once the offer was delivered, `PAIRFAIL <why>` otherwise.
+            if let Some(code) = line.strip_prefix("!pair ") {
+                match engine.link_scanned_device(code.to_string()).await {
+                    Ok(()) => println!("PAIRED"),
+                    Err(e) => println!("PAIRFAIL {e}"),
+                }
                 continue;
             }
             // `!img <caption>` attaches a tiny PNG; anything else is a text post.

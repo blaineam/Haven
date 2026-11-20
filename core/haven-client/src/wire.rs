@@ -59,6 +59,12 @@ pub const CALL_ENDED_ELSEWHERE: u8 = 35;
 /// compromised linked device cannot repoint its siblings' relays.
 pub const RELAY_INTERFACE: u8 = 37;
 
+/// Scan-to-link offer (`haven_p2p::pair`): a device that holds the account sends an enrollment
+/// ticket to a NEW device that showed it a `haven-pair:` code, sealed under that code's secret. The
+/// one frame a device with no account accepts — and only while it is showing a code, only if it
+/// opens under that code. Everything after it is frames 28/29.
+pub const PAIR_OFFER: u8 = 38;
+
 /// RESERVED — the Apple apps' history hand-off nudge between a user's own devices ("look at the
 /// account lane now", `HistoryHandoff.nudgeFrame`). Desktop, Android and the browser neither send
 /// nor act on it (docs/MULTI-DEVICE.md); it is named here so the number is never reused.
@@ -397,12 +403,13 @@ mod tests {
             HELLO, EVENT, MEDIA_REQ, MEDIA_CHUNK, RELAY, CALL_INVITE, CALL_ACCEPT, CALL_HANGUP, CALL_AUDIO, CALL_VIDEO,
             SDP_OFFER, SDP_ANSWER, ICE, RELAY_NODE, PRESIGN, GROUP_INVITE, CALL_CAMERA, DEVICE_ENROLL, DEVICE_GRANT,
             DEVICE_ROSTER, SEEDLESS_ENROLL_REQ, SEEDLESS_ENROLL_GRANT, CALL_HANDLED, MEDIA_WANTED, MEDIA_AVAILABLE,
-            MEDIA_RESUME_REQ, HISTORY_REQ, CALL_ENDED_ELSEWHERE, HISTORY_NUDGE, RELAY_INTERFACE,
+            MEDIA_RESUME_REQ, HISTORY_REQ, CALL_ENDED_ELSEWHERE, HISTORY_NUDGE, RELAY_INTERFACE, PAIR_OFFER,
         ];
         let unique: std::collections::BTreeSet<u8> = all.iter().copied().collect();
         assert_eq!(unique.len(), all.len(), "two frame types share a number");
         assert_eq!(HISTORY_NUDGE, 36, "36 belongs to the Apple apps' history hand-off nudge");
         assert_eq!(RELAY_INTERFACE, 37);
+        assert_eq!(PAIR_OFFER, 38);
     }
 
     #[test]

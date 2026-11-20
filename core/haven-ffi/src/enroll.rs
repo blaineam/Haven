@@ -230,3 +230,76 @@ pub fn enroll_open_grant(
         relays: grant.relays,
     })
 }
+
+// ── Scan-to-link (`haven_p2p::pair`) ────────────────────────────────────────────────────────────
+//
+// The new device shows a `haven-pair:` code; a device that holds the account scans it, mints an
+// ordinary ticket BOUND to the scanned device, and sends it back sealed under the code's secret.
+// Everything after that is the enrollment above. One codec in core, so the browser, the desktop
+// and both phones agree on every byte.
+
+use haven_p2p::pair::{open_pair_offer, pair_offer_wire, PairCode};
+
+/// The decoded contents of a `haven-pair:` code.
+#[derive(uniffi::Record)]
+pub struct PairCodeFfi {
+    /// The new device's 32-byte transport id — where the offer is sent.
+    pub device_id: Vec<u8>,
+    /// 16-byte tamper hash of the device's full bundle.
+    pub verification: Vec<u8>,
+    /// Unix seconds the code was made.
+    pub issued_at: u64,
+    /// The relay front door (`https://…`) the device is listening on.
+    pub relay: String,
+}
+
+fn pair_code(text: &str) -> Result<PairCode, HavenError> {
+    PairCode::parse_text(text).map_err(|e| HavenError::Invalid { msg: format!("bad pair code: {e}") })
+}
+
+/// NEW DEVICE: make a `haven-pair:` code for this device's public bundle, reachable through `relay`.
+#[uniffi::export]
+pub fn pair_code_issue(device_bundle: Vec<u8>, now: u64, relay: String) -> Result<String, HavenError> {
+    Ok(PairCode::issue(&bundle(&device_bundle)?, now, &relay).encode_text())
+}
+
+/// Parse a scanned or pasted `haven-pair:` code (the secret stays inside the text; it is only ever
+/// used through [`pair_offer_build`] / [`pair_offer_open`]).
+#[uniffi::export]
+pub fn pair_code_parse(text: String) -> Result<PairCodeFfi, HavenError> {
+    let c = pair_code(&text)?;
+    Ok(PairCodeFfi {
+        device_id: c.device_id.to_vec(),
+        verification: c.verification.to_vec(),
+        issued_at: c.issued_at,
+        relay: c.relay,
+    })
+}
+
+/// Has the code outlived `ttl_secs`? (Same arithmetic as [`enroll_ticket_is_expired`].)
+#[uniffi::export]
+pub fn pair_code_is_expired(text: String, now: u64, ttl_secs: u64) -> Result<bool, HavenError> {
+    Ok(pair_code(&text)?.is_expired(now, ttl_secs))
+}
+
+/// SCANNING DEVICE: is `device_bundle` (from an enrollment request) the device this code was made
+/// for? A ticket minted for a scanned code enrolls that device and no other.
+#[uniffi::export]
+pub fn pair_code_matches(text: String, device_bundle: Vec<u8>) -> Result<bool, HavenError> {
+    Ok(pair_code(&text)?.matches(&bundle(&device_bundle)?))
+}
+
+/// SCANNING DEVICE: seal `ticket_text` (a `haven-enroll:` ticket) for the device that showed
+/// `code_text`. The result is the body of frame 38.
+#[uniffi::export]
+pub fn pair_offer_build(code_text: String, ticket_text: String, ts: u64) -> Result<Vec<u8>, HavenError> {
+    Ok(pair_offer_wire(&pair_code(&code_text)?, &ticket_text, ts))
+}
+
+/// NEW DEVICE: open a frame-38 body with the code this device is showing. Returns the ticket text,
+/// or an error for anything not sealed for this code or older than `max_age_secs`.
+#[uniffi::export]
+pub fn pair_offer_open(code_text: String, wire: Vec<u8>, now: u64, max_age_secs: u64) -> Result<String, HavenError> {
+    open_pair_offer(&pair_code(&code_text)?, &wire, now, max_age_secs)
+        .map_err(|e| HavenError::Invalid { msg: format!("pair offer: {e}") })
+}

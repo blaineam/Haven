@@ -105,6 +105,49 @@ final class RelayHost: ObservableObject {
         #endif
     }
 
+    // MARK: Web access (macOS hosts)
+    //
+    // A relay host can also hand out the Haven web client under `/app/` on its front door, so a
+    // member who cannot install the app can add a browser as one of their own devices. OFF unless
+    // the person running this relay turns it on: the relay (and any tunnel or proxy in front of it)
+    // delivers that page's code and could change it. See docs/WEB-PARITY.md.
+    #if os(macOS)
+    private let webAccessKey = "haven.relay.host.webAccess"
+
+    /// The web client this build carries (`Contents/Resources/web-client`, put there by
+    /// `Scripts/embed-web-client.sh`), if any — checked once: it must load as a web client build,
+    /// or this app offers no switch at all rather than one that fails later.
+    nonisolated static let webClientDir: String? = {
+        guard let dir = Bundle.main.resourceURL?.appendingPathComponent("web-client", isDirectory: true)
+        else { return nil }
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: dir.path, isDirectory: &isDir), isDir.boolValue
+        else { return nil }
+        guard (try? webAppDigest(webAppDir: dir.path)) != nil else { return nil }
+        return dir.path
+    }()
+
+    /// This build can serve the web client.
+    var webAccessAvailable: Bool { Self.webClientDir != nil }
+    /// The person running this relay turned web access on. Never true by default.
+    var webAccessEnabled: Bool { webAccessAvailable && d.bool(forKey: webAccessKey) }
+    /// The front door that is up right now is serving the web client.
+    @Published private(set) var webAccessServing = false
+
+    /// Turn web access on or off. The front door is restarted so the change is real at once — a
+    /// switch that says "off" while the page is still being served would be a lie.
+    func setWebAccess(_ on: Bool) {
+        guard webAccessAvailable, on != d.bool(forKey: webAccessKey) else { return }
+        d.set(on, forKey: webAccessKey)
+        objectWillChange.send()
+        HavenLog.relay("web access \(on ? "ON" : "OFF") — restarting the front door")
+        if enabled {
+            stop()
+            start()
+        }
+    }
+    #endif
+
     private var storeDir: String {
         #if DEBUG && HAVEN_QA_STUB && os(macOS)
         // The e2e fleet's HavenStub only: the harness inspects this store (multirelay / relayhistory
@@ -320,14 +363,30 @@ final class RelayHost: ObservableObject {
                 // cloudflared origin selection and leave dead listeners behind.
                 for attempt in 1...3 {
                     do {
-                        let router = try await PathRouterHandle.spawn(
-                            bind: "127.0.0.1:8675",
-                            mediaBackend: "127.0.0.1:\(port)",
-                            derpBackend: "127.0.0.1:\(dport)",
-                            httpToken: token
-                        )
+                        // Web access ON → the same front door also serves the web client under
+                        // /app/. A build that fails to load is an error (and a retry), never a
+                        // silent fall back to serving without it.
+                        let webDir = self.webAccessEnabled ? Self.webClientDir : nil
+                        let router: PathRouterHandle
+                        if let webDir {
+                            router = try await PathRouterHandle.spawnWithWebApp(
+                                bind: "127.0.0.1:8675",
+                                mediaBackend: "127.0.0.1:\(port)",
+                                derpBackend: "127.0.0.1:\(dport)",
+                                httpToken: token,
+                                webAppDir: webDir
+                            )
+                        } else {
+                            router = try await PathRouterHandle.spawn(
+                                bind: "127.0.0.1:8675",
+                                mediaBackend: "127.0.0.1:\(port)",
+                                derpBackend: "127.0.0.1:\(dport)",
+                                httpToken: token
+                            )
+                        }
                         guard self.startGeneration == generation else { return }
                         self.pathRouterHandle = router
+                        self.webAccessServing = webDir != nil
                         frontPort = router.localPort()
                         pathRouted = true
                         HavenLog.relay(
@@ -935,6 +994,7 @@ final class RelayHost: ObservableObject {
         #if os(macOS)
         CloudflaredTunnel.shared.stop() // also sweeps orphans off-main
         pathRouterHandle = nil  // drops unified media+DERP front door
+        webAccessServing = false
         derpHandle = nil   // drops embedded iroh-relay
         #endif
         handle?.disable()      // detach the relay from the node's endpoint

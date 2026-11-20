@@ -119,11 +119,24 @@ Next, in order:
         Settings ▸ Relays — off by default, with the trust warning on the card and the address
         members open (`<front door>/app/`) once it is on.
       - Media works each way (the smoke posts a picture from the tab and one to it).
-- [ ] Release packaging: the desktop installers do not yet include `web-client/dist` (the build
-      needs the wasm toolchain in CI), so the switch does not appear in shipped builds. The Mac
-      app's and Android's in-app relay hosts need the same hand-over and switch in their own UIs.
-- [ ] Bundle size: ~10.8 MB of WebAssembly, served uncompressed. Needs `wasm-opt` and
-      pre-compressed (brotli) variants in the proxy.
+      - The Mac app's relay host does the same through the FFI
+        (`PathRouterHandle.spawn_with_web_app`, `web_app_digest`; tests in
+        `core/haven-ffi/tests/web_app_host.rs`): `RelayHost.setWebAccess`, a **Web access** switch
+        under the front-door controls with the same warning and address, in all nine languages.
+        The build copies `web-client/dist` into `Contents/Resources/web-client` when it exists
+        (`apple/Scripts/embed-web-client.sh`); without it the app has no switch. Turning it on or
+        off restarts the front door, so "off" is true the moment it is shown.
+      - Phones do not host it. The iPhone/iPad and Android in-app relays have no public front
+        door (no path proxy, no tunnel helper), so there is nothing for a browser to open. They DO
+        take part in linking: a phone that approves a browser, or re-announces its relay, teaches
+        the account's other devices the relay's address with frame 37 (`FeedStore.swift`,
+        `HavenNet.kt`), exactly as the desktop does.
+- [ ] Release packaging: no shipped build includes `web-client/dist` yet. The desktop installers
+      and the Mac app's Xcode Cloud build both need the wasm toolchain (rustup wasm32 target, an
+      LLVM clang for ring, the pinned `wasm-bindgen`) in CI before the switch appears anywhere.
+- [ ] Bundle size: ~10.8 MB of WebAssembly, ~3.5 MB on the wire (the proxy gzips every bundle
+      file once, at load, and serves that to browsers that accept it). `wasm-opt` and a brotli
+      variant (~2.3 MB measured) would cut it further; neither is done.
 - [ ] Per-circle consent. Web access is a host-level switch today. "This circle allows web
       devices" needs a device class in the credential and members refusing to seal to a web device
       a circle has not allowed — a protocol change, to be modelled before it is built.
@@ -143,10 +156,18 @@ Next, in order:
         both ways, see both posts rendered. `SMOKE_SHOTS=<dir>` saves phone/tablet/desktop shots.
 - [x] Settings that cannot work in a browser are hidden there (identities, hosting a relay and
       its front door, start at login, the Instagram importer).
-- [ ] Drag-and-drop of files onto the page (the desktop app uses Tauri's path-based drop). The
-      composer's own picker already works in a browser.
+- [x] Drag-and-drop of pictures and videos onto the page. A browser hands the page `File`s, not
+      paths, so the drop goes straight into the picker's own sanitize pipeline (re-encode, no
+      EXIF/GPS) — the same function the desktop's path-based drop now calls. Every file drag is
+      cancelled window-wide, because a browser otherwise navigates to the dropped file and the
+      session is gone. Checked by the smoke.
 - [ ] Media in a browser: the cache lives in the in-memory tree today, which is fine for text and
       wrong for video. It needs a blob store of its own (OPFS / Cache API).
+- [x] The engine's delayed save works in a page. It started an OS thread, which a browser cannot
+      do: the first post received over the network crashed the task handling it and nothing
+      network-driven was saved again (posts still showed, because the live state was intact).
+      It runs on the page's event loop now; a Rust panic is reported in the console with its
+      message; and the smoke fails on any uncaught page error instead of passing around it.
 - [x] **Storage modes** (`web-client/storage.js`), chosen on the link screen before anything is
       written. Every record is AES-GCM ciphertext with its path as associated data.
       - *Shared or public computer* (the default): a randomly named database whose key lives only
@@ -159,8 +180,36 @@ Next, in order:
       - What this does NOT do: protect an open session on a compromised machine, or protect
         "my computer" storage from someone using that browser profile. A browser's own "reopen
         closed tab" may also bring a shared session back until the window is closed.
-- [ ] Scan-to-link: the tab shows a QR and the phone scans it (today the tab must be given the
-      ticket text — fine for a second computer, not for phone-to-kiosk).
+- [ ] **Scan-to-link** — the browser shows a code and a device that has the account answers it
+      (a borrowed computer usually has no camera, and nobody can type a ticket into it from a
+      phone). Core, browser and desktop are done; the phones' scanners are not.
+      - [x] Codec, in the crypto core so every platform agrees on the bytes
+            (`core/haven-p2p/src/pair.rs`, FFI in `haven-ffi/src/enroll.rs`, fuzzed with the other
+            wire parsers). A `haven-pair:` code holds the new device's id, the 16-byte check of
+            its full key bundle, a one-time secret, a timestamp and the relay it is listening on —
+            nothing about any account. Ten-minute life, replaced on screen every eight.
+      - [x] The answer is **frame 38** (`PAIR_OFFER`): an ordinary enrollment ticket, sealed
+            under the code's secret, sent through the relay the code names
+            (`send_to_node_via` on both node kinds). After it, linking is frames 28/29 unchanged,
+            including the person's Approve.
+      - [x] The ticket minted for a scanned code is **bound to the device the code names**: a
+            request under it from any other device is refused
+            (`a_ticket_minted_for_a_scanned_code_enrolls_only_the_device_it_names`). So reading
+            the code off a screen is not enough to get a device onto the account — stricter than
+            a pasted ticket, which enrolls whoever holds it.
+      - [x] The waiting device (`core/haven-client/src/pairing.rs`) has no account and takes
+            exactly one kind of frame from anyone: an offer that opens under the code on screen.
+            Nothing is stored while the code shows; the storage choice ("is this your computer?")
+            is applied when an offer arrives.
+      - [x] Browser: the link screen shows the QR and the text. Desktop: Devices ▸ Add a device ▸
+            "Scan its code" (camera) or paste. The smoke links a browser this way end to end.
+      - [ ] iPhone/iPad, Mac and Android: a "Scan its code" action in their Devices screens, and
+            the same bound-ticket check in their own enrollment handlers.
+      - [ ] The formal model (`haven_web_device.spthy`) does not cover the offer yet.
+      - What it does not protect against, stated plainly: someone who can read the code off the
+        screen can answer it first with a ticket for THEIR account, so that browser joins their
+        account instead (the person sees the wrong name and an empty feed; nothing of theirs is
+        exposed). The first answer wins.
 - [ ] The same against a shipping native app, and through a real Cloudflare tunnel.
 - [ ] Calls (WebRTC + the relay hairpin), Web Push.
 - [ ] Account → device discovery in a browser (resolve/publish are stubs; rosters and inbound

@@ -5338,7 +5338,7 @@ function makeQrSvg(text) {
   return qr.createSvgTag({ cellSize: 5, margin: 2 });
 }
 
-async function startScan() {
+async function startScan(onCode) {
   const video = el("video", { id: "scan-video", autoplay: "", muted: "", playsinline: "" });
   const canvas = el("canvas", { style: "display:none" });
   const status = el("div", { class: "muted small" }, t("point_camera_qr"));
@@ -5360,7 +5360,9 @@ async function startScan() {
         const code = window.jsQR ? window.jsQR(img.data, img.width, img.height) : null;
         if (code && code.data) {
           stop();
-          invoke("connect_by_link", { uri: code.data.trim() }).then((ok) => toast(ok ? t("invite_sent_short") : t("not_haven_qr")));
+          // Default: a contact's invite. A caller scanning for something else says what to do with it.
+          if (onCode) onCode(code.data.trim());
+          else invoke("connect_by_link", { uri: code.data.trim() }).then((ok) => toast(ok ? t("invite_sent_short") : t("not_haven_qr")));
           return;
         }
       }
@@ -6784,12 +6786,31 @@ async function enrollDeviceSheet() {
   catch (e) { toast(t("couldnt_create_link_code", e)); return; }
   const qrBox = el("div", { class: "qr-box" });
   try { qrBox.innerHTML = makeQrSvg(ticket); } catch (_) { qrBox.textContent = t("qr_unavailable"); }
+  const pairIn = el("input", { class: "field-capsule", placeholder: "haven-pair:…", style: "width:100%" });
+  const answerPairCode = async (c) => {
+    c = (c || "").trim();
+    if (!/^haven-pair:/i.test(c)) { toast(t("pair_not_a_code")); return; }
+    try {
+      await invoke("enroll_scan_code", { code: c });
+      toast(t("pair_sent"));
+      devicesSheet();
+    } catch (e) { toast(t("pair_failed", e)); }
+  };
   const body = el("div", { class: "col", style: "gap:12px;align-items:center;text-align:center" },
     el("div", { class: "muted small" }, t("enroll_hint")),
     qrBox,
     el("button", { class: "btn small", onclick: async () => { try { await navigator.clipboard.writeText(ticket); toast(t("link_code_copied")); } catch (_) { toast(t("copy_failed")); } } }, t("copy_link_code")),
     el("div", { class: "muted small", style: "word-break:break-all;opacity:0.7" }, ticket),
-    el("div", { class: "muted small" }, t("enroll_approve_hint")));
+    el("div", { class: "muted small" }, t("enroll_approve_hint")),
+    // Scan-to-link, the other way round: a device that cannot scan or be typed into (a browser on
+    // a borrowed computer) shows a `haven-pair:` code of its own, and THIS device answers it. The
+    // request that comes back still waits for Approve in the Devices sheet.
+    el("hr", { style: "width:100%;border:0;border-top:1px solid var(--line);margin:4px 0" }),
+    el("div", { class: "muted small" }, t("pair_scan_hint")),
+    el("div", { class: "row wrap", style: "justify-content:center;width:100%" },
+      el("button", { class: "btn small", onclick: () => startScan(answerPairCode) }, t("pair_scan"))),
+    pairIn,
+    el("button", { class: "btn small", onclick: () => answerPairCode(pairIn.value) }, t("pair_use_code")));
   sheet(t("add_a_device"), body);
 }
 
@@ -8365,13 +8386,49 @@ function renderOnboarding() {
     el("span", { class: "col", style: "gap:2px" },
       el("span", {}, t("web_remember")),
       el("span", { class: "muted small", style: "white-space:normal" }, t("web_remember_hint"))));
+  // Browser only — scan-to-link. A browser on a borrowed computer usually has no camera and
+  // nobody can type a ticket into it from a phone, so it shows a code of its own and a device
+  // that already has the account answers it. One element, made once, so a redraw of this screen
+  // never restarts it; the code is replaced before its ten minutes are up.
+  const pairBox = el("div", { class: "col", style: "align-items:center;gap:8px;width:100%" });
+  let pairStarted = false;
+  const startPair = async () => {
+    if (pairStarted) return;
+    pairStarted = true;
+    const show = async () => {
+      try {
+        const pc = await invoke("pair_begin");
+        const qr = el("div", { class: "qr-box", id: "pair-qr" });
+        try { qr.innerHTML = makeQrSvg(pc); } catch (_) { qr.textContent = t("qr_unavailable"); }
+        pairBox.replaceChildren(
+          el("div", { class: "muted small", style: "white-space:normal" }, t("web_pair_hint")),
+          qr,
+          el("button", { class: "btn small", id: "pair-copy", "data-code": pc, onclick: async () => {
+            try { await navigator.clipboard.writeText(pc); toast(t("web_pair_copied")); } catch (_) { toast(t("copy_failed")); }
+          } }, t("web_pair_copy")),
+          el("div", { class: "muted small", style: "white-space:normal" }, t("web_pair_or")));
+      } catch (e) {
+        console.error("pair_begin failed", e);
+        pairBox.replaceChildren(el("div", { class: "muted small", style: "white-space:normal" }, t("web_pair_unavailable")));
+      }
+    };
+    listen("haven:pair-offer", async () => {
+      pairBox.replaceChildren(el("div", { class: "muted small" }, t("web_pair_answered")));
+      Terms.accept();
+      try { await invoke("pair_finish", { remember: remember.checked }); }
+      catch (e) { toast(t("couldnt_link", e)); }
+    });
+    await show();
+    setInterval(() => { if (pairBox.isConnected) show(); }, 8 * 60 * 1000);
+  };
   const linkBox = () => el("div", { class: "col", style: "width:100%;gap:8px" },
     HOST_WEB ? el("div", { class: "muted small", style: "white-space:normal" }, t("web_trust_note")) : null,
-    el("div", { class: "muted small" }, linkMode === "move"
+    HOST_WEB ? rememberRow() : null,
+    HOST_WEB ? (startPair(), pairBox) : null,
+    HOST_WEB ? null : el("div", { class: "muted small" }, linkMode === "move"
       ? t("link_move_hint")
       : t("link_add_hint")),
     code,
-    HOST_WEB ? rememberRow() : null,
     // In a browser linking is the only path, so there is nothing to go back to.
     HOST_WEB ? null : el("button", { class: "btn ghost small", style: "align-self:flex-start", onclick: () => { showLink = false; draw(); } }, t("back_arrow")),
     el("button", { class: "btn primary", style: "width:100%", onclick: async () => {
@@ -8835,6 +8892,58 @@ async function boot() {
   // and it is the same hop the picker path has always paid on the way OUT — every re-encoded blob
   // already crosses this boundary as base64. Correctness over the allocation.
   const MEDIA_RE = { img: /\.(jpe?g|png|gif|heic|heif|webp|bmp|tiff?)$/i, vid: /\.(mp4|mov|m4v|webm|avi|mkv|3gp)$/i };
+  // One dropped file → the composer, through the picker's own sanitize pipeline (re-encode, no
+  // EXIF/GPS). Shared by the desktop drop (a path, read back from disk) and the browser drop (a
+  // File the page was handed directly).
+  const attachDroppedFile = async (file, isVideo) => {
+    const b64 = await sanitizeMediaFile(file, isVideo);
+    if (b64 === null) return;                          // refused — no ref, no attachment entry
+    const circleId = state.composerCircle || state.activeCircle;
+    const ref = await invoke("add_media", { circleId, dataBase64: b64, isVideo });
+    const thumbRef = isVideo ? null : await mintThumb(b64, circleId);
+    await state.composerAdd(ref, isVideo, false, thumbRef);
+  };
+  if (HOST_WEB) {
+    // A browser hands the page File objects, never paths, and navigates AWAY to a dropped file
+    // unless every dragover/drop is cancelled — so they are cancelled for the whole window, even
+    // when no composer is open (losing the session to a stray drop would be worse than ignoring it).
+    const hasFiles = (e) => Array.from(e.dataTransfer?.types || []).includes("Files");
+    let depth = 0;
+    window.addEventListener("dragenter", (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      depth++;
+      if (typeof state.composerAdd === "function") document.body.classList.add("drop-target");
+    });
+    window.addEventListener("dragover", (e) => { if (hasFiles(e)) e.preventDefault(); });
+    window.addEventListener("dragleave", (e) => {
+      if (!hasFiles(e)) return;
+      depth = Math.max(0, depth - 1);
+      if (!depth) document.body.classList.remove("drop-target");
+    });
+    window.addEventListener("drop", async (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      depth = 0;
+      document.body.classList.remove("drop-target");
+      if (typeof state.composerAdd !== "function") return;
+      for (const file of Array.from(e.dataTransfer.files || [])) {
+        const isVideo = /^video\//.test(file.type) || MEDIA_RE.vid.test(file.name);
+        if (!isVideo && !/^image\//.test(file.type) && !MEDIA_RE.img.test(file.name)) continue;
+        const maxBytes = isVideo ? MEDIA_TARGETS.MAX_SOURCE_BYTES_VIDEO : MEDIA_TARGETS.MAX_SOURCE_BYTES_STILL;
+        if (file.size > maxBytes) {
+          toast(t("over_limit", isVideo ? t("video_word") : t("photo_word"), fmtMB(maxBytes)));
+          continue;
+        }
+        try {
+          await attachDroppedFile(file, isVideo);
+        } catch (err) {
+          console.error("drop ingest failed", file.name, err);
+          toast(t("couldnt_attach_file"));
+        }
+      }
+    });
+  }
   listen("tauri://drag-enter", () => document.body.classList.add("drop-target"));
   listen("tauri://drag-leave", () => document.body.classList.remove("drop-target"));
   listen("tauri://drag-drop", async (e) => {
@@ -8853,12 +8962,7 @@ async function boot() {
         const buf = new Uint8Array(bin.length);
         for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
         const file = new File([buf], got.name, { type: isVideo ? "video/*" : "image/*" });
-        const b64 = await sanitizeMediaFile(file, isVideo);
-        if (b64 === null) continue;                      // refused — no ref, no attachment entry
-        const circleId = state.composerCircle || state.activeCircle;
-        const ref = await invoke("add_media", { circleId, dataBase64: b64, isVideo });
-        const thumbRef = isVideo ? null : await mintThumb(b64, circleId);
-        await state.composerAdd(ref, isVideo, false, thumbRef);
+        await attachDroppedFile(file, isVideo);
       } catch (err) {
         console.error("drop ingest failed", p, err);
         // The Rust side enforces the same size cap before it reads, so name that reason explicitly

@@ -432,6 +432,63 @@ async fn enroll_ticket_lifecycle_for_a_new_seedless_device() {
 }
 
 #[tokio::test]
+async fn a_ticket_minted_for_a_scanned_code_enrolls_only_the_device_it_names() {
+    let (primary, _) = engine(28);
+    let shown = crate::roster::DeviceRoster::load(&tmp_paths()); // the device showing the code
+    let other = crate::roster::DeviceRoster::load(&tmp_paths()); // someone who read it off the screen
+    let now = now_ms() / 1000;
+    let code = haven_ffi::enroll::pair_code_issue(shown.device_bundle(), now, "https://relay.example.test".into()).unwrap();
+
+    let ticket = primary.mint_enroll_ticket_for(Some(code.clone())).unwrap();
+    let secret = haven_ffi::enroll::enroll_ticket_parse(ticket).unwrap().secret;
+
+    // The ticket's secret is NOT enough: a request for a different device is refused, however
+    // well-formed and however many times.
+    let theirs = haven_ffi::enroll::enroll_build_request(secret.clone(), other.device_bundle(), "Not me".into(), now).unwrap();
+    primary.handle_seedless_enroll_request(None, &theirs);
+    primary.handle_seedless_enroll_request(Some(&other.device_node_hex()), &theirs);
+    assert!(primary.enroll_pending().is_empty(), "a scan-bound ticket enrolls no other device");
+
+    // The device the code names is queued for the person's confirmation, as usual.
+    let mine = haven_ffi::enroll::enroll_build_request(secret, shown.device_bundle(), "Browser".into(), now).unwrap();
+    primary.handle_seedless_enroll_request(None, &mine);
+    let pending = primary.enroll_pending();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].0, shown.device_node_hex());
+    primary.approve_enroll(pending[0].0.clone()).expect("approval succeeds");
+    let (_, _, devices) = primary.device_roster_dto();
+    assert!(devices.iter().any(|d| d.node_hex == shown.device_node_hex()));
+    assert!(devices.iter().all(|d| d.node_hex != other.device_node_hex()));
+}
+
+#[tokio::test]
+async fn scanning_a_code_refuses_what_it_cannot_honour_before_minting_anything() {
+    let (primary, _) = engine(29);
+    let shown = crate::roster::DeviceRoster::load(&tmp_paths());
+    let now = now_ms() / 1000;
+    let issue = |at: u64, relay: &str| haven_ffi::enroll::pair_code_issue(shown.device_bundle(), at, relay.into()).unwrap();
+
+    for (code, why) in [
+        ("haven-enroll:AAAA".to_string(), "a ticket is not a device code"),
+        ("garbage".to_string(), "garbage"),
+        (issue(now - 601, "https://relay.example.test"), "expired"),
+        (issue(now, "ftp://relay.example.test"), "no usable relay"),
+        (issue(now, ""), "no relay at all"),
+    ] {
+        assert!(primary.link_scanned_device(code).await.is_err(), "{why}");
+    }
+    // A good code, but this engine was never started (no node): refused, and no ticket is left
+    // lying around for a code nobody could be sent an offer for.
+    let err = primary.link_scanned_device(issue(now, "https://relay.example.test")).await.unwrap_err();
+    assert!(err.to_string().contains("offline"), "{err}");
+    assert!(primary.enroll_tickets.lock().is_empty());
+
+    // A device with no account seed cannot answer a code at all.
+    let s = Engine::new_seedless(tmp_paths()).unwrap();
+    assert!(s.mint_enroll_ticket_for(Some(issue(now, "https://relay.example.test"))).is_err());
+}
+
+#[tokio::test]
 async fn a_seedless_engine_cannot_author_account_level_things() {
     let (e, _) = engine(27);
     // The primary's own enrolment helpers must keep refusing on seedless engines; we exercise the

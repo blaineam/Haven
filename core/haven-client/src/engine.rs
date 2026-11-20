@@ -382,6 +382,11 @@ struct PendingEnrollTicket {
     secret: [u8; 32],
     issued_at: u64,
     consumed: bool,
+    /// Scan-to-link: the `haven-pair:` code this ticket was minted for. A request under this ticket
+    /// is honoured only from the device that code names — reading the code off a screen must not
+    /// be enough to get a device of one's own onto the account. `None` for a ticket the primary
+    /// showed (whoever holds that ticket may ask, as before).
+    bound_to: Option<String>,
 }
 
 /// PRIMARY side: a frame-28 request that passed MAC + freshness, waiting on the user's confirm sheet.
@@ -701,7 +706,7 @@ fn short(s: &str) -> String {
     s.chars().take(10).collect()
 }
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -744,6 +749,29 @@ fn flag_body(seed: &[u8; 32], subject: &str, reason: &str, ts: u64) -> Option<se
 /// GUI boot resolver picks `Engine::new_seedless`, which brings up the handshake. Runs with no engine
 /// (parity with `onboard_link` for the legacy seed path).
 pub fn onboard_seedless(ticket_text: &str) -> std::result::Result<(), String> {
+    onboard_seedless_as(ticket_text, None)
+}
+
+/// How long a `haven-pair:` code is honoured (and a ticket minted for it lives) — the enrollment
+/// ticket's own ten minutes.
+pub const PAIR_CODE_TTL_SECS: u64 = 600;
+
+/// [`onboard_seedless`] for a device that ALREADY has its transport key — scan-to-link: the key
+/// was made before any account was known, because the code the device showed names it, and the
+/// ticket it was then sent is bound to exactly that key.
+pub fn onboard_seedless_as(ticket_text: &str, device_seed: Option<&[u8]>) -> std::result::Result<(), String> {
+    let base = Paths::resolve().map_err(|e| e.to_string())?;
+    onboard_seedless_in(&base, |dir| Paths::resolve_for(dir).map_err(|e| e.to_string()), ticket_text, device_seed)
+}
+
+/// The body of [`onboard_seedless_as`], with the data tree named by the caller (`base`, and
+/// `identity_paths` to resolve an identity's own directory) so it can run against a scratch tree.
+pub(crate) fn onboard_seedless_in(
+    base: &Paths,
+    identity_paths: impl Fn(&str) -> std::result::Result<Paths, String>,
+    ticket_text: &str,
+    device_seed: Option<&[u8]>,
+) -> std::result::Result<(), String> {
     let ticket = haven_ffi::enroll::enroll_ticket_parse(ticket_text.trim().to_string())
         .map_err(|e| format!("not a valid device-link code: {e}"))?;
     if ticket.account_id.len() != 32 || ticket.secret.len() != 32 || ticket.primary_device.len() != 32 {
@@ -755,14 +783,23 @@ pub fn onboard_seedless(ticket_text: &str) -> std::result::Result<(), String> {
         return Err("this link has expired — generate a fresh one on your other device".into());
     }
     let account_hex = bytes_to_hex(&ticket.account_id);
-    let base = Paths::resolve().map_err(|e| e.to_string())?;
-    let mut ids = store::Identities::load(&base);
+    let mut ids = store::Identities::load(base);
     ids.add(&account_hex, "Linked device (seedless)");
-    ids.save(&base).map_err(|e| e.to_string())?;
+    ids.save(base).map_err(|e| e.to_string())?;
     let entry_dir = ids.find(&account_hex).map(|e| e.dir.clone()).unwrap_or_default();
-    let paths = Paths::resolve_for(&entry_dir).map_err(|e| e.to_string())?;
-    // Mint (or load) this device's stable transport key in the identity's data dir.
-    let _ = crate::roster::DeviceRoster::load(&paths);
+    let paths = identity_paths(&entry_dir)?;
+    // Mint (or load) this device's stable transport key in the identity's data dir — or install
+    // the one this device already showed in its code.
+    let mut roster = crate::roster::DeviceRoster::load(&paths);
+    if let Some(seed) = device_seed {
+        if seed.len() != 32 {
+            return Err("device key is malformed".into());
+        }
+        if roster.device_seed != seed {
+            roster.device_seed = seed.to_vec();
+            roster.save(&paths).map_err(|e| e.to_string())?;
+        }
+    }
     // Persist the seedless LINKING state (0600). The grant acceptance is the only writer that flips
     // `linked` and installs the account bundle / self-sync key.
     let mut s = crate::roster::Seedless::load(&paths);
@@ -2491,6 +2528,12 @@ impl Engine {
     /// PRIMARY: mint a `haven-enroll:` ticket for a new seedless device. Requires the account seed +
     /// an enabled roster (this device must actually be the primary authority). Returns the QR/copy text.
     pub fn mint_enroll_ticket(self: &Arc<Self>) -> Result<String> {
+        self.mint_enroll_ticket_for(None)
+    }
+
+    /// [`mint_enroll_ticket`](Self::mint_enroll_ticket), optionally bound to the device a scanned
+    /// `haven-pair:` code names.
+    fn mint_enroll_ticket_for(self: &Arc<Self>, bound_to: Option<String>) -> Result<String> {
         let Some(_seed) = self.seed else {
             return Err(anyhow::anyhow!("this device holds no account seed — a seedless device can't authorize links"));
         };
@@ -2514,9 +2557,49 @@ impl Engine {
         {
             let mut t = self.enroll_tickets.lock();
             t.retain(|p| now.saturating_sub(p.issued_at) < 600 && !p.consumed); // prune stale/used
-            t.push(PendingEnrollTicket { secret, issued_at: now, consumed: false });
+            t.push(PendingEnrollTicket { secret, issued_at: now, consumed: false, bound_to });
         }
         haven_ffi::enroll::enroll_ticket_encode(ticket).map_err(|e| anyhow::anyhow!("encode ticket: {e}"))
+    }
+
+    /// PRIMARY: the person scanned (or pasted) the `haven-pair:` code a NEW device is showing. Mint a
+    /// ticket bound to that device and send it there, sealed under the code's secret, through the
+    /// relay the code names. The new device then asks to join in the ordinary way, and the request
+    /// still waits for the person's confirmation ([`approve_enroll`](Self::approve_enroll)).
+    pub async fn link_scanned_device(self: &Arc<Self>, code_text: String) -> Result<()> {
+        let code_text = code_text.trim().to_string();
+        let code = haven_ffi::enroll::pair_code_parse(code_text.clone())
+            .map_err(|_| anyhow::anyhow!("that is not a Haven device code"))?;
+        let now = now_ms() / 1000;
+        if haven_ffi::enroll::pair_code_is_expired(code_text.clone(), now, PAIR_CODE_TTL_SECS).unwrap_or(true) {
+            return Err(anyhow::anyhow!("that code has expired — show a fresh one on the other device"));
+        }
+        let relay = code.relay.trim().to_string();
+        if !(relay.starts_with("https://") || relay.starts_with("http://")) {
+            return Err(anyhow::anyhow!("that code names no relay this device can use"));
+        }
+        let device_hex = bytes_to_hex(&code.device_id);
+        if device_hex.eq_ignore_ascii_case(&self.social.my_device_node_hex()) {
+            return Err(anyhow::anyhow!("that code is this device's own"));
+        }
+        let Some(node) = self.node.lock().clone() else {
+            return Err(anyhow::anyhow!("this device is offline"));
+        };
+        let ticket = self.mint_enroll_ticket_for(Some(code_text.clone()))?;
+        let offer = haven_ffi::enroll::pair_offer_build(code_text, ticket, now)
+            .map_err(|e| anyhow::anyhow!("seal offer: {e}"))?;
+        let frame = wire::frame(wire::PAIR_OFFER, &offer);
+        // The other device is waiting on that relay right now; a dial can still lose a race with its
+        // relay registration, so try a few times before telling the person it did not work.
+        let mut last = String::new();
+        for attempt in 0..4u32 {
+            match node.send_to_node_via(device_hex.clone(), relay.clone(), frame.clone()).await {
+                Ok(()) => return Ok(()),
+                Err(e) => last = e.to_string(),
+            }
+            crate::rt::sleep(std::time::Duration::from_millis(700 * (attempt as u64 + 1))).await;
+        }
+        Err(anyhow::anyhow!("could not reach the other device — keep its page open and try again ({last})"))
     }
 
     /// Active relay node hexes (bootstrap relays carried in the ticket + grant, so the new device can
@@ -2543,15 +2626,22 @@ impl Engine {
             return; // only a seed-holding primary answers (a seedless device ignores 28)
         }
         let now = now_ms() / 1000;
-        let secrets: Vec<[u8; 32]> = {
+        let tickets: Vec<([u8; 32], Option<String>)> = {
             let mut t = self.enroll_tickets.lock();
             t.retain(|p| now.saturating_sub(p.issued_at) < 600 && !p.consumed);
-            t.iter().map(|p| p.secret).collect()
+            t.iter().map(|p| (p.secret, p.bound_to.clone())).collect()
         };
-        for secret in secrets {
+        for (secret, bound_to) in tickets {
             let Ok(req) = haven_ffi::enroll::enroll_verify_request(secret.to_vec(), wire.to_vec(), now, 600) else {
                 continue;
             };
+            // A ticket minted for a scanned code enrolls the device that code names and no other.
+            if let Some(code) = bound_to {
+                if !haven_ffi::enroll::pair_code_matches(code, req.device_bundle.clone()).unwrap_or(false) {
+                    log::warn!("enroll: a request under a scan-bound ticket came from a different device — refused");
+                    continue;
+                }
+            }
             // Derive the requester's transport hex from its bundle (fallback: the authenticated sender).
             let device_hex = wire::node_hex(&req.device_bundle);
             let device_hex = if device_hex.len() == 64 {
@@ -12311,8 +12401,20 @@ impl Engine {
             return;
         }
         let me = self.clone();
+        // A thread of its own natively: the write is a long blocking hold and must not sit on a
+        // runtime worker.
+        #[cfg(not(target_arch = "wasm32"))]
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_secs(3));
+            me.persist_pending.store(false, std::sync::atomic::Ordering::SeqCst);
+            me.persist();
+        });
+        // A browser has no threads to start (`std::thread::spawn` PANICS there, which killed the
+        // frame handler that called this and left the flag claimed, so nothing network-driven was
+        // ever written again). The page's own event loop runs the delayed write instead.
+        #[cfg(target_arch = "wasm32")]
+        crate::rt::spawn(async move {
+            crate::rt::sleep(std::time::Duration::from_secs(3)).await;
             me.persist_pending.store(false, std::sync::atomic::Ordering::SeqCst);
             me.persist();
         });

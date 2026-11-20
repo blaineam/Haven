@@ -50,10 +50,14 @@ Haven can run in a web browser. A circle's relay can serve the web client under 
 of their own devices with a secure link code from a device they already use; the browser never holds the account's master key and
 can be removed like any device. It is the desktop app's interface and engine (the engine compiled to WebAssembly), laid out for
 phones, tablets and desktops. Web access is **off by default** on every relay: `haven-relay --web-app <dir>`, or the Web access
-switch in the desktop app's Relays settings. Proven end to end in headless Chromium against a native device hosting the relay:
-linking, staying linked across a reload, posts and pictures in both directions. Still missing: shipping the bundle in the
-installers, the switch on the Mac and Android relay hosts, calls, encrypted storage at rest, a scan-to-link flow, and the formal
-model. Design, trust statement and progress: [`docs/WEB-PARITY.md`](docs/WEB-PARITY.md) and D21 in
+switch in the desktop app's and the Mac app's relay settings (phones do not host it: their relays have no public front door).
+Proven end to end in headless Chromium against a native device hosting the relay: linking, staying linked across a reload, posts
+and pictures in both directions, everything stored in the browser encrypted, a shared-computer session wiped on leaving. Phones
+and the Mac teach the account's other devices the relay address (frame 37) the same way the desktop does, so a browser can be
+linked from any of them. A browser can also be linked the other way round: it shows a code, and the desktop app scans or is
+given it (Devices ▸ Add a device ▸ Scan its code) — the ticket it answers with enrolls only the device that code names.
+Pictures and videos can be dropped onto the page. Still missing: shipping the bundle in any installer or store build, calls,
+the code scanner on the phones and the Mac, per-circle consent. Design, trust statement and progress: [`docs/WEB-PARITY.md`](docs/WEB-PARITY.md) and D21 in
 [`docs/DECISIONS.md`](docs/DECISIONS.md).
 
 ## 2.1.3 (security release, 2026-11-19)

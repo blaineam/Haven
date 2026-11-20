@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use haven_client::engine::{self, Engine};
 use haven_client::host::{AppHandle, Host};
+use haven_client::pairing::Pairing;
 use haven_client::roster::Seedless;
 use haven_client::store::{self, Paths};
 use wasm_bindgen::prelude::*;
@@ -57,6 +58,8 @@ fn active_paths() -> Result<Option<Paths>, JsError> {
 pub struct WebApp {
     host: AppHandle,
     engine: RefCell<Option<Arc<Engine>>>,
+    /// Scan-to-link: this browser is showing a `haven-pair:` code and waiting to be answered.
+    pairing: RefCell<Option<Arc<Pairing>>>,
 }
 
 #[wasm_bindgen]
@@ -66,7 +69,11 @@ impl WebApp {
     /// [`set_relays`](Self::set_relays) then [`boot`](Self::boot).
     #[wasm_bindgen(constructor)]
     pub fn new(on_event: js_sys::Function) -> WebApp {
-        WebApp { host: AppHandle::new(Arc::new(PageHost { on_event })), engine: RefCell::new(None) }
+        WebApp {
+            host: AppHandle::new(Arc::new(PageHost { on_event })),
+            engine: RefCell::new(None),
+            pairing: RefCell::new(None),
+        }
     }
 
     /// The relay front door(s) this page was served from (DERP base URLs). They stay in the
@@ -108,6 +115,46 @@ impl WebApp {
     #[wasm_bindgen(js_name = onboardLink)]
     pub fn onboard_link(&self, ticket_text: &str) -> Result<(), JsError> {
         engine::onboard_seedless(ticket_text).map_err(js_err)
+    }
+
+    /// Scan-to-link: make (or replace) the `haven-pair:` code this browser shows, for a device
+    /// that already has the account to scan. `relay` is the front door this page came from — the
+    /// only place this browser can be reached. The first call brings a node up under a fresh
+    /// device key; later calls only issue a fresh code. `haven:pair-offer` fires when a device
+    /// answers; then call [`pairFinish`](Self::pair_finish).
+    #[wasm_bindgen(js_name = pairBegin)]
+    pub async fn pair_begin(&self, relay: String) -> Result<String, JsError> {
+        if self.engine.borrow().is_some() {
+            return Err(JsError::new("this browser is already linked"));
+        }
+        let existing = self.pairing.borrow().clone();
+        if let Some(p) = existing {
+            return p.refresh().map_err(js_err);
+        }
+        let p = Pairing::begin(relay, self.host.clone()).await.map_err(js_err)?;
+        let code = p.code();
+        *self.pairing.borrow_mut() = Some(p);
+        Ok(code)
+    }
+
+    /// Store the linking state for the offer that answered this browser's code (under the key the
+    /// code named) and stop listening. Then flush storage and reload, as after
+    /// [`onboardLink`](Self::onboard_link).
+    #[wasm_bindgen(js_name = pairFinish)]
+    pub async fn pair_finish(&self) -> Result<(), JsError> {
+        let p = self.pairing.borrow().clone().ok_or_else(|| JsError::new("no code is showing"))?;
+        p.finish().await.map_err(js_err)?;
+        *self.pairing.borrow_mut() = None;
+        Ok(())
+    }
+
+    /// Stop showing a code (the link screen was left). Safe to call when none is showing.
+    #[wasm_bindgen(js_name = pairStop)]
+    pub async fn pair_stop(&self) {
+        let p = self.pairing.borrow_mut().take();
+        if let Some(p) = p {
+            p.stop().await;
+        }
     }
 
     /// Run an engine command by name — the browser's end of the UI's `invoke(name, args)`. The
@@ -186,6 +233,20 @@ impl log::Log for ConsoleLog {
         }
     }
     fn flush(&self) {}
+}
+
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_namespace = console, js_name = error)]
+    fn console_error(line: &str);
+}
+
+/// Runs when the module is instantiated. A Rust panic in a browser is otherwise a bare
+/// `RuntimeError: unreachable` with no message and no place; say what panicked and where, in the
+/// page's own console (it goes nowhere else).
+#[wasm_bindgen(start)]
+pub fn on_load() {
+    std::panic::set_hook(Box::new(|info| console_error(&format!("[haven panic] {info}"))));
 }
 
 /// Send the engine's log lines to the console at `level` (`"error"`, `"warn"`, `"info"`,

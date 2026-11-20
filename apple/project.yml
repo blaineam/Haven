@@ -256,6 +256,12 @@ targets:
           - $(SRCROOT)/Scripts/embed-cloudflared.sh
         outputFiles:
           - $(TARGET_BUILD_DIR)/$(FULL_PRODUCT_NAME)/Contents/Helpers/cloudflared
+      # Haven web client → Contents/Resources/web-client, when web-client/dist has been built
+      # (web-client/build.sh). Optional: without it the app has no "Web access" switch.
+      - path: Scripts/embed-web-client.sh
+        name: Embed web client
+        basedOnDependencyAnalysis: false
+        showEnvVars: false
       # LAST: drop the architectures the app is not built for from the embedded frameworks.
       # ARCHS[sdk=macosx*] = arm64 thins what Xcode links, but the upstream WebRTC binary is
       # copied out of its xcframework WHOLE (arm64 + x86_64, ~24 MB). Ported from Enter Space;

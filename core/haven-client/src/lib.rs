@@ -32,6 +32,7 @@ pub mod mediaholding;
 pub mod mediaresume;
 pub mod net;
 pub mod netgate;
+pub mod pairing;
 pub mod postgroups;
 pub mod preview;
 pub mod relayhealth;

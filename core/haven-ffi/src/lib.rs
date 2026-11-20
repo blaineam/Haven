@@ -1703,6 +1703,20 @@ impl HavenNode {
             .map_err(|e| HavenError::Invalid { msg: e.to_string() })
     }
 
+    /// Send bytes to a node listening on a named relay (`relay_url`), which need not be one this
+    /// node knows. For the scan-to-link offer: see [`crate::pair`].
+    pub async fn send_to_node_via(
+        &self,
+        node_id_hex: String,
+        relay_url: String,
+        payload: Vec<u8>,
+    ) -> Result<(), HavenError> {
+        self.node
+            .send_to_node_via(&node_id_hex, &relay_url, &payload)
+            .await
+            .map_err(|e| HavenError::Invalid { msg: e.to_string() })
+    }
+
     /// Send sealed bytes to a peer identified by their full-address ticket.
     pub async fn send(&self, ticket: String, payload: Vec<u8>) -> Result<(), HavenError> {
         self.node

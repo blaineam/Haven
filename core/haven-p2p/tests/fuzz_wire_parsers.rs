@@ -87,6 +87,7 @@ fn parse_watching_allocs(t: &Target, bytes: &[u8]) -> (std::result::Result<bool,
     (r, PEAK_ALLOC.load(Ordering::Relaxed))
 }
 
+use haven_p2p::pair::PairCode;
 use haven_p2p::device::{AdminGrant, CircleUpgrade, DeviceCredential, DeviceList, SeedDropCapability};
 use haven_p2p::groupkey::{seal_event_in_epoch, EpochEnvelope};
 use haven_p2p::identity::Identity;
@@ -504,6 +505,17 @@ fn targets() -> Vec<Target> {
             }
             .to_bytes()],
             false
+        ),
+        // A code shown on one device and typed or scanned into another: bytes straight from a
+        // camera or a clipboard. Terminal (trailing bytes are an error).
+        target!(
+            "pair::PairCode",
+            PairCode,
+            vec![
+                PairCode::issue(&device, 1_700_000_000, "https://relay.example.test").to_bytes(),
+                PairCode::issue(&device, 0, "").to_bytes(),
+            ],
+            true
         ),
         Target {
             name: "groupkey::EpochEnvelope",

@@ -1434,6 +1434,12 @@ pub fn enroll_mint_ticket(engine: Eng) -> R<String> {
     engine.mint_enroll_ticket().map_err(|e| e.to_string())
 }
 
+/// PRIMARY: the person scanned or pasted the `haven-pair:` code another device is showing — send
+/// that device a ticket. Its request then appears in [`enroll_pending`] like any other.
+pub async fn enroll_scan_code(engine: Eng<'_>, code: String) -> R<()> {
+    engine.link_scanned_device(code).await.map_err(|e| e.to_string())
+}
+
 /// PRIMARY: the seedless-enroll requests awaiting the user's confirm.
 pub fn enroll_pending(engine: Eng) -> Vec<EnrollRequestDto> {
     engine

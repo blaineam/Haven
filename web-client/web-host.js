@@ -76,6 +76,18 @@
     },
     // The grant landed: restart into the linked engine.
     finish_enroll: () => relaunch(),
+    // Scan-to-link: show a code for a device that already has the account to scan. Nothing is
+    // stored while it shows; the device key lives in memory until a device answers.
+    pair_begin: () => app.pairBegin(location.origin),
+    // A device answered (`haven:pair-offer`): NOW the person's "is this your computer?" answer
+    // picks the storage, the linking state is written, and the page restarts into the linking
+    // engine — the same end as pasting a ticket.
+    pair_finish: async ({ remember }) => {
+      if (!storage) storage = await storageModule.attachStorage(haven, { mode: remember ? "persist" : "session" });
+      await app.pairFinish();
+      await relaunch();
+    },
+    pair_stop: () => app.pairStop(),
     // A browser never holds an account seed, so it can neither create nor adopt an account.
     onboard_create: () => { throw NOT_IN_A_BROWSER; },
     onboard_link: () => { throw NOT_IN_A_BROWSER; },

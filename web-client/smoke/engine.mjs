@@ -114,6 +114,14 @@ await run(
     const ticket = await peer.line("TICKET=");
     const { browser, page } = await openPage(`${origin}/app/`, { ready: () => !!window.__HAVEN_WEB__, before: quiet });
     onExit(() => browser.close());
+    // An uncaught error in the page — above all a Rust panic in the engine, which surfaces as a
+    // bare "unreachable" — fails the run, whatever else passed. (A panic kills only the task it
+    // happened in, so everything after it can still look fine; that is how the engine's delayed
+    // save went unnoticed while it crashed on every received post.)
+    const crashes = [];
+    page.on("pageerror", (e) => crashes.push(e.message));
+    page.on("console", (m) => { if (m.type() === "error" && m.text().includes("[haven panic]")) crashes.push(m.text()); });
+    const noCrashes = (where) => { if (crashes.length) throw new Error(`the page crashed (${where}): ${crashes.join(" | ")}`); };
     await page.evaluate(() => window.__HAVEN_WEB__.ready);
     step(`the relay serves the web client at ${origin}/app/`);
 
@@ -181,6 +189,39 @@ await run(
     await shots(page, "2-you");
     step("both posts are rendered in the feed");
 
+    // A picture DROPPED onto the page lands in the composer (and the page stays where it is — a
+    // browser navigates to a dropped file unless the drop is cancelled).
+    const dropPicture = () => page.evaluate(async (b64) => {
+      const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+      const dt = new DataTransfer();
+      dt.items.add(new File([bytes], "dropped.png", { type: "image/png" }));
+      const fire = (type) => {
+        const e = new DragEvent(type, { dataTransfer: dt, bubbles: true, cancelable: true });
+        document.body.dispatchEvent(e);
+        return e.defaultPrevented;
+      };
+      return [fire("dragenter"), fire("dragover"), fire("drop")];
+    }, PNG);
+    const here = page.url();
+    // With no composer on screen (the You tab) the drop is cancelled and nothing else happens.
+    let cancelled = await dropPicture();
+    if (!cancelled.every(Boolean)) throw new Error(`a file drag was not cancelled (${cancelled}) — the browser would leave the page`);
+    // On the circle tab the composer is there, and the picture is attached to it.
+    await page.locator('.tab[data-view="circle"]').click();
+    await page.locator("textarea.composer-field").first().waitFor({ timeout: 30000 });
+    cancelled = await dropPicture();
+    if (!cancelled.every(Boolean)) throw new Error(`a file drag was not cancelled (${cancelled})`);
+    await until("the dropped picture in the composer", () => page.evaluate(() => !!document.querySelector(".attach-preview .chip img")), 30000);
+    if (page.url() !== here) throw new Error("the drop navigated the page away");
+    await page.locator(".attach-preview .chip .x").first().click();
+    await page.locator('.tab[data-view="you"]').click();
+    step("a picture dropped on the page is attached to the composer; a drop never navigates away");
+
+    // Give the engine's delayed save (3 s after a received post) time to run, then: no crash.
+    await page.waitForTimeout(4000);
+    noCrashes("after posts and pictures in both directions");
+    step("the engine ran its delayed save in the page without a crash");
+
     // ── At rest, and after the tab is left ───────────────────────────────────────────────────
     await page.evaluate(() => window.__HAVEN_WEB__.flush());
     if ((await page.evaluate(() => window.__HAVEN_WEB__.mode())) !== "session") throw new Error("expected a session-mode store");
@@ -197,10 +238,30 @@ await run(
       if (Object.keys(left).length !== 0) throw new Error(`session databases were left behind: ${Object.keys(left)}`);
       step("after leaving the page the browser holds no identity and no Haven database");
 
-      // "This is my computer": the link survives leaving and coming back, and is encrypted at rest.
-      peer.write("!ticket\n");
-      const ticket2 = await peer.line("TICKET2=");
-      await linkWith(page, ticket2, true);
+      // "This is my computer", linked the other way round: the BROWSER shows a code and the
+      // device that has the account answers it (scan-to-link). The link then survives leaving
+      // and coming back, and is encrypted at rest.
+      const pairCode = await until("the browser's own code on the link screen",
+        () => page.evaluate(() => document.querySelector("#pair-copy")?.dataset.code || null), 60000);
+      if (!pairCode.startsWith("haven-pair:")) throw new Error(`not a device code: ${pairCode.slice(0, 40)}`);
+      if (!(await page.evaluate(() => !!document.querySelector("#pair-qr svg")))) throw new Error("the code is not shown as a QR");
+      if (Object.keys(await rawStorage(page)).length !== 0) throw new Error("showing a code stored something before anyone answered it");
+      await shots(page, "0-code");
+      step("an unlinked browser shows its own code (QR + text) and stores nothing while it waits");
+
+      // A ticket that was NOT sent in answer to this code changes nothing (the browser takes one
+      // frame, and only if it opens under the code on screen); a malformed code is refused.
+      peer.write("!pair haven-pair:AAAA\n");
+      await peer.line("PAIRFAIL");   // (never "PAIRED": that line has not been printed yet)
+      if (peer.lines.includes("PAIRED")) throw new Error("a malformed code was accepted");
+
+      await page.locator('input[type="checkbox"]').first().check();
+      peer.write(`!pair ${pairCode}\n`);
+      await until("the primary to answer the code", async () => {
+        if (peer.lines.filter((l) => l.startsWith("PAIRFAIL")).length > 1) throw new Error(`the primary could not answer the code: ${peer.lines.filter((l) => l.startsWith("PAIRFAIL")).pop()}`);
+        return peer.lines.includes("PAIRED");
+      }, 60000);
+      step("the primary answered the code; the browser took the offer and asked to link");
       await until("the remembered browser to be linked", async () => {
         const s = await invoke(page, "seedless_status");
         return s && s.linked && (await invoke(page, "my_node_hex")) === account;

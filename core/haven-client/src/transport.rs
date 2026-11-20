@@ -147,6 +147,27 @@ pub mod web {
 
         /// Deliver one frame to a peer, reusing a live connection or dialing through a relay.
         pub async fn send_to_node(&self, node_id_hex: String, payload: Vec<u8>) -> Result<(), HavenError> {
+            self.send_inner(node_id_hex, None, payload).await
+        }
+
+        /// [`send_to_node`](Self::send_to_node) to a node listening on a NAMED relay (same contract
+        /// as the native node's method of this name).
+        pub async fn send_to_node_via(
+            &self,
+            node_id_hex: String,
+            relay_url: String,
+            payload: Vec<u8>,
+        ) -> Result<(), HavenError> {
+            let url = relay_url.trim().parse::<RelayUrl>().map_err(invalid)?;
+            self.send_inner(node_id_hex, Some(url), payload).await
+        }
+
+        async fn send_inner(
+            &self,
+            node_id_hex: String,
+            via: Option<RelayUrl>,
+            payload: Vec<u8>,
+        ) -> Result<(), HavenError> {
             let id = endpoint_id(&node_id_hex)?;
             // Same guard as the native node: dialing our own id sends path discovery into a loop.
             if id == self.endpoint.id() {
@@ -157,8 +178,8 @@ pub mod web {
                 Some(c) => c,
                 None => {
                     let mut addr = EndpointAddr::new(id);
-                    if let Some(home) = &self.home {
-                        addr = addr.with_relay_url(home.clone());
+                    if let Some(relay) = via.or(self.home.clone()) {
+                        addr = addr.with_relay_url(relay);
                     }
                     let conn = self.endpoint.connect(addr, ALPN).await.map_err(invalid)?;
                     lock(&self.conns).insert(id, conn.clone());

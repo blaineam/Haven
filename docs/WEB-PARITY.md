@@ -281,8 +281,10 @@ Next, in order:
             same bound-ticket check in its own enrollment handler. COMPILED on both; NOT yet run on
             a device or simulator against a real browser — the end-to-end proof so far is the
             desktop engine and the browser.
-      - [ ] The desktop app as the NEW device still links by pasted ticket only; it does not show
-            a code of its own.
+      - Decided against: the desktop app showing a code of its own when it is the new device. A
+        device that links by showing a code is always enrolled as a WEB device — that is what
+        stops a replaced page from passing itself off as an app. Letting a code say "I am an
+        app" would give that page the same line to say. A desktop links by ticket.
       - [x] Formal model: `docs/formal/haven_pair.spthy`, in `verify.sh` / `EXPECTED.txt`. With
             the network and relays hostile, adversary-owned devices around, and the code READ by
             the adversary: P1 only the scanned device is enrolled; P2 the ticket is learned only by
@@ -305,9 +307,20 @@ Next, in order:
       - a circle's key that reached a browser just before the circle's yes was dropped for good —
         now held unopened and replayed (`a_key_that_reaches_a_browser_before_the_circles_yes_is_held_not_lost`).
 - [ ] Against a shipping native app (a phone as the primary).
-- [ ] Calls (WebRTC + the relay hairpin), Web Push.
-- [ ] Account → device discovery in a browser (resolve/publish are stubs; rosters and inbound
-      frames supply device ids for now).
+- [ ] Calls. Nothing in the call path is desktop-only: every signalling command is in the shared
+      engine, the media is the browser's own WebRTC, the page's policy allows the relay's
+      WebSocket hairpin, and a page served over the relay's HTTPS address may ask for the camera
+      and microphone. It has NOT been run: a call needs two accounts that are contacts on one
+      relay, each with a browser, and the smoke's harness has one account.
+- Decided: a browser does not publish itself to, or look people up in, public discovery (the
+  native apps do, to find a contact's devices with no relay in common). A browser reaches the
+  network through its circle's relay and nothing else — that is the point of it — so it learns
+  device ids from signed rosters and from whoever writes to it, and it reaches a device only
+  through a relay that device is also on. Someone who holds only your account id reaches your
+  other devices, not your browser.
+- Not built, and not mine to decide: notifications while the tab is closed (Web Push). That
+  needs the maker-run push worker to accept browser subscriptions and speak Web Push. While a
+  tab is open it is notified through the page.
 - [x] **Formal model** — `docs/formal/haven_web_device.spthy`, re-proved by `docs/formal/verify.sh`
       (and so by the `security-proofs` workflow) against `EXPECTED.txt`. With the network, the
       relay and any number of linked devices in the adversary's hands:

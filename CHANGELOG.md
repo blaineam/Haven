@@ -9,6 +9,9 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Fixed
+- **Relay: a good update could be marked bad for ever.** Before installing a signed update, the relay runs the new binary once to check it starts. A file that was only just written can be refused by the system for a moment as "busy", and the relay read that as "does not run on this machine" and never tried that version again. It now waits out a busy file within the same time limit. Found as an intermittent CI failure of the in-place update test; regression test added.
+
 ## 2.2.0 (2026-11-20)
 
 **Haven in a web browser.** A member can link a web browser as one more device of their own account. The page is served by a

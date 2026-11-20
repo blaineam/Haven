@@ -9,6 +9,13 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Added - The web client is tested with the iPhone app, in video and group calls, and with a Mac as its host (not shipped; `feat/web-client`)
+Calls between browsers and the Android and iPhone apps now cover video and a three-way group call, in both call directions, and
+pass; this was the first run of the iPhone's and Android's per-device call sealing. The Mac app was run as a web host for the
+first time (as the isolated QA build) and passes the linking test; its "Web access" switch turns the page on and off at once.
+Two Android call bugs found this way are fixed on `main` (above). One thing is open and recorded in `docs/WEB-PARITY.md`: an
+iPhone that takes the invite of someone who has no relay of their own was not seen to finish connecting within several minutes.
+
 ### Fixed - After a video call, the next call could start with your camera already on (Android)
 The Android app never reset the camera switch when a call ended. If you had your camera on when a call finished, your next call
 started capturing and sending video from its first second — including a call you only answered — without you turning it on. Every

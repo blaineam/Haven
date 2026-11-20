@@ -682,6 +682,23 @@ Android), and `web_access` without `allow`, which only re-reads the circle's sta
 member's answer changes it after the switch was flipped). It reads the dump's `call.participants`,
 `call.remote_video_tracks` and `call.peers` (new on Android, Apple's names).
 
+**The Mac app as the web host.** Never launch a Mac build from a worktree under the real bundle
+id — it would open the real account. Use the fleet's isolated build, from this branch:
+
+1. `web-client/build.sh`, then `MATRIX_DD=<dir> Scripts/qa-e2e-build-stub.sh` (the build embeds
+   `web-client/dist`). Check nothing else is using the stub, ports 8674/8675/3340 are free, and no
+   `cloudflared` is running: starting a Mac host sweeps tunnel helpers.
+2. Launch `<dir>/Build/Products/Debug/HavenStub.app/Contents/MacOS/Haven` with
+   `HOME=<scratch> TMPDIR=<scratch> HAVEN_SKIP_ONBOARDING=1 HAVEN_QA_STUB_RESET=1` and the arguments
+   `-ApplePersistenceIgnoreState YES -haven.relay.host.enabled YES -haven.relay.frontDoor manual
+   -haven.relay.publicURL http://127.0.0.1:8675` (manual front door: no tunnel is started). Do not
+   pass `-haven.relay.host.webAccess YES`: a launch argument overrides the stored setting, so the
+   switch could then not be turned off.
+3. `{"op":"host_web_access","on":true}` in `~/Library/Application Support/HavenQA/stub/`; the dump's
+   `host_web` reads `{available, enabled, serving, hosting}`.
+4. `PHONE_QA_DIR="$HOME/Library/Application Support/HavenQA/stub" ORIGIN=http://127.0.0.1:8675
+   node web-client/smoke/phone.mjs`. Stop the app by its pid afterwards.
+
 Three driver ops exist for the linking test, on Apple and Android: `pair_answer` (`code`: answer the
 `haven-pair:` code a browser shows → dump `pair_answer`, then `enroll_pending`), `enroll_confirm`
 (the confirmation's "Link this device"), and `web_access` (`circle_id`, `allow`: the circle's

@@ -343,8 +343,18 @@ Next, in order:
         over adb (`PHONE_ADB_PKG=…`; the test's channel code is `web-client/smoke/qachannel.mjs`).
         Its Kotlin code answered the code, marked the browser, held it out of the circle and let
         it in, first time. The relay's ports are forwarded into the emulator with `adb reverse`.
-      - [ ] Not run: the Mac app as a host (it cannot be launched from a worktree without touching
-            the owner's real data), and a physical device.
+      - **The Mac app as the web host passes it** (2 of 2). Run as the QA fleet's isolated Mac
+        build (`Scripts/qa-e2e-build-stub.sh`: its own bundle id, container and keychain group, so
+        it cannot reach a real account), built from this branch with the web client embedded,
+        hosting its relay in-process with the front door in manual mode (no tunnel helper is
+        started). The browser loads `/app/` from the Mac's own front door, shows its code, and
+        the Mac app — primary and relay host at once — answers it, marks the browser, holds it
+        out of the circle and lets it in. The switch itself, through the app's own code
+        (`host_web_access`): off by default (`/app/` is 404), on serves it at once, off again
+        stops it at once, and the rest of the front door stays up throughout.
+      - [ ] Not run: a physical device, and the Mac host behind its Cloudflare tunnel (the
+            desktop engine's tunnel path is tested; the Mac app starts its tunnel through
+            different code).
 - [x] **Calls** (`web-client/smoke/call.mjs`): accounts that are contacts on one relay, each
       with a browser linked to it; one browser calls, the other rings and answers with its real
       Accept button, the peer connection comes up in both, audio flows both ways, and hanging up

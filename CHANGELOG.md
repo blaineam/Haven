@@ -9,6 +9,14 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Fixed - After a video call, the next call could start with your camera already on (Android)
+The Android app never reset the camera switch when a call ended. If you had your camera on when a call finished, your next call
+started capturing and sending video from its first second — including a call you only answered — without you turning it on. Every
+call now starts with the camera off, as it always has on iPhone, iPad, Mac and desktop. **Privacy impact:** video you had not
+chosen to share could be sent to the people in your next call; only people you were in a call with could see it. Found by running
+a browser-to-Android call test twice in a row. Regression test:
+`a_call_that_ended_with_the_camera_on_leaves_the_next_call_starting_with_it_off`.
+
 ### Fixed - A call could hang itself up six seconds after a brief connection blip (Android)
 When a call's connection went quiet, the Android app scheduled a check for six seconds later and, if the other person was still
 listed in the call, dropped them — without looking at whether the connection had come back. So a blip that healed on its own could

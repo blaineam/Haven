@@ -371,18 +371,30 @@ Next, in order:
         connected to the other two with media arriving; one person leaving leaves the other two
         talking. Everyone in a group call has to be a contact of everyone else (a stranger's call
         frames are dropped), so the test makes all three pairs contacts first.
-- [x] **A call between a browser and a real app** (`web-client/smoke/phone-call.mjs`): the Android
-      app in the emulator is one account; a second account becomes its contact by invite link and
-      links a browser through the app's relay. The browser calls the app and the app answers; the
-      app calls back and the browser answers; audio flows both ways each time and hanging up on
-      either side ends it on the other. Passes repeatedly. This is the first run of the Android
-      per-device call sealing: the app's invite rang in a browser that holds no account key. It
-      found one bug, in the shipped Android app:
+- [x] **Calls between browsers and a real app** (`web-client/smoke/phone-call.mjs`): the Android
+      app in the emulator is one account; two more accounts become its contacts (and each
+      other's) by invite link and each links a browser through the app's relay. Passes
+      repeatedly, back to back:
+      - a browser calls the app and the app answers — audio both ways;
+      - **video**: the browser's camera, turned on mid-call, shows up in the app, and the app's
+        camera shows up in the browser (judged by the picture);
+      - **a group call**: the second browser is added mid-call with the real control, rings,
+        answers, and the app and both browsers are all connected to each other; one leaving
+        leaves the other two in the call;
+      - hanging up on either side ends it on the other; the app calls back and the browser
+        answers.
+      This is the first run of the Android per-device call sealing: the app's invite rang in a
+      browser that holds no account key. It found two bugs in the shipped Android app, both
+      fixed on `main`:
       - **A call could hang itself up six seconds after a connection blip.** The check Android
         schedules when a link goes quiet never looked at whether the link had recovered, and a
-        check left over from an ended call hung up the next call with the same person. Fixed on
-        `main` (`DisconnectGraceTest`); iPhone and Mac already had the guard.
-      - The emulator the QA fleet keeps is in airplane mode; the two accounts find each other by
+        check left over from an ended call hung up the next call with the same person
+        (`DisconnectGraceTest`); iPhone and Mac already had the guard.
+      - **After a video call, the next call started with the camera already on.** The camera
+        switch was never reset when a call ended, so the next call — one merely answered included
+        — sent video from its first second
+        (`a_call_that_ended_with_the_camera_on_leaves_the_next_call_starting_with_it_off`).
+      - The emulator the QA fleet keeps is in airplane mode; the accounts find each other by
         public discovery, so the test needs it off (docs/QA.md).
       - [ ] **Not passing against the iPhone app, and not understood.** The same test in a
             simulator gets as far as "the two accounts are contacts" and stops: the app never
@@ -394,7 +406,7 @@ Next, in order:
             no relay and was added seconds earlier) or a real delay for a friend you add by taking
             THEIR invite is not established. Contacts left over from earlier runs also hold the
             default circle shut (every member must agree), so each attempt needs a fresh simulator.
-      - [ ] Not tested: video or a group call between a browser and an app, and a physical device.
+      - [ ] Not tested: screen sharing between a browser and an app, and a physical device.
 - Decided: a browser does not publish itself to, or look people up in, public discovery (the
   native apps do, to find a contact's devices with no relay in common). A browser reaches the
   network through its circle's relay and nothing else — that is the point of it — so it learns

@@ -669,9 +669,14 @@ browser through the app's relay, and the two call each other, each way. The two 
 each other by public discovery, and the fleet's emulator is kept in airplane mode:
 `adb shell cmd connectivity airplane-mode disable` first (harmless under `-read-only`).
 
+It goes on to video each way and a three-way group call with a second browser
+(`PHONE_CALL_ONLY=1` keeps it to the two-party call).
+
 Driver ops it uses, on Apple and Android: `connect_link` (`uri`: take a `haven://` invite — new
-on Android), `call` / `call_accept` / `call_end`, and `web_access` without `allow`, which only
-re-reads the circle's standing (another member's answer changes it after the switch was flipped).
+on Android), `call` / `call_accept` / `call_end`, `call_video` (`on`: the camera button; new on
+Android), and `web_access` without `allow`, which only re-reads the circle's standing (another
+member's answer changes it after the switch was flipped). It reads the dump's `call.participants`,
+`call.remote_video_tracks` and `call.peers` (new on Android, Apple's names).
 
 Three driver ops exist for the linking test, on Apple and Android: `pair_answer` (`code`: answer the
 `haven-pair:` code a browser shows → dump `pair_answer`, then `enroll_pending`), `enroll_confirm`

@@ -1533,6 +1533,7 @@ object HavenNet : InboundListener {
      *  the reply-path bootstrap (an invitee holds no invite hints for the initiator). */
     fun onInbound(payload: ByteArray, viaNearby: Boolean, senderDevice: String? = null) {
         if (payload.isEmpty()) return
+        senderDevice?.let { teachRelayInterfacesOnContact(it) }
         val type = payload[0].toInt() and 0xFF
         val body = payload.copyOfRange(1, payload.size)
         // Call frames lead with a 64-char sender hex — drop blocked senders early (parity with iOS).
@@ -4973,6 +4974,26 @@ object HavenNet : InboundListener {
      * ([only]). iOS/desktop parity: `FeedStore.teachMyDevicesRelayInterfaces`,
      * `Engine::teach_my_devices_relay_interfaces`.
      */
+    /** When each of my devices was last told how to reach our relays. */
+    private val relayTaughtAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    /**
+     * One of MY OWN devices just reached this one: make sure it knows how to reach our relays. The
+     * details are otherwise sent once, when a device is linked — exactly when a browser reloads its
+     * page — and a browser that missed that frame had a relay it could not use. At most once a minute
+     * per device; every other frame costs one map lookup. iOS `teachRelayInterfacesOnContact` parity.
+     */
+    private fun teachRelayInterfacesOnContact(senderDevice: String) {
+        val dev = senderDevice.lowercase()
+        val now = System.currentTimeMillis()
+        val last = relayTaughtAt[dev]
+        if (last != null && now - last < 60_000) return
+        if (core.seedless) return
+        if (!runCatching { myOtherDeviceHexes() }.getOrDefault(emptyList()).any { it.equals(dev, ignoreCase = true) }) return
+        relayTaughtAt[dev] = now
+        runCatching { teachMyDevicesRelayInterfaces(only = dev) }
+    }
+
     private fun teachMyDevicesRelayInterfaces(only: String? = null) {
         if (core.seedless) return   // a seedless device holds no account key to sign it with
         val targets = only?.let { listOf(it.lowercase()) } ?: runCatching { myOtherDeviceHexes() }.getOrDefault(emptyList())

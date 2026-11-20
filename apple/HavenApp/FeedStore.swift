@@ -3490,6 +3490,10 @@ final class FeedStore: ObservableObject {
     static var qaReactLatency: [String: Double] = [:]
     /// The relay link minted by the `relay_link` qa op (exposed via the dump as `relay_link`).
     static var qaRelayLink: String = ""
+    /// The last `pair_answer` op's outcome (`sent`, `notACode`, `expired`, `notPrimary`, `unreachable`).
+    static var qaPairAnswer: String = ""
+    /// The last `web_access` op's reading of the circle (`web_access` in the dump).
+    static var qaWebAccess: [String: Any] = [:]
     /// The last `relay_probe` op's answer (`relay_probe` in the dump; `[:]` until one ran).
     static var qaRelayProbe: [String: Any] = [:]
     /// Successful dump writes, and when the last one landed. See `dump_seq` in the payload.
@@ -3862,6 +3866,33 @@ final class FeedStore: ObservableObject {
             // am in, with its members. The multirelay e2e starts A's own CLI relay from it.
             Self.qaRelayLink = relayLinkForAllCircles() ?? ""
             qaWriteDump()
+            return
+        case "pair_answer":
+            // QA: Link a device → "Scan its code" / paste. Answers the `haven-pair:` code another
+            // device (a browser) is showing — the same call the screen makes; the outcome is
+            // `pair_answer` in the dump, and the request it leads to is `enroll_pending`.
+            let code = str("code")
+            Task { @MainActor in
+                Self.qaPairAnswer = "\(await self.answerPairCode(code))"
+                self.qaWriteDump()
+            }
+            return
+        case "enroll_confirm":
+            // QA: "Link this device" on the confirmation a link request raises.
+            if let req = pendingEnrollRequest { confirmSeedlessEnroll(req) }
+            qaWriteDump()
+            return
+        case "web_access":
+            // QA: the "Allow this circle in web browsers" switch (circle settings / a conversation).
+            let cid = str("circle_id").isEmpty ? "default" : str("circle_id")
+            let allow = (obj["allow"] as? Bool) ?? true
+            Task { @MainActor in
+                await self.setCircleWebAccess(allow, in: cid)
+                let st = await self.circleWebAccess(cid)
+                Self.qaWebAccess = ["circle_id": cid, "allowed": st?.allowed ?? false, "mine": st?.mine ?? false,
+                                    "can_sign": st?.canSign ?? false, "waiting_on": st?.waitingOn.count ?? 0]
+                self.qaWriteDump()
+            }
             return
         case "add_relay":
             // QA: Storage → "Connect a relay" → paste. Same call the sheet makes: a bare node id or
@@ -4419,6 +4450,9 @@ final class FeedStore: ObservableObject {
             // circles served here, and the HTTP outcome counters.
             "relay_stats": SharedStore.qaRelayStats(),
             "relay_link": Self.qaRelayLink,
+            "pair_answer": Self.qaPairAnswer,
+            "enroll_pending": pendingEnrollRequest?.name ?? "",
+            "web_access": Self.qaWebAccess,
             "hosted_relay": ["node": RelayHost.shared.nodeId, "serving": RelayHost.shared.serving,
                              "enabled": RelayHost.shared.enabled, "httpPort": Int(RelayHost.shared.mediaHttpPort ?? 0),
                              "front_door_settled": RelayHost.shared.frontDoorSettled,
@@ -6051,6 +6085,25 @@ final class FeedStore: ObservableObject {
     /// it. Cheap — one small sealed frame per sibling — so it rides the re-announce tick, and goes
     /// to a device the moment it is linked (`to:`). Desktop/Android parity:
     /// `Engine::teach_my_devices_relay_interfaces`, `HavenNet.teachMyDevicesRelayInterfaces`.
+    /// One of MY OWN devices just reached this one: make sure it knows how to reach our relays.
+    ///
+    /// The details are sent when a device is linked — which is exactly when a browser reloads its
+    /// page — and otherwise only on the relay re-announce, which a phone that hosts nothing seldom
+    /// runs. A browser that missed that one frame had a relay it could not use and could only be
+    /// reached live (found by linking a browser to a real phone). A device making contact is the
+    /// moment it can certainly be answered, so answer it: at most once a minute per device, and
+    /// the cost on every other frame is one dictionary lookup.
+    private func teachRelayInterfacesOnContact(_ senderDevice: String) {
+        let dev = senderDevice.lowercased()
+        let now = Date()
+        if let last = relayTaughtAt[dev], now.timeIntervalSince(last) < 60 { return }
+        guard myOtherDeviceHexes().contains(dev) else { return }
+        relayTaughtAt[dev] = now
+        teachMyDevicesRelayInterfaces(to: dev)
+    }
+    /// When each of my devices was last told how to reach our relays (`teachRelayInterfacesOnContact`).
+    private var relayTaughtAt: [String: Date] = [:]
+
     func teachMyDevicesRelayInterfaces(to only: String? = nil) {
         guard engine != nil, AccountStore.storedSeed() != nil else { return }   // seedless devices cannot sign it
         let targets = only.map { [$0.lowercased()] } ?? myOtherDeviceHexes()
@@ -7284,6 +7337,7 @@ final class FeedStore: ObservableObject {
     /// the reply-path bootstrap (an invitee holds no invite hints for the initiator).
     private func handleInbound(_ data: Data, viaNearby: Bool, senderDevice: String? = nil) {
         guard let type = data.first else { return }
+        if let senderDevice { teachRelayInterfacesOnContact(senderDevice) }
         // Publish ONLY on the actual false→true transition. `@Published` fires objectWillChange even
         // when the value is unchanged, and this runs on EVERY inbound frame (every hello, every media
         // chunk). Setting `= true` unconditionally re-rendered the ENTIRE UI observing FeedStore per

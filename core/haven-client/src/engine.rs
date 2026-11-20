@@ -234,6 +234,8 @@ struct DynState {
     /// throttle). iOS `FeedStore.lastLimitSweepAt` / `limitSweepInFlight`.
     last_limit_sweep_ms: u64,
     limit_sweep_in_flight: bool,
+    /// When each of my own devices was last told how to reach our relays (on contact).
+    relay_taught_ms: HashMap<String, u64>,
     /// Browser only: when the in-memory media budget was last enforced.
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     last_web_budget_sweep_ms: u64,
@@ -5480,6 +5482,9 @@ impl Engine {
         if payload.is_empty() {
             return;
         }
+        if let Some(dev) = sender_device.as_deref() {
+            self.teach_relay_interfaces_on_contact(dev);
+        }
         let t = payload[0];
         let body = payload[1..].to_vec();
         // Call/media frames lead with a 64-char sender hex — drop blocked senders early.
@@ -7181,6 +7186,30 @@ impl Engine {
     /// Only a seed-holding device sends it — a seedless device has no account key to sign with, and
     /// receivers accept nothing less. Cheap (one small sealed frame per sibling), so it rides the
     /// sync tick: a sibling that was offline when it linked still learns its relays.
+    /// One of MY OWN devices just reached this one: make sure it knows how to reach our relays.
+    /// The details are otherwise sent when a device is linked — exactly when a browser reloads its
+    /// page — and on the re-greet tick; a browser that missed them had a relay it could not use and
+    /// could only be reached live. At most once a minute per device (one map lookup otherwise).
+    /// iOS/Android parity: `teachRelayInterfacesOnContact`.
+    fn teach_relay_interfaces_on_contact(self: &Arc<Self>, sender_device: &str) {
+        if self.seed.is_none() {
+            return;
+        }
+        let dev = sender_device.to_lowercase();
+        let now = now_ms();
+        {
+            let st = self.dyn_state.lock();
+            if st.relay_taught_ms.get(&dev).is_some_and(|last| now.saturating_sub(*last) < 60_000) {
+                return;
+            }
+        }
+        if !self.my_other_device_hexes().iter().any(|d| d.eq_ignore_ascii_case(&dev)) {
+            return;
+        }
+        self.dyn_state.lock().relay_taught_ms.insert(dev, now);
+        self.teach_my_devices_relay_interfaces();
+    }
+
     fn teach_my_devices_relay_interfaces(self: &Arc<Self>) {
         if self.seed.is_none() {
             return;

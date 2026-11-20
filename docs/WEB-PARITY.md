@@ -205,7 +205,9 @@ Next, in order:
         in. It found that a Removed browser never asked to come back on that tree (a device does
         not re-offer a key package once it has been Removed); a web device now does when its
         circle allows web devices again.
-      - [ ] Not exercised: the phones' and Mac's screens have been compiled, not run.
+      - The iPhone app's side of this has been run end to end (`web-client/smoke/phone.mjs`);
+        its screens were driven through the QA channel, not tapped. Android and the Mac app:
+        compiled, not run.
 - [x] **The UI.** The browser runs the desktop frontend (`desktop/ui`) unchanged, with a host shim
       in place of Tauri (`web-client/web-host.js`).
       - 141 of the desktop app's 164 commands need only the engine and moved to
@@ -306,7 +308,18 @@ Next, in order:
         the address was known) — fixed on `main`, it affected shipped desktop and `haven-relay`;
       - a circle's key that reached a browser just before the circle's yes was dropped for good —
         now held unopened and replayed (`a_key_that_reaches_a_browser_before_the_circles_yes_is_held_not_lost`).
-- [ ] Against a shipping native app (a phone as the primary).
+- [x] **Against a real app as the primary** (`web-client/smoke/phone.mjs`, docs/QA.md): the
+      iPhone app in a simulator, a standalone `haven-relay --web-app` it adopted, and a browser
+      linked to it by the browser's own code. The app's Swift code answers the code, raises the
+      confirmation with the device marked as a browser, keeps the browser out of the circle until
+      its switch is turned on, and then posts flow each way. Passes repeatedly (~30 s). It found:
+      - the app told a new browser how to reach the relay's mailbox ONCE, at the moment of
+        linking — which is when the page reloads. A browser that missed it could only be reached
+        live. Every platform now re-sends it (at most once a minute) whenever one of the
+        account's own devices makes contact;
+      - nothing else: scan answer, bound ticket, web mark, consent and re-keying worked first time.
+      - [ ] Not run: the Android app (compiled, and it has the same driver ops), the Mac app as a
+            host, and a physical device.
 - [ ] Calls. Nothing in the call path is desktop-only: every signalling command is in the shared
       engine, the media is the browser's own WebRTC, the page's policy allows the relay's
       WebSocket hairpin, and a page served over the relay's HTTPS address may ask for the camera

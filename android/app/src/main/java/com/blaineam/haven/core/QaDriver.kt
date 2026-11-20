@@ -189,6 +189,10 @@ object QaDriver {
 
     /** The last `relay_link` op's link (dump `relay_link`). */
     @Volatile private var qaRelayLink: String = ""
+    /** The last `pair_answer` op's outcome (`sent`, `not_a_code`, `expired`, `not_primary`, `unreachable`). */
+    @Volatile private var qaPairAnswer: String = ""
+    /** The last `web_access` op's reading of the circle. */
+    @Volatile private var qaWebAccess: JSONObject = JSONObject()
 
     private fun apply(cmd: JSONObject) {
         val op = cmd.optString("op").trim().lowercase()
@@ -355,6 +359,24 @@ object QaDriver {
                 val raw = cmd.optJSONObject("relay")?.toString() ?: cmd.optString("relay")
                 if (raw.isNotBlank()) HavenNet.adoptRelay(raw, setDefault = cmd.optBoolean("default", false))
                 else Log.w(TAG, "add_relay: no relay")
+            }
+            // QA: Settings → Devices → "Link a browser or device that shows a code". Answers the
+            // `haven-pair:` code another device (a browser) is showing — the same call the screen
+            // makes; the outcome is the dump's `pair_answer`, the request it leads to `enroll_pending`.
+            "pair_answer" -> {
+                val code = cmd.optString("code")
+                qaPairAnswer = kotlinx.coroutines.runBlocking { HavenNet.answerPairCode(code) }.name.lowercase()
+            }
+            // QA: "Link this device" on the confirmation a link request raises.
+            "enroll_confirm" -> HavenNet.confirmSeedlessEnroll()
+            // QA: the "Allow this circle in web browsers" switch.
+            "web_access" -> {
+                val cid = explicit ?: com.blaineam.haven.core.DEFAULT_CIRCLE
+                HavenNet.setCircleWebAccess(cid, cmd.optBoolean("allow", true))
+                val st = HavenNet.circleWebAccess(cid)
+                qaWebAccess = JSONObject().put("circle_id", cid).put("allowed", st?.allowed ?: false)
+                    .put("mine", st?.mine ?: false).put("can_sign", st?.canSign ?: false)
+                    .put("waiting_on", st?.waitingOn?.size ?: 0)
             }
             "dump" -> {}   // every branch refreshes the dump on the way out
             // Zero the dump's `perf` counters so an e2e step measures only what follows.
@@ -531,6 +553,9 @@ object QaDriver {
         // Per-relay view (e2e `multirelay`): URLs, token fingerprint, health, circles, HTTP outcomes.
         o.put("relay_stats", runCatching { HavenNet.qaRelayStats() }.getOrDefault(JSONArray()))
         o.put("relay_link", qaRelayLink)
+        o.put("pair_answer", qaPairAnswer)
+        o.put("enroll_pending", HavenNet.seedlessPendingRequest.value?.name ?: "")
+        o.put("web_access", qaWebAccess)
         // Screen share (e2e `screenshare`): lifecycle, consent, FGS ordering, capture, sender, encoder.
         val fgsAt = QaStats.shareFgsReadyAtMs; val capAt = QaStats.shareCaptureStartAtMs
         o.put("screen_share", JSONObject()

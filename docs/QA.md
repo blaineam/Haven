@@ -459,7 +459,8 @@ leftovers of the old channel.
 ```json
 {"op":"post|story|dm|react|comment|profile|circle_create|circle_invite|file|music_post|dump|mark_read|link_constraint
       |call|call_accept|call_end|call_speaker|call_route_legacy|perf_reset|heavy_work_override|media_ask
-      |relay_backoff_reset|screen_share|screen_perturb|relay_link|add_relay|forget_relay|host_relay|remove_member|relay_probe",
+      |relay_backoff_reset|screen_share|screen_perturb|relay_link|add_relay|forget_relay|host_relay|remove_member|relay_probe
+      |pair_answer|enroll_confirm|web_access",
  "body":"…","media":"photo|video","photo_path":"…","video_path":"…","file_path":"…",
  "target_id":"<event id>","emoji":"❤️","dm_to":"<64hex>","name":"…","circle_id":"…",
  "music":{"title":"…","artist":"…"},"caption":"…","level":"normal|low|ultra|auto","on":true}
@@ -629,6 +630,29 @@ Android and the Apple apps link a release core, and an unoptimized core made one
 `receive()` hold the engine lock 17–49 s — which is where the desktop's "materially longer
 convergence cycle" (the 6× budget multiplier) came from. Keep those overrides when adding a
 crypto dependency to the core.
+
+### The browser against a real app (`web-client/smoke/phone.mjs`)
+
+The web client's own smoke (`web-client/smoke/engine.mjs`, run by the `web-client` workflow)
+uses the desktop engine as the primary. This one uses a REAL app — its Swift or Kotlin code — and
+is run by hand, because it needs a simulator or emulator:
+
+1. Build the app DEBUG **with signing** (`CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO` for a
+   simulator). An unsigned build (`CODE_SIGNING_ALLOWED=NO`) cannot use the keychain, so it has no
+   stored seed and every "primary only" action answers `notPrimary`.
+2. In a fresh simulator: install, launch, get through onboarding once.
+3. `{"op":"relay_link"}` → start `haven-relay run --link <relay_link> --data <dir>
+   --http 127.0.0.1:18674 --proxy-bind 127.0.0.1:18675 --derp-bind 127.0.0.1:18340
+   --http-url http://127.0.0.1:18675 --no-tunnel --web-app web-client/dist` → `{"op":"add_relay",
+   "relay":<its interface.json>,"default":true}`. (A relay re-created at the same address leaves
+   a stale entry with the old token in the app; use a fresh simulator instead.)
+4. `PHONE_QA_DIR="<container>/Library/Application Support" ORIGIN=http://127.0.0.1:18675
+   node web-client/smoke/phone.mjs`
+
+Three driver ops exist for it, on Apple and Android: `pair_answer` (`code`: answer the
+`haven-pair:` code a browser shows → dump `pair_answer`, then `enroll_pending`), `enroll_confirm`
+(the confirmation's "Link this device"), and `web_access` (`circle_id`, `allow`: the circle's
+"Allow in web browsers" switch → dump `web_access`). Shut the simulator down afterwards.
 
 ### Dump-channel freshness — the harness will not believe a stale dump
 

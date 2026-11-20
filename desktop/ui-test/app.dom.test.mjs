@@ -1836,6 +1836,40 @@ test('media tiles: a blob that has not arrived shows a loading box that polls, t
   assert.ok(!box(), 'the placeholder is replaced once the bytes land');
 });
 
+test('media tiles: in a browser a very large video is saved to the computer, never loaded into the page', async () => {
+  const BIG = 300 * 1024 * 1024;
+  const feed = { feeds: { default: [BO_POST({ media: ['vid_big'], reactions: [] })] } };
+  const box = (app) => app.q('.card[data-post="bp1"] .media-evicted');
+
+  // The desktop app has a disk: the same video is an ordinary Download there.
+  const desktop = await boot({ state: feed, be: { media_data_url: null, media_evicted_size: BIG, media_is_wanted: false } });
+  assert.match(box(desktop.app).textContent, /Download/);
+  assert.doesNotMatch(box(desktop.app).textContent, /Too large/);
+
+  let saved = 0;
+  const { app } = await boot({ host: { web: true }, state: feed, be: {
+    media_data_url: null, media_evicted_size: BIG, media_is_wanted: false, media_save_to_disk: () => { saved += 1; },
+  } });
+  assert.match(box(app).textContent, /Save to this computer \(300(\.0)? MB\)/);
+  assert.match(box(app).textContent, /Too large to play in a browser/);
+  await click(app, box(app).querySelector('button'));
+  assert.equal(saved, 1);
+  assert.deepEqual(J(lastCall(app, 'media_save_to_disk').args), { circleId: 'default', reference: 'vid_big', video: true });
+  assert.equal(lastCall(app, 'media_download'), undefined, 'the page never asks for it as something to display');
+  assert.equal(app.calls.filter((c) => c.cmd === 'media_data_url' && c.args.reference === 'vid_big').length <= 1, true, 'and never polls for it as a player');
+  assert.match(box(app).textContent, /Saved to your downloads/);
+  assert.ok(box(app).querySelector('button'), 'it can be saved again');
+
+  // An ordinary video in a browser is still an ordinary Download, and a failed save says so.
+  const small = await boot({ host: { web: true }, state: feed, be: { media_data_url: null, media_evicted_size: 20 * 1024 * 1024, media_is_wanted: false } });
+  assert.doesNotMatch(box(small.app).textContent, /Save to this computer/);
+  const failing = await boot({ host: { web: true }, state: feed, be: {
+    media_data_url: null, media_evicted_size: BIG, media_is_wanted: false, media_save_to_disk: () => { throw 'unavailable'; },
+  } });
+  await click(failing.app, box(failing.app).querySelector('button'));
+  assert.match(box(failing.app).textContent, /no longer available/i);
+});
+
 test('media tiles: a deliberately evicted blob offers a sized Download instead of silently refetching', async () => {
   const { app, be } = await boot({ state: { feeds: { default: [BO_POST({ media: ['img_gone'], reactions: [] })] } }, be: { media_data_url: null, media_evicted_size: 3_500_000, media_is_wanted: false } });
   const box = () => app.q('.card[data-post="bp1"] .media-evicted');

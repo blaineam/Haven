@@ -263,6 +263,12 @@ object QaDriver {
                 }
             }
             "call_accept" -> CallManager.accept()
+            // The camera button. Idempotent, like Apple's `call_video`: toggles only when the state
+            // differs from what was asked.
+            "call_video" -> {
+                val want = cmd.optString("on") != "false" && cmd.optBoolean("on", true)
+                if (CallManager.cameraOn.value != want) CallManager.toggleCamera()
+            }
             // The speaker toggle is the one call control whose effect lands OUTSIDE the app — in the
             // platform's audio router — so without a driver op it cannot be tested at all, which is
             // how the routing came to ship on compile checks alone. `on` sets an explicit state;
@@ -548,7 +554,14 @@ object QaDriver {
             .put("audio_route", runCatching { CallManager.qaAudioRoute }.getOrDefault("?"))
             // What the hardware even OFFERS. Without it, "speaker-off did not reach the earpiece"
             // cannot be told apart from "this device has no earpiece" — which is every emulator.
-            .put("audio_devices", runCatching { CallManager.qaAudioDevices }.getOrDefault("?")))
+            .put("audio_devices", runCatching { CallManager.qaAudioDevices }.getOrDefault("?"))
+            // Who is in the call and what is arriving — Apple's vocabulary, so one test reads both.
+            .put("video_on", runCatching { CallManager.cameraOn.value }.getOrDefault(false))
+            .put("participants", JSONArray(runCatching { CallManager.participants.toList() }.getOrDefault(emptyList())))
+            .put("remote_video_tracks", JSONArray(runCatching {
+                CallManager.remoteVideo.filter { it.value != null && !CallManager.remoteCameraOff.contains(it.key) }.keys.toList()
+            }.getOrDefault(emptyList())))
+            .put("peers", JSONObject(runCatching { CallManager.qaPeerIce }.getOrDefault(emptyMap()) as Map<*, *>)))
         o.put("circles", circles)
         // Relay-first media counters + the heavy-work gate (e2e `relayfirst` / `callgate`).
         val relayFirst = QaStats.relayFirst(ownPosts)

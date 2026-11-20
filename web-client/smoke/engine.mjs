@@ -222,6 +222,20 @@ await run(
     await shots(page, "2-you");
     step("both posts are rendered in the feed");
 
+    // Saving to the computer — what a browser does with a video too large to hold (the size rule
+    // itself is unit-tested; here the real page hands real decrypted bytes to the browser as a
+    // file, then lets go of them).
+    const { readFileSync: readSaved } = await import("node:fs");
+    const [download] = await Promise.all([
+      page.waitForEvent("download", { timeout: 60000 }),
+      page.evaluate((r) => window.__TAURI__.core.invoke("media_save_to_disk", { circleId: "", reference: r, video: false }), pic.media[0]),
+    ]);
+    if (readSaved(await download.path()).toString("base64") !== PNG) throw new Error("the saved file is not the picture that was posted");
+    if (!/^haven-[A-Za-z0-9_-]+$/.test(download.suggestedFilename())) throw new Error(`odd file name: ${download.suggestedFilename()}`);
+    if (await invoke(page, "media_present", { reference: pic.media[0] })) throw new Error("the saved blob is still held in the tab");
+    if (!((await invoke(page, "media_evicted_size", { reference: pic.media[0] })) > 0)) throw new Error("the saved blob did not go back to being a placeholder");
+    step("'Save to this computer' hands the decrypted file to the browser and keeps nothing in the tab");
+
     // A picture DROPPED onto the page lands in the composer (and the page stays where it is — a
     // browser navigates to a dropped file unless the drop is cancelled).
     const dropPicture = () => page.evaluate(async (b64) => {

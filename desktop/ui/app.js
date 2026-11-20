@@ -409,8 +409,14 @@ function syncingPlaceholder(circleId, ref, isVideo) {
 // The #3 placeholder for a deliberately-evicted blob: a tap re-fetches it (media_download clears the
 // eviction first, then pulls it relay-first with a peer fallback). Spinner while pending; "No longer
 // available" + Retry if it hasn't arrived after ~45s (relay/peers don't have it either).
+// In a browser, media over this size is never loaded into the page: a tab has no disk, and the
+// relay cannot decrypt a video to serve it. It is SAVED instead — fetched once, handed to the
+// browser as a file, and dropped. Mirrors `Engine::WEB_LARGE_MEDIA_BYTES`.
+const WEB_SAVE_ONLY_BYTES = 64 * 1024 * 1024;
+
 function evictedPlaceholder(circleId, ref, bytes, isVideo, post) {
   const box = el("div", { class: "media-evicted" });
+  const saveOnly = HOST_WEB && bytes > WEB_SAVE_ONLY_BYTES;
   // A relay's retention swept this, but the AUTHOR probably still has the original. Asking them is
   // the difference between "gone" and "gone from the relay". Nothing to ask for on your own post:
   // you ARE the author, so if the bytes are gone here they're gone everywhere.
@@ -437,12 +443,28 @@ function evictedPlaceholder(circleId, ref, bytes, isVideo, post) {
             : null);
       return;
     }
+    if (saveOnly) {
+      box.replaceChildren(
+        el("button", { class: "btn small primary", onclick: () => save() }, "⬇ " + t("save_to_computer", fmtBytes(bytes))),
+        el("div", { class: "muted small" }, mode === "saved" ? t("saved_to_downloads") : t("too_large_for_browser")));
+      return;
+    }
     box.replaceChildren(
       el("button", { class: "btn small primary", onclick: () => start() },
         "⬇ " + t("download_size", fmtBytes(bytes))),
       el("div", { class: "muted small" }, t("removed_to_save_space")));
   };
+  // The browser-only path for something too large to hold: the host fetches it, gives it to the
+  // browser as a file and lets go of it again. It never becomes a player in the page.
+  const save = async () => {
+    draw("loading");
+    try {
+      await invoke("media_save_to_disk", { circleId, reference: ref, video: !!isVideo });
+      draw("saved");
+    } catch (_) { draw("gone"); }
+  };
   const start = async () => {
+    if (saveOnly) return save();
     draw("loading");
     try { await invoke("media_download", { reference: ref }); } catch (_) {}
     // Poll for arrival; the engine emits haven:changed on success and re-renders the feed, but poll

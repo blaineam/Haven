@@ -239,6 +239,9 @@ struct DynState {
     /// Browser only: when the in-memory media budget was last enforced.
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     last_web_budget_sweep_ms: u64,
+    /// Large media the person ASKED for in a browser (`media_download`): the one-time pass that lets
+    /// [`Engine::web_defers_large`] fetch it. Cleared when the blob is released again.
+    web_large_asked: std::collections::HashSet<String>,
 }
 
 /// Where a self-sync slot can be read/written: a Haven relay (by node hex) or the user's S3.
@@ -4034,6 +4037,7 @@ impl Engine {
             }
             let bytes = self.media.delete(&reference);
             freed += bytes;
+            self.dyn_state.lock().web_large_asked.remove(&reference);
             // A ref a LIVE event still references becomes a re-downloadable placeholder (recorded
             // evicted so the missing-media sweep won't silently refetch it); a pure orphan just goes.
             if referenced.contains(&name) {
@@ -4052,6 +4056,8 @@ impl Engine {
     /// media path may fetch it), then fetch this one ref now — relay/S3 first (idempotent), peer
     /// fallback second — like `request_missing_media`'s per-ref path. iOS `FeedStore.downloadEvicted`.
     pub fn media_download(self: &Arc<Self>, reference: String) {
+        // The person asked for this one: in a browser that is what lets a large blob through.
+        self.dyn_state.lock().web_large_asked.insert(reference.clone());
         self.clear_evicted(&reference);
         if self.media.has(&reference) {
             self.emit_changed();
@@ -4150,6 +4156,39 @@ impl Engine {
     /// How much media a browser tab keeps: everything a tab stores lives in the page's memory (and
     /// is mirrored, encrypted, into its storage), so an unbounded media cache is an unbounded tab.
     pub const WEB_MEDIA_BUDGET_BYTES: u64 = 256 * 1024 * 1024;
+
+    /// In a browser, media larger than this is not fetched on its own. A tab has no disk: what it
+    /// fetches sits in the page's memory, and showing it costs that again (and again as the URL the
+    /// page plays). So a large video is left as a placeholder that says how big it is, and the
+    /// person can SAVE it — fetched once, handed to the browser as a file, and dropped again
+    /// ([`Self::media_download`] is the pass; `web-host.js` `media_save_to_disk` does the rest).
+    /// The relay cannot decrypt it, so it cannot simply serve it to the browser to play.
+    pub const WEB_LARGE_MEDIA_BYTES: u64 = 64 * 1024 * 1024;
+
+    /// The decision behind [`Self::web_defers_large`], on its own so a test can hold it: a blob of
+    /// `chunks` relay chunks is left alone in a browser when it is over the limit and nobody asked.
+    pub(crate) fn web_large_deferred(chunks: usize, asked: bool) -> Option<u64> {
+        let bytes = chunks as u64 * MEDIA_CHUNK_BYTES as u64;
+        (bytes > Self::WEB_LARGE_MEDIA_BYTES && !asked).then_some(bytes)
+    }
+
+    /// In a browser: should this chunked blob be left on the relay for now? If so it is recorded as
+    /// a placeholder carrying its (rounded-up) size, exactly like a blob evicted to save space, so
+    /// the missing-media sweep stops asking for it. Always false outside a browser.
+    fn web_defers_large(self: &Arc<Self>, reference: &str, chunks: usize) -> bool {
+        if !cfg!(target_arch = "wasm32") {
+            return false;
+        }
+        let asked = self.dyn_state.lock().web_large_asked.contains(reference);
+        match Self::web_large_deferred(chunks, asked) {
+            Some(bytes) => {
+                self.mark_evicted(reference, bytes);
+                self.emit_changed();
+                true
+            }
+            None => false,
+        }
+    }
 
     /// In a browser, keep the media cache under [`Self::WEB_MEDIA_BUDGET_BYTES`]: the oldest blobs
     /// go first and become "Download" placeholders, exactly as a user-set storage limit does on
@@ -10950,6 +10989,9 @@ impl Engine {
         if let Some(s3) = self.s3_client().await {
             if let Ok(Some(head)) = s3.get(&key).await {
                 if let Some(count) = Self::parse_manifest(&head) {
+                    if self.web_defers_large(reference, count) {
+                        return None;
+                    }
                     let fp = Self::manifest_fingerprint(&head);
                     let (part, have) = self.restore_resume_open(reference, count, &fp);
                     let mut ok = true;
@@ -10995,6 +11037,9 @@ impl Engine {
                         Ok(None) => { http_miss = true; break; } // reachable, doesn't hold it
                         Ok(Some(head)) => {
                             if let Some(count) = Self::parse_manifest(&head) {
+                                if self.web_defers_large(reference, count) {
+                                    return None;
+                                }
                     let fp = Self::manifest_fingerprint(&head);
                                 let (part, have) = self.restore_resume_open(reference, count, &fp);
                                 let mut ok = true;
@@ -11030,6 +11075,9 @@ impl Engine {
             if let Some(client) = self.relay_client_for(&node_hex).await {
                 if let Some(head) = client.get(key.clone()).await {
                     if let Some(count) = Self::parse_manifest(&head) {
+                        if self.web_defers_large(reference, count) {
+                            return None;
+                        }
                     let fp = Self::manifest_fingerprint(&head);
                         // Stream each chunk to the resumable part file on disk — never the whole
                         // blob in RAM, never chunk 0 again after a stall.
@@ -11689,6 +11737,11 @@ impl Engine {
             }
         }
         Ok(())
+    }
+
+    /// Is this blob's sealed copy held here right now? (Cheap: it opens nothing.)
+    pub fn media_held(&self, reference: &str) -> bool {
+        self.media.has(reference)
     }
 
     /// Decrypt a stored media ref for display, trying the given circle then any circle.

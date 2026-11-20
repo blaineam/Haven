@@ -1396,3 +1396,32 @@ async fn rescoping_never_moves_a_private_circle_onto_the_relay_of_a_wider_circle
     assert!(!gained.contains(&private), "A's private circle must not follow cS onto its relays: {gained:?}");
     assert!(a.prefs.lock().fallback_relays_for(&private).is_empty());
 }
+
+
+/// In a browser a large video is left on the relay until the person asks for it: fetched on its
+/// own it would sit in the page's memory. The rule is the same everywhere it is consulted; only a
+/// browser consults it.
+#[test]
+fn a_browser_leaves_large_media_on_the_relay_until_it_is_asked_for() {
+    let chunk = MEDIA_CHUNK_BYTES as u64;
+    let limit_chunks = (Engine::WEB_LARGE_MEDIA_BYTES / chunk) as usize;
+    assert_eq!(Engine::web_large_deferred(limit_chunks, false), None, "exactly at the limit is fetched");
+    assert_eq!(Engine::web_large_deferred(1, false), None, "an ordinary video is fetched");
+    assert_eq!(
+        Engine::web_large_deferred(limit_chunks + 1, false),
+        Some((limit_chunks as u64 + 1) * chunk),
+        "over the limit it becomes a placeholder that carries its size"
+    );
+    assert_eq!(Engine::web_large_deferred(limit_chunks + 50, true), None, "asked for: fetched whatever its size");
+
+    // Outside a browser nothing is ever deferred, and asking is remembered only until the blob is
+    // released again.
+    let (e, _) = new_engine(91);
+    assert!(!e.web_defers_large("vid_big", limit_chunks + 50));
+    assert!(e.evicted_size("vid_big").is_none());
+    e.media_download("vid_big".into());
+    assert!(e.dyn_state.lock().web_large_asked.contains("vid_big"));
+    e.media_delete_selected(vec!["vid_big".into()]);
+    assert!(!e.dyn_state.lock().web_large_asked.contains("vid_big"));
+    assert!(!e.media_present("vid_big"));
+}

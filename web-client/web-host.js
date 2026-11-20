@@ -171,6 +171,33 @@
       await relaunch();
     },
     pair_stop: () => app.pairStop(),
+    // Something too large to hold in a tab (app.js `WEB_SAVE_ONLY_BYTES`): fetch it once, give it
+    // to the browser as a file, and let go of it. The relay cannot decrypt it, so the page must;
+    // what the page must not do is keep it, or turn it into a player.
+    media_save_to_disk: async ({ circleId, reference, video }) => {
+      await engineCall("media_download", { reference });   // the person asked: the engine may fetch it
+      const until = Date.now() + 20 * 60 * 1000;
+      while (!(await engineCall("media_present", { reference }))) {
+        if (Date.now() > until) throw "unavailable";
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+      try {
+        const bytes = app.mediaBytes(circleId || "", reference);
+        if (!bytes) throw "unavailable";
+        const url = URL.createObjectURL(new Blob([bytes], { type: video ? "video/mp4" : "application/octet-stream" }));
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `haven-${String(reference).replace(/[^A-Za-z0-9_-]/g, "").slice(-16)}${video ? ".mp4" : ""}`;
+        a.rel = "noopener";
+        document.body.append(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 120000);
+      } finally {
+        // Back to a placeholder: nothing this size stays in the tab or in its storage.
+        await engineCall("media_delete_selected", { refs: [reference] });
+      }
+    },
     // Notifications while no tab is open (Web Push). `web_push_set` rejects with one of
     // "unsupported" | "session" | "unavailable" | "blocked", or the worker's own refusal.
     web_push_status: () => pushStatus(),

@@ -186,6 +186,14 @@ impl WebApp {
         }
     }
 
+    /// The decrypted bytes of a blob this browser holds, as a `Uint8Array` — for handing a large
+    /// video to the browser as a file (`web-host.js` `media_save_to_disk`). Everything else goes
+    /// through `invoke`; this does not, because JSON would cost the bytes again as base64 text.
+    #[wasm_bindgen(js_name = mediaBytes)]
+    pub fn media_bytes(&self, circle_id: String, reference: String) -> Result<Option<Vec<u8>>, JsError> {
+        Ok(self.engine()?.media_bytes(&circle_id, &reference))
+    }
+
     /// `{seedless, linked, linking}`.
     pub fn status(&self) -> Result<String, JsError> {
         let (seedless, linked, linking) = self.engine()?.seedless_status();

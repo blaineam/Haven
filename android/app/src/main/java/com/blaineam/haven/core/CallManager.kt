@@ -116,6 +116,8 @@ object CallManager {
     /// it joined at all. Four attempts at the stuck-call bug were reasoned from source because these
     /// two facts were not observable.
     val qaSessionId: String get() = sessionId
+    /** DEBUG dump: each peer's ICE state, by account hex (Apple's `call.peers` parity). */
+    val qaPeerIce: Map<String, String> get() = runCatching { lastIce.mapValues { it.value.name.lowercase() } }.getOrDefault(emptyMap())
     @Volatile var qaLastCallEvent: String = "none"
         private set
     fun qaNoteCallEvent(what: String) { qaLastCallEvent = what }

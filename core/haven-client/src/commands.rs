@@ -1988,6 +1988,11 @@ pub fn media_data_url(engine: Eng, circle_id: String, reference: String) -> Opti
     Some(format!("data:{mime};base64,{b64}"))
 }
 
+/// Is this blob held here right now? (Cheap — unlike `media_data_url`, it opens nothing.)
+pub fn media_present(engine: Eng, reference: String) -> bool {
+    engine.media_held(&reference)
+}
+
 /// Store a zip / file attachment as a `file_` ref (Apple/Android parity).
 pub fn add_file(engine: Eng, circle_id: String, data_base64: String) -> R<String> {
     let cid = if circle_id.is_empty() { DEFAULT_CIRCLE.to_string() } else { circle_id };

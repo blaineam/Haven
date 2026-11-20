@@ -9,6 +9,11 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Changed - In a browser, a very large video is saved to the computer instead of played (not shipped; `feat/web-client`)
+A browser tab has no disk, and a relay cannot decrypt a video to stream it. So in the web client a video over 64 MB is no longer
+pulled into the page on its own: it shows its size and a "Save to this computer" button, which fetches it once, decrypts it, puts
+it in your downloads, and keeps nothing in the tab. Smaller media is unchanged, and so is every app.
+
 ### Added - Notifications in a browser while Haven is closed (not shipped; `feat/web-client`, and it needs the push worker deployed)
 A linked browser can now be rung when something new arrives and no Haven tab is open. It is off by default, lives in Settings →
 Privacy, and is offered only in a browser you chose to stay linked in. What the browser receives is a doorbell with nothing in it:

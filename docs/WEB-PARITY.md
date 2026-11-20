@@ -241,9 +241,21 @@ Next, in order:
       encrypted, into its storage), so the media cache is capped at 256 MB
       (`Engine::WEB_MEDIA_BUDGET_BYTES`): the oldest blobs become "Download" placeholders, the same
       thing a storage limit does in the apps, and come back from the relay when asked for.
-      - [ ] Still true: one very large video has to fit in memory while it is being viewed or
-            posted. Lifting that means moving the engine into a worker with file-backed storage
-            (OPFS); it is not done.
+      - **A very large video is saved, not played.** In a browser, media over 64 MB
+        (`Engine::WEB_LARGE_MEDIA_BYTES`) is not fetched on its own: it shows as a placeholder
+        with its size and "Save to this computer". Asking for it fetches it once, decrypts it,
+        hands it to the browser as a file in the person's downloads, and drops it again — it
+        never becomes a player in the page and nothing that size stays in the tab or its storage.
+        The relay only ever holds ciphertext, so it cannot serve the video to the browser to
+        stream; decrypting has to happen in the page. Decided: no file-backed storage (OPFS) in
+        the browser beyond this.
+        Tested: the size rule (`a_browser_leaves_large_media_on_the_relay_until_it_is_asked_for`),
+        the placeholder and its action (`desktop/ui-test`), and in a real browser by the smoke —
+        the saved file is byte-identical and the tab holds nothing afterwards.
+      - Still true, stated: while it is being saved, a large video passes through the page's
+        memory once (roughly three times its size at the peak), so a video of several gigabytes
+        can still fail in a browser; and POSTING a very large video from a browser has to fit in
+        memory too. Use an app for those.
 - [x] The engine's delayed save works in a page. It started an OS thread, which a browser cannot
       do: the first post received over the network crashed the task handling it and nothing
       network-driven was saved again (posts still showed, because the live state was intact).

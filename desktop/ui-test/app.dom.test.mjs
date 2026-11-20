@@ -1137,6 +1137,38 @@ test('devices: minting a link code can fail and says why', async () => {
   assert.match(app.q('#toast').textContent, /no seed/);
 });
 
+test('devices: a code another device shows is answered from Add a device, and only if it is one', async () => {
+  const roster = { enabled: true, this_device_authorized: true, devices: [] };
+  const { app } = await boot({ be: { device_roster: roster, enroll_mint_ticket: 'haven-enroll:TICKET123', enroll_scan_code: null } });
+  await openSettingsRow(app, /Devices/);
+  await click(app, modalBtn(app, /secure|Add a device|Add device/i));
+  const box = [...app.qa('#modal-root input.field-capsule')].find((i) => /haven-pair/.test(i.getAttribute('placeholder') || ''));
+  assert.ok(box, 'there is a field for the other device\'s code');
+  assert.ok(modalBtn(app, /Scan its code/i), 'and a camera scan');
+  // A ticket, a seed or nothing is not a device code: nothing is sent.
+  for (const bad of ['', 'haven-enroll:TICKET123', 'haven-seed:XYZ']) {
+    box.value = bad;
+    await click(app, modalBtn(app, /Use this code/i));
+    assert.equal(lastCall(app, 'enroll_scan_code'), undefined, `"${bad}" is not sent`);
+    assert.match(app.q('#toast').textContent, /not a Haven device code/i);
+  }
+  box.value = '  haven-pair:CODE  ';
+  await click(app, modalBtn(app, /Use this code/i));
+  assert.equal(lastCall(app, 'enroll_scan_code').args.code, 'haven-pair:CODE');
+  assert.match(app.q('#toast').textContent, /Approve the device/i);
+});
+
+test('devices: an unreachable device is reported, not swallowed', async () => {
+  const roster = { enabled: true, this_device_authorized: true, devices: [] };
+  const { app } = await boot({ be: { device_roster: roster, enroll_mint_ticket: 'haven-enroll:T', enroll_scan_code: () => { throw new Error('keep its page open'); } } });
+  await openSettingsRow(app, /Devices/);
+  await click(app, modalBtn(app, /secure|Add a device|Add device/i));
+  const box = [...app.qa('#modal-root input.field-capsule')].find((i) => /haven-pair/.test(i.getAttribute('placeholder') || ''));
+  box.value = 'haven-pair:CODE';
+  await click(app, modalBtn(app, /Use this code/i));
+  assert.match(app.q('#toast').textContent, /keep its page open/);
+});
+
 test('devices: relay-history card shows progress while running and a summary when done', async () => {
   const running = { state: 'scanning', circles_done: 1, circles_total: 3, entries_checked: 10, entries_found: 40, fraction: 0.25 };
   const { app } = await boot({ be: { device_roster: { enabled: false, this_device_authorized: false, devices: [] }, relay_history_status: running } });

@@ -54,10 +54,11 @@ switch in the desktop app's and the Mac app's relay settings (phones do not host
 Proven end to end in headless Chromium against a native device hosting the relay: linking, staying linked across a reload, posts
 and pictures in both directions, everything stored in the browser encrypted, a shared-computer session wiped on leaving. Phones
 and the Mac teach the account's other devices the relay address (frame 37) the same way the desktop does, so a browser can be
-linked from any of them. A browser can also be linked the other way round: it shows a code, and the desktop app scans or is
-given it (Devices ▸ Add a device ▸ Scan its code) — the ticket it answers with enrolls only the device that code names.
-Pictures and videos can be dropped onto the page. Still missing: shipping the bundle in any installer or store build, calls,
-the code scanner on the phones and the Mac, per-circle consent. Design, trust statement and progress: [`docs/WEB-PARITY.md`](docs/WEB-PARITY.md) and D21 in
+linked from any of them. A browser can also be linked the other way round: it shows a code, and a device that has the account
+scans or is given it (desktop: Devices ▸ Add a device ▸ Scan its code; iPhone, iPad, Mac and Android: Link a device) — the
+ticket it answers with enrolls only the device that code names. Pictures and videos can be dropped onto the page. Still missing:
+shipping the bundle in any installer or store build, calls, per-circle consent; the phones' scanners are compiled but not yet
+run against a real browser. Design, trust statement and progress: [`docs/WEB-PARITY.md`](docs/WEB-PARITY.md) and D21 in
 [`docs/DECISIONS.md`](docs/DECISIONS.md).
 
 ## 2.1.3 (security release, 2026-11-19)

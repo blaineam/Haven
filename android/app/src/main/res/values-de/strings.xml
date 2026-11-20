@@ -491,6 +491,17 @@
     <string name="settings_make_primary_device">Dieses Gerät zu meinem Hauptgerät machen</string>
     <string name="settings_make_secure_linked_device">Dieses Gerät als sicheres verknüpftes Gerät einrichten</string>
     <string name="settings_link_new_device_arrow">Neues Gerät verknüpfen (ohne Seed) →</string>
+    <string name="settings_pair_scan_arrow">Browser oder Gerät verknüpfen, das einen Code anzeigt →</string>
+    <string name="settings_pair_title">Gerät verknüpfen, das einen Code anzeigt</string>
+    <string name="settings_pair_hint">Zeigt das andere Gerät – zum Beispiel ein Browser – einen eigenen Code an? Scanne ihn oder füge ihn hier ein.</string>
+    <string name="settings_pair_scan">Dessen Code scannen</string>
+    <string name="settings_pair_use_code">Diesen Code verwenden</string>
+    <string name="settings_pair_sending">Wird gesendet…</string>
+    <string name="settings_pair_sent">Gesendet. Bestätige das Gerät hier, sobald es sich verknüpfen möchte.</string>
+    <string name="settings_pair_not_a_code">Das ist kein Haven-Gerätecode.</string>
+    <string name="settings_pair_expired">Dieser Code ist abgelaufen. Zeige auf dem anderen Gerät einen neuen an.</string>
+    <string name="settings_pair_not_primary">Nur dein Hauptgerät kann neue Geräte verknüpfen.</string>
+    <string name="settings_pair_unreachable">Das Gerät war nicht erreichbar. Lass dessen Seite geöffnet und versuche es erneut.</string>
     <string name="settings_not_primary_device">Das ist nicht mein Hauptgerät</string>
     <string name="settings_link_new_device_title">Neues Gerät verknüpfen</string>
     <string name="settings_enroll_qr_instructions">Auf deinem neuen Gerät: „Als weiteres meiner Geräte hinzufügen“, dann diesen Code scannen. Es bekommt einen eigenen, widerrufbaren Schlüssel — nie deinen Hauptschlüssel.</string>

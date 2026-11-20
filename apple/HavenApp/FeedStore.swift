@@ -7854,6 +7854,11 @@ final class FeedStore: ObservableObject {
     private var activeEnrollTicket: EnrollTicketFfi?
     /// NEW-DEVICE side: the ticket this device is enrolling with (kept to open the frame-29 grant).
     private var pendingEnrollTicket: EnrollTicketFfi?
+    /// PRIMARY side, scan-to-link: the `haven-pair:` code the active ticket was minted for. A request
+    /// under that ticket is honoured only from the device the code names — reading a code off a
+    /// screen must not be enough to get a device of one's own onto the account. Nil for a ticket this
+    /// device showed (whoever holds that ticket may ask, as before).
+    private var activeEnrollBoundCode: String?
 
     /// PRIMARY: mint a fresh enrollment ticket to advertise as a `haven-enroll:` QR. Only a seed-holding
     /// primary can (it must issue credentials + seal the self-sync grant). Returns nil if not a primary.
@@ -7865,7 +7870,46 @@ final class FeedStore: ObservableObject {
         let ticket = try? enrollIssueTicket(accountBundle: accountBundle, primaryDevice: primaryDevice,
                                             issuedAt: UInt64(Date().timeIntervalSince1970), relays: relays)
         activeEnrollTicket = ticket
+        activeEnrollBoundCode = nil
         return ticket
+    }
+
+    /// What happened to a `haven-pair:` code this device was asked to answer.
+    enum PairAnswer { case sent, notACode, expired, notPrimary, unreachable }
+
+    /// PRIMARY, scan-to-link: another device (a browser on a borrowed computer, say) is SHOWING a
+    /// `haven-pair:` code because it cannot scan one. Mint a ticket bound to the device that code
+    /// names and send it there (frame 38), sealed under the code's secret, through the relay the code
+    /// names. The device then asks to join in the ordinary way and the confirmation sheet still
+    /// decides. Same rules as the desktop's `link_scanned_device`.
+    func answerPairCode(_ text: String) async -> PairAnswer {
+        let code = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let now = UInt64(Date().timeIntervalSince1970)
+        guard let parsed = try? pairCodeParse(text: code) else { return .notACode }
+        guard (try? pairCodeIsExpired(text: code, now: now, ttlSecs: 600)) == false else { return .expired }
+        let relay = parsed.relay.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard relay.hasPrefix("https://") || relay.hasPrefix("http://") else { return .notACode }
+        let deviceHex = parsed.deviceId.map { String(format: "%02x", $0) }.joined()
+        guard deviceHex != DeviceKeyStore.deviceNodeHex() else { return .notACode }
+        guard AccountStore.storedSeed() != nil else { return .notPrimary }
+        guard let node else { return .unreachable }
+        guard let ticket = mintEnrollTicket(),
+              let ticketText = try? enrollTicketEncode(ticket: ticket),
+              let offer = try? pairOfferBuild(codeText: code, ticketText: ticketText, ts: now) else { return .notPrimary }
+        activeEnrollBoundCode = code
+        let f = frame(38, offer)
+        // The other device is waiting on that relay right now; a dial can still lose a race with its
+        // relay registration, so try a few times before saying it did not work.
+        for attempt in 0..<4 {
+            if (try? await node.sendToNodeVia(nodeIdHex: deviceHex, relayUrl: relay, payload: f)) != nil {
+                return .sent
+            }
+            try? await Task.sleep(nanoseconds: UInt64(700_000_000 * (attempt + 1)))
+        }
+        // Nobody was sent this ticket: do not leave it live.
+        activeEnrollTicket = nil
+        activeEnrollBoundCode = nil
+        return .unreachable
     }
 
     /// NEW DEVICE: begin enrolling with a scanned/pasted `haven-enroll:` ticket. Adopts the bootstrap
@@ -7899,6 +7943,13 @@ final class FeedStore: ObservableObject {
         guard AccountStore.storedSeed() != nil, let ticket = activeEnrollTicket else { return }   // only a primary with a live ticket
         guard let req = try? enrollVerifyRequest(secret: ticket.secret, wire: payload,
                                                  now: UInt64(Date().timeIntervalSince1970), maxAgeSecs: 600) else { return }
+        // A ticket minted for a scanned code enrolls the device that code names and no other.
+        if let bound = activeEnrollBoundCode {
+            guard (try? pairCodeMatches(text: bound, deviceBundle: req.deviceBundle)) == true else {
+                HavenLog.net("enroll: a request under a scan-bound ticket came from a different device — refused")
+                return
+            }
+        }
         let deviceHex = nodeHex(req.deviceBundle.prefix(32))
         guard deviceHex != DeviceKeyStore.deviceNodeHex() else { return }   // not our own device
         // Idempotent: don't stack duplicate sheets while one is already up for this device.

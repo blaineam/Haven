@@ -491,6 +491,17 @@
     <string name="settings_make_primary_device">この端末をメインの端末にする</string>
     <string name="settings_make_secure_linked_device">この端末を安全なリンク端末にする</string>
     <string name="settings_link_new_device_arrow">新しい端末をリンク（シード不要）→</string>
+    <string name="settings_pair_scan_arrow">コードを表示しているブラウザや端末をリンク →</string>
+    <string name="settings_pair_title">コードを表示している端末をリンク</string>
+    <string name="settings_pair_hint">相手のデバイス（ブラウザなど）が自分のコードを表示していますか？ それをスキャンするか、ここに貼り付けてください。</string>
+    <string name="settings_pair_scan">相手のコードをスキャン</string>
+    <string name="settings_pair_use_code">このコードを使う</string>
+    <string name="settings_pair_sending">送信中…</string>
+    <string name="settings_pair_sent">送信しました。デバイスがリンクを求めてきたら、ここで承認してください。</string>
+    <string name="settings_pair_not_a_code">これは Haven のデバイスコードではありません。</string>
+    <string name="settings_pair_expired">このコードは期限切れです。相手のデバイスで新しいコードを表示してください。</string>
+    <string name="settings_pair_not_primary">新しいデバイスをリンクできるのはプライマリデバイスだけです。</string>
+    <string name="settings_pair_unreachable">そのデバイスに届きませんでした。相手のページを開いたまま、もう一度お試しください。</string>
     <string name="settings_not_primary_device">この端末はメインの端末ではない</string>
     <string name="settings_link_new_device_title">新しい端末をリンク</string>
     <string name="settings_enroll_qr_instructions">新しい端末で「この端末を自分の端末として追加」を選び、このコードをスキャンしてください。新しい端末には、いつでも取り消せる専用の鍵が渡されます。マスターキーが渡されることはありません。</string>

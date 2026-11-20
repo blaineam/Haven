@@ -2883,10 +2883,69 @@ object HavenNet : InboundListener {
         return uri
     }
 
+    /**
+     * PRIMARY, scan-to-link: tickets minted for a `haven-pair:` code another device SHOWED, by ticket
+     * secret → that code. A request under such a ticket is honoured only from the device the code
+     * names — reading a code off a screen must not be enough to get a device of one's own onto the
+     * account. A ticket this device showed has no entry (whoever holds it may ask, as before).
+     */
+    private val ticketBoundCode = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    /** What happened to a `haven-pair:` code this device was asked to answer. */
+    enum class PairAnswer { SENT, NOT_A_CODE, EXPIRED, NOT_PRIMARY, UNREACHABLE }
+
+    /**
+     * PRIMARY, scan-to-link: another device (a browser on a borrowed computer, say) is SHOWING a
+     * `haven-pair:` code because it cannot scan one. Mint a ticket bound to the device that code
+     * names and send it there (frame 38), sealed under the code's secret, through the relay the code
+     * names. The device then asks to join in the ordinary way and the confirm dialog still decides.
+     * Same rules as the desktop's `link_scanned_device` and iOS `answerPairCode`.
+     */
+    suspend fun answerPairCode(text: String): PairAnswer {
+        val code = text.trim()
+        val now = (System.currentTimeMillis() / 1000).toULong()
+        val parsed = runCatching { uniffi.haven_ffi.pairCodeParse(code) }.getOrNull() ?: return PairAnswer.NOT_A_CODE
+        if (runCatching { uniffi.haven_ffi.pairCodeIsExpired(code, now, TICKET_TTL_SECS) }.getOrDefault(true)) {
+            return PairAnswer.EXPIRED
+        }
+        val relay = parsed.relay.trim()
+        if (!(relay.startsWith("https://") || relay.startsWith("http://"))) return PairAnswer.NOT_A_CODE
+        val deviceHex = bytesToHex(parsed.deviceId)
+        val myDevice = runCatching { social.myDeviceNodeHex() }.getOrDefault("")
+        if (deviceHex.equals(myDevice, ignoreCase = true)) return PairAnswer.NOT_A_CODE
+        if (core.seedless) return PairAnswer.NOT_PRIMARY
+        val n = node ?: return PairAnswer.UNREACHABLE
+        DeviceRosterManager.enable(social, core.seed, core.bundle, nodeIdHex)
+        val primaryDevice = hexToBytes32(myDevice) ?: return PairAnswer.NOT_PRIMARY
+        val relays = allRelays().filter { !it.startsWith("s3:") }.take(4)
+        val ticket = runCatching {
+            uniffi.haven_ffi.enrollIssueTicket(core.bundle, primaryDevice, now, relays)
+        }.getOrNull() ?: return PairAnswer.NOT_PRIMARY
+        val ticketText = runCatching { uniffi.haven_ffi.enrollTicketEncode(ticket) }.getOrNull()
+            ?: return PairAnswer.NOT_PRIMARY
+        val offer = runCatching { uniffi.haven_ffi.pairOfferBuild(code, ticketText, now) }.getOrNull()
+            ?: return PairAnswer.NOT_A_CODE
+        val secretHex = bytesToHex(ticket.secret)
+        ticketBoundCode[secretHex] = code
+        pendingTickets[secretHex] = ticket
+        val frame = Wire.frame(Wire.PAIR_OFFER, offer)
+        // The other device is waiting on that relay right now; a dial can still lose a race with its
+        // relay registration, so try a few times before saying it did not work.
+        for (attempt in 0 until 4) {
+            if (runCatching { n.sendToNodeVia(deviceHex, relay, frame) }.isSuccess) return PairAnswer.SENT
+            kotlinx.coroutines.delay(700L * (attempt + 1))
+        }
+        // Nobody was sent this ticket: do not leave it live.
+        pendingTickets.remove(secretHex)
+        ticketBoundCode.remove(secretHex)
+        return PairAnswer.UNREACHABLE
+    }
+
     /** PRIMARY: cancel the pending ticket (closing the QR sheet without a link). */
     fun cancelSeedlessTicket() {
         pendingRequestSecret?.let { pendingTickets.remove(it) }
         pendingTickets.clear()
+        ticketBoundCode.clear()
         pendingRequestSecret = null
         scope.launch(Dispatchers.Main) { seedlessTicketUri.value = ""; seedlessPendingRequest.value = null }
     }
@@ -2898,11 +2957,17 @@ object HavenNet : InboundListener {
         val now = (System.currentTimeMillis() / 1000).toULong()
         for ((secretHex, ticket) in pendingTickets.toMap()) {
             if (runCatching { uniffi.haven_ffi.enrollTicketIsExpired(ticket, now, TICKET_TTL_SECS) }.getOrDefault(true)) {
-                pendingTickets.remove(secretHex); continue
+                pendingTickets.remove(secretHex); ticketBoundCode.remove(secretHex); continue
             }
             val req = runCatching {
                 uniffi.haven_ffi.enrollVerifyRequest(ticket.secret, body, now, TICKET_TTL_SECS)
             }.getOrNull() ?: continue
+            // A ticket minted for a scanned code enrolls the device that code names and no other.
+            val bound = ticketBoundCode[secretHex]
+            if (bound != null &&
+                !runCatching { uniffi.haven_ffi.pairCodeMatches(bound, req.deviceBundle) }.getOrDefault(false)) {
+                continue
+            }
             pendingRequestSecret = secretHex
             val deviceHex = nodeHex(req.deviceBundle)
             scope.launch(Dispatchers.Main) {

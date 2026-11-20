@@ -182,7 +182,8 @@ Next, in order:
         closed tab" may also bring a shared session back until the window is closed.
 - [ ] **Scan-to-link** — the browser shows a code and a device that has the account answers it
       (a borrowed computer usually has no camera, and nobody can type a ticket into it from a
-      phone). Core, browser and desktop are done; the phones' scanners are not.
+      phone). Core, browser, desktop and both phones' scanners are written; see the last items
+      for what has and has not been exercised.
       - [x] Codec, in the crypto core so every platform agrees on the bytes
             (`core/haven-p2p/src/pair.rs`, FFI in `haven-ffi/src/enroll.rs`, fuzzed with the other
             wire parsers). A `haven-pair:` code holds the new device's id, the 16-byte check of
@@ -203,8 +204,14 @@ Next, in order:
             is applied when an offer arrives.
       - [x] Browser: the link screen shows the QR and the text. Desktop: Devices ▸ Add a device ▸
             "Scan its code" (camera) or paste. The smoke links a browser this way end to end.
-      - [ ] iPhone/iPad, Mac and Android: a "Scan its code" action in their Devices screens, and
-            the same bound-ticket check in their own enrollment handlers.
+      - [x] iPhone/iPad and Mac (`FeedStore.answerPairCode`, "Scan its code" in Link a device)
+            and Android (`HavenNet.answerPairCode`, Settings ▸ Devices ▸ "Link a browser or device
+            that shows a code"): scan with the camera or paste, in nine languages, each with the
+            same bound-ticket check in its own enrollment handler. COMPILED on both; NOT yet run on
+            a device or simulator against a real browser — the end-to-end proof so far is the
+            desktop engine and the browser.
+      - [ ] The desktop app as the NEW device still links by pasted ticket only; it does not show
+            a code of its own.
       - [x] Formal model: `docs/formal/haven_pair.spthy`, in `verify.sh` / `EXPECTED.txt`. With
             the network and relays hostile, adversary-owned devices around, and the code READ by
             the adversary: P1 only the scanned device is enrolled; P2 the ticket is learned only by

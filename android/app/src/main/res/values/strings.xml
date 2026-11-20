@@ -529,6 +529,17 @@
     <string name="settings_make_primary_device">Make this my primary device</string>
     <string name="settings_make_secure_linked_device">Make this a secure linked device</string>
     <string name="settings_link_new_device_arrow">Link a new device (no seed) →</string>
+    <string name="settings_pair_scan_arrow">Link a browser or device that shows a code →</string>
+    <string name="settings_pair_title">Link a device that shows a code</string>
+    <string name="settings_pair_hint">Is the other device showing a code of its own — a browser, for example? Scan it, or paste it here.</string>
+    <string name="settings_pair_scan">Scan its code</string>
+    <string name="settings_pair_use_code">Use this code</string>
+    <string name="settings_pair_sending">Sending…</string>
+    <string name="settings_pair_sent">Sent. Approve the device here when it asks to link.</string>
+    <string name="settings_pair_not_a_code">That is not a Haven device code.</string>
+    <string name="settings_pair_expired">That code has expired. Show a fresh one on the other device.</string>
+    <string name="settings_pair_not_primary">Only your primary device can link new devices.</string>
+    <string name="settings_pair_unreachable">Couldn\'t reach that device. Keep its page open and try again.</string>
     <string name="settings_not_primary_device">This isn’t my primary device</string>
     <string name="settings_link_new_device_title">Link a new device</string>
     <string name="settings_enroll_qr_instructions">On your new device: “Add this as another of my devices”, then scan this code. It gets its own revocable key — never your master key.</string>

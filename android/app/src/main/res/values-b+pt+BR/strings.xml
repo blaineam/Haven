@@ -526,6 +526,17 @@ O que já tentei:
     <string name="settings_make_primary_device">Definir este como meu dispositivo principal</string>
     <string name="settings_make_secure_linked_device">Definir este como um dispositivo vinculado seguro</string>
     <string name="settings_link_new_device_arrow">Vincular um novo dispositivo (sem seed) →</string>
+    <string name="settings_pair_scan_arrow">Vincular um navegador ou dispositivo que mostra um código →</string>
+    <string name="settings_pair_title">Vincular um dispositivo que mostra um código</string>
+    <string name="settings_pair_hint">O outro dispositivo — um navegador, por exemplo — está mostrando um código próprio? Escaneie ou cole aqui.</string>
+    <string name="settings_pair_scan">Escanear o código dele</string>
+    <string name="settings_pair_use_code">Usar este código</string>
+    <string name="settings_pair_sending">Enviando…</string>
+    <string name="settings_pair_sent">Enviado. Aprove o dispositivo aqui quando ele pedir para se vincular.</string>
+    <string name="settings_pair_not_a_code">Isso não é um código de dispositivo do Haven.</string>
+    <string name="settings_pair_expired">Esse código expirou. Mostre um novo no outro dispositivo.</string>
+    <string name="settings_pair_not_primary">Somente o seu dispositivo principal pode vincular novos dispositivos.</string>
+    <string name="settings_pair_unreachable">Não foi possível alcançar esse dispositivo. Mantenha a página dele aberta e tente de novo.</string>
     <string name="settings_not_primary_device">Este não é o meu dispositivo principal</string>
     <string name="settings_link_new_device_title">Vincular um novo dispositivo</string>
     <string name="settings_enroll_qr_instructions">No seu novo dispositivo: “Adicionar como mais um dos meus dispositivos” e escaneie este código. Ele ganha a própria chave revogável — nunca a sua chave mestra.</string>

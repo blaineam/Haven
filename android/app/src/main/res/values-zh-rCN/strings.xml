@@ -491,6 +491,17 @@
     <string name="settings_make_primary_device">将这台设为我的主设备</string>
     <string name="settings_make_secure_linked_device">将这台设为安全关联设备</string>
     <string name="settings_link_new_device_arrow">关联新设备（无需种子）→</string>
+    <string name="settings_pair_scan_arrow">关联显示代码的浏览器或设备 →</string>
+    <string name="settings_pair_title">关联显示代码的设备</string>
+    <string name="settings_pair_hint">另一台设备（例如浏览器）是否显示了它自己的代码？扫描它，或粘贴到这里。</string>
+    <string name="settings_pair_scan">扫描它的代码</string>
+    <string name="settings_pair_use_code">使用此代码</string>
+    <string name="settings_pair_sending">正在发送…</string>
+    <string name="settings_pair_sent">已发送。设备请求关联时，请在这里批准。</string>
+    <string name="settings_pair_not_a_code">这不是 Haven 设备代码。</string>
+    <string name="settings_pair_expired">该代码已过期。请在另一台设备上显示新的代码。</string>
+    <string name="settings_pair_not_primary">只有你的主设备可以关联新设备。</string>
+    <string name="settings_pair_unreachable">无法连接到那台设备。请保持它的页面打开，然后重试。</string>
     <string name="settings_not_primary_device">这不是我的主设备</string>
     <string name="settings_link_new_device_title">关联新设备</string>
     <string name="settings_enroll_qr_instructions">在你的新设备上选择“将这台添加为我的另一台设备”，然后扫描这个二维码。它会获得自己的可撤销密钥，绝不是你的主密钥。</string>

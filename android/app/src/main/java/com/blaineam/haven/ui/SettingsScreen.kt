@@ -1261,6 +1261,26 @@ private fun AuthorizedDevicesCard() {
     val seedless = remember { HavenNet.isSeedless }
     val ticketUri by HavenNet.seedlessTicketUri            // "" while no ticket is offered
     val enrollPrompt by HavenNet.seedlessPendingRequest    // a new device asking to link (null = none)
+    // Scan-to-link: answering a code the OTHER device shows.
+    var showPairEntry by remember { mutableStateOf(false) }
+    var showPairScan by remember { mutableStateOf(false) }
+    var pairText by remember { mutableStateOf("") }
+    var pairNote by remember { mutableStateOf<Int?>(null) }
+    val pairScope = rememberCoroutineScope()
+    val answerPair: (String) -> Unit = { code ->
+        showPairEntry = false
+        showPairScan = false
+        pairNote = R.string.settings_pair_sending
+        pairScope.launch {
+            pairNote = when (HavenNet.answerPairCode(code)) {
+                HavenNet.PairAnswer.SENT -> { pairText = ""; R.string.settings_pair_sent }
+                HavenNet.PairAnswer.NOT_A_CODE -> R.string.settings_pair_not_a_code
+                HavenNet.PairAnswer.EXPIRED -> R.string.settings_pair_expired
+                HavenNet.PairAnswer.NOT_PRIMARY -> R.string.settings_pair_not_primary
+                HavenNet.PairAnswer.UNREACHABLE -> R.string.settings_pair_unreachable
+            }
+        }
+    }
     LaunchedEffect(Unit) { DeviceCredentialStore.refresh() }
 
     Column(Modifier.fillMaxWidth().havenCard().padding(16.dp)) {
@@ -1329,6 +1349,14 @@ private fun AuthorizedDevicesCard() {
                 modifier = Modifier.clip(RoundedCornerShape(8.dp))
                     .clickable { HavenNet.enrollMintTicket() }.padding(vertical = 8.dp),
             )
+            // Scan-to-link, the other way round: a device that cannot scan or be typed into (a
+            // browser on a borrowed computer) shows a code of its own and THIS device answers it.
+            Text(
+                stringResource(R.string.settings_pair_scan_arrow), color = HavenTheme.pink, fontSize = 14.sp, fontWeight = FontWeight.Medium,
+                modifier = Modifier.clip(RoundedCornerShape(8.dp))
+                    .clickable { pairNote = null; showPairEntry = true }.padding(vertical = 8.dp),
+            )
+            pairNote?.let { Text(stringResource(it), color = HavenTheme.textSecondary, fontSize = 12.sp) }
             Text(
                 stringResource(R.string.settings_not_primary_device), color = Color(0xFFF87171), fontSize = 14.sp, fontWeight = FontWeight.Medium,
                 modifier = Modifier.clip(RoundedCornerShape(8.dp))
@@ -1354,6 +1382,43 @@ private fun AuthorizedDevicesCard() {
                 qr?.let { Image(it, stringResource(R.string.settings_enroll_qr_desc),
                     Modifier.size(260.dp).clip(RoundedCornerShape(12.dp)).background(Color(0xFF101018)).padding(8.dp)) }
             }
+        }
+    }
+
+    // PRIMARY, scan-to-link: paste the other device's code, or scan it.
+    if (showPairEntry) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { showPairEntry = false }, containerColor = HavenTheme.card,
+            title = { Text(stringResource(R.string.settings_pair_title), color = HavenTheme.textPrimary) },
+            text = {
+                Column {
+                    Text(stringResource(R.string.settings_pair_hint), color = HavenTheme.textSecondary, fontSize = 13.sp)
+                    Spacer(Modifier.height(10.dp))
+                    androidx.compose.material3.OutlinedTextField(
+                        value = pairText, onValueChange = { pairText = it }, singleLine = true,
+                        label = { Text("haven-pair:…") }, modifier = Modifier.fillMaxWidth(),
+                        colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = HavenTheme.pink, cursorColor = HavenTheme.pink, focusedLabelColor = HavenTheme.pink),
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Text(stringResource(R.string.settings_pair_scan), color = HavenTheme.pink, fontSize = 14.sp, fontWeight = FontWeight.Medium,
+                        modifier = Modifier.clip(RoundedCornerShape(8.dp))
+                            .clickable { showPairEntry = false; showPairScan = true }.padding(vertical = 8.dp))
+                }
+            },
+            confirmButton = {
+                Text(stringResource(R.string.settings_pair_use_code), color = HavenTheme.pink,
+                    modifier = Modifier.clickable(enabled = pairText.isNotBlank()) { answerPair(pairText) }.padding(8.dp))
+            },
+            dismissButton = {
+                Text(stringResource(R.string.common_cancel), color = HavenTheme.textSecondary,
+                    modifier = Modifier.clickable { showPairEntry = false }.padding(8.dp))
+            },
+        )
+    }
+    if (showPairScan) {
+        FullScreenOverlay(onDismiss = { showPairScan = false }) {
+            QrScannerScreen(onResult = { answerPair(it) }, onCancel = { showPairScan = false })
         }
     }
 

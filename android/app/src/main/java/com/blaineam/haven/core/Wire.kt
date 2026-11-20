@@ -27,6 +27,9 @@ object Wire {
      *  account key. A linked browser has no other way to learn a relay's URL + token. Desktop
      *  `wire::RELAY_INTERFACE`, iOS frame 37. (36 is iOS's history hand-off nudge.) */
     const val RELAY_INTERFACE: Int = 37
+    /** Scan-to-link offer: an enrollment ticket for a device that SHOWED a `haven-pair:` code, sealed
+     *  under that code's secret (core `haven_p2p::pair`). Desktop `wire::PAIR_OFFER`, iOS frame 38. */
+    const val PAIR_OFFER: Int = 38
     const val PRESIGN: Int = 20      // S3 pre-signed URL pool bootstrap
     const val DEVICE_ENROLL: Int = 24 // a device asks its primary to authorize it (multi-device, iOS-compat)
     const val DEVICE_GRANT: Int = 25  // the primary returns a signed credential to the requesting device

@@ -9,6 +9,22 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Fixed - A friend you added by taking THEIR invite could be out of reach for minutes (iPhone, iPad, Mac)
+When someone's hello arrives, the app answers with its recent posts. On Android that answer has always included where the
+circle's relays are; on Apple devices it did not — a new friend learned the relays only from a broadcast repeated every ten
+minutes on a phone. Approving a request hid this, because approval announces at once. Taking someone's invite did not: a friend
+with no relay of their own then had nowhere to exchange anything with you, and their posts, replies and circle settings did not
+arrive until the next announcement. The answer to a hello now carries the circle's live relays, addressed to that person. Found
+by an iPhone taking the invite of an account with no relay: nothing arrived in seven minutes; with the fix the same exchange
+completes in seconds. No security impact: the announcement is sealed under the circle's key exactly as before, and goes only to
+a contact. Regression test: `testAnsweringAContactsHelloTellsThemWhereTheCirclesRelaysAre`.
+
+### Fixed - A screen shared from the desktop app with the camera off showed as an avatar on phones (desktop)
+The desktop app sends a shared screen in the camera's place and tells the others whether its camera is on. It announced "camera
+off" when a call began and did not correct that when a screen share started, so iPhone and Android — which take the announcement
+at its word — drew the avatar over the screen being shared. The app now announces that its video is live while it is sharing,
+and goes back to the camera's state when the share stops. A screen can also be shared from a computer with no camera at all.
+No security impact. Regression test: `call screen share: with the camera off, peers are told the video slot is live while sharing`.
 ### Added - The web client is tested with the iPhone app, in video and group calls, and with a Mac as its host (not shipped; `feat/web-client`)
 Calls between browsers and the Android and iPhone apps now cover video and a three-way group call, in both call directions, and
 pass; this was the first run of the iPhone's and Android's per-device call sealing. The Mac app was run as a web host for the

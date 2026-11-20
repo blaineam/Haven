@@ -24,6 +24,16 @@
     }
   }
 
+  /** "Firefox on Windows" — from the user agent, best effort; only ever a label. */
+  function describeBrowser() {
+    const ua = navigator.userAgent || "";
+    const browser = /Edg\//.test(ua) ? "Edge" : /OPR\//.test(ua) ? "Opera" : /Firefox\//.test(ua) ? "Firefox"
+      : /Chrome\//.test(ua) ? "Chrome" : /Safari\//.test(ua) ? "Safari" : "Browser";
+    const os = /Windows/.test(ua) ? "Windows" : /Android/.test(ua) ? "Android" : /iPhone|iPad|iPod/.test(ua) ? "iOS"
+      : /Mac OS X/.test(ua) ? "Mac" : /CrOS/.test(ua) ? "ChromeOS" : /Linux/.test(ua) ? "Linux" : "";
+    return os ? `${browser} on ${os}` : browser;
+  }
+
   let haven, app, storage, storageModule;
   const ready = (async () => {
     haven = await import("./pkg/haven_web.js");
@@ -40,6 +50,8 @@
     app = new haven.WebApp((name, json) => emit(name, JSON.parse(json)));
     // The relay that served this page is, by construction, one this device can reach.
     app.setRelays([location.origin]);
+    // What the person approving this browser will read on their other device.
+    app.setDeviceLabel(describeBrowser());
     if (!app.needsOnboarding()) await app.boot();
   })();
   ready.catch((e) => console.error("Haven failed to start:", e));

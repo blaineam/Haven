@@ -44,6 +44,9 @@ pub struct DeviceRoster {
     pub revoked: Vec<String>,
 }
 
+#[cfg(target_arch = "wasm32")]
+static WEB_LABEL: parking_lot::Mutex<String> = parking_lot::Mutex::new(String::new());
+
 impl DeviceRoster {
     fn file(paths: &Paths) -> PathBuf {
         paths.root.join("device-roster.json")
@@ -77,8 +80,28 @@ impl DeviceRoster {
     pub fn device_bundle(&self) -> Vec<u8> {
         self.device_account().public_bundle()
     }
+    /// What this device calls itself when it asks to be linked. A browser's name always carries
+    /// the web-device mark (`haven_p2p::webpolicy`): it is how the account, and through the signed
+    /// credential every member, knows this device is one.
     pub fn device_name() -> String {
-        format!("{} desktop", std::env::consts::OS)
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            format!("{} desktop", std::env::consts::OS)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let label = WEB_LABEL.lock().clone();
+            haven_ffi::web_device_name(if label.is_empty() { "Browser".into() } else { label })
+        }
+    }
+
+    /// The page's own description of itself ("Firefox on Windows"), used in [`Self::device_name`].
+    #[cfg(target_arch = "wasm32")]
+    pub fn set_web_label(label: &str) {
+        // Printable, short, and never able to smuggle a second mark or a line break into a name
+        // that other people's devices will show.
+        let clean: String = label.chars().filter(|c| !c.is_control()).take(48).collect();
+        *WEB_LABEL.lock() = clean.trim().to_string();
     }
 
     pub fn is_enabled(&self) -> bool {

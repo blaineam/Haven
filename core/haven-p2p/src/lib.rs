@@ -43,6 +43,7 @@ pub mod selfsync;
 pub mod social;
 pub mod transport;
 pub mod treekem;
+pub mod webpolicy;
 /// The shared binary wire cursor. Internal plumbing, not part of the public surface —
 /// five modules each held a private copy of it before consolidation.
 pub(crate) mod wire;

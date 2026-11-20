@@ -770,6 +770,25 @@ pub struct RelayMediaLimitsDto {
 
 
 
+/// A circle's standing on web devices, for its settings screen.
+#[derive(Serialize)]
+pub struct CircleWebAccessDto {
+    /// The circle's answer: web devices get its keys only when true.
+    pub allowed: bool,
+    /// My account's own position.
+    pub mine: bool,
+    /// This device can state a position (it holds the account seed).
+    pub can_sign: bool,
+    /// Decided by the circle's admins (a creator-bound circle) rather than by every member.
+    pub decided_by_admins: bool,
+    /// My position counts toward the answer.
+    pub i_decide: bool,
+    /// Where everyone has to agree: the accounts (hex) that have not said yes.
+    pub waiting_on: Vec<String>,
+    /// This device is itself a web device.
+    pub this_is_web: bool,
+}
+
 #[derive(Serialize)]
 pub struct WebAccessDto {
     /// This build ships the web client, so its relay CAN serve it.
@@ -1149,6 +1168,28 @@ pub fn remove_from_circle(engine: Eng, circle_id: String, contact_id_hex: String
 /// grant was authored — false if this device isn't authorized to delegate.
 pub fn grant_circle_admin(engine: Eng, circle_id: String, admin_hex: String) -> bool {
     engine.grant_circle_admin(circle_id, admin_hex)
+}
+
+/// Where a circle stands on web devices (browsers linked to a member's account).
+pub fn circle_web_access(engine: Eng, circle_id: String) -> CircleWebAccessDto {
+    let cid = if circle_id.is_empty() { DEFAULT_CIRCLE.to_string() } else { circle_id };
+    let s = engine.circle_web_access(&cid);
+    CircleWebAccessDto {
+        allowed: s.allowed,
+        mine: s.mine,
+        can_sign: s.can_sign,
+        decided_by_admins: s.decided_by_admins,
+        i_decide: s.i_decide,
+        waiting_on: s.waiting_on,
+        this_is_web: engine.is_web_device(),
+    }
+}
+
+/// State my account's position on web devices in a circle. False when this device cannot (a linked
+/// device, and so every browser, holds no account key).
+pub fn set_circle_web_access(engine: Eng, circle_id: String, allow: bool) -> bool {
+    let cid = if circle_id.is_empty() { DEFAULT_CIRCLE.to_string() } else { circle_id };
+    engine.set_circle_web_access(cid, allow)
 }
 
 /// The current admin accounts (node hex) of a circle — the creator plus creator-delegated admins.

@@ -84,6 +84,13 @@ impl WebApp {
         haven_client::net::set_origin_relays(derp_urls);
     }
 
+    /// How this browser describes itself when it asks to be linked ("Firefox on Windows"). The
+    /// engine adds the web-device mark; the account signs the result into this device's credential.
+    #[wasm_bindgen(js_name = setDeviceLabel)]
+    pub fn set_device_label(&self, label: &str) {
+        haven_client::roster::DeviceRoster::set_web_label(label);
+    }
+
     /// Does this browser hold no identity yet (so the page must show the link screen)?
     #[wasm_bindgen(js_name = needsOnboarding)]
     pub fn needs_onboarding(&self) -> Result<bool, JsError> {

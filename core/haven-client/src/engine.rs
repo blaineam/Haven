@@ -400,6 +400,10 @@ struct PendingEnrollRequest {
     name: String,
     /// The ticket secret this request authenticated against (MACs the grant).
     secret: [u8; 32],
+    /// The request came under a ticket minted for a scanned `haven-pair:` code — the device showed
+    /// a code, which is what a browser does. Its credential is issued as a WEB device whatever name
+    /// it gave.
+    scanned: bool,
 }
 
 /// Result of applying front-door prefs when the relay HTTP interface starts.
@@ -1085,6 +1089,11 @@ impl Engine {
     /// True on a seedless device (no account master seed). Drives the enroll / self-sync-grant flow.
     pub fn is_seedless(&self) -> bool {
         self.seed.is_none()
+    }
+
+    /// Is this device a web device (its account-signed credential carries the web mark)?
+    pub fn is_web_device(&self) -> bool {
+        self.social.is_web_device()
     }
 
     /// (seedless, linked, linking) for the UI — `linking` = seedless but the grant hasn't landed yet.
@@ -2635,6 +2644,7 @@ impl Engine {
             let Ok(req) = haven_ffi::enroll::enroll_verify_request(secret.to_vec(), wire.to_vec(), now, 600) else {
                 continue;
             };
+            let scanned = bound_to.is_some();
             // A ticket minted for a scanned code enrolls the device that code names and no other.
             if let Some(code) = bound_to {
                 if !haven_ffi::enroll::pair_code_matches(code, req.device_bundle.clone()).unwrap_or(false) {
@@ -2659,6 +2669,7 @@ impl Engine {
                     device_hex: device_hex.clone(),
                     name: req.name.clone(),
                     secret,
+                    scanned,
                 });
             }
             if let Some(app) = self.app.lock().clone() {
@@ -2693,6 +2704,14 @@ impl Engine {
             }
         };
         let now = now_ms() / 1000;
+        // The name is what the ACCOUNT signs into the device's credential, and a web device's
+        // carries the web mark there (per-circle consent, `haven_p2p::webpolicy`). A browser marks
+        // its own name; a device that linked by SHOWING a code is marked here regardless of what it
+        // called itself, so a page cannot talk its way out of being one on that path.
+        let mut req = req;
+        if req.scanned {
+            req.name = haven_ffi::web_device_name(req.name.clone());
+        }
         // 1. Union the device into my signed roster (the existing register/resign path).
         {
             let bundle = self.account_bundle();
@@ -3079,6 +3098,28 @@ impl Engine {
             self.emit_changed();
         }
         ok
+    }
+
+    /// State this account's position on web devices (browsers) in a circle. Only a device holding
+    /// the account seed can; the engine re-keys the circle if its answer changes, and the position
+    /// rides the circle's lane to the other members. Re-pins the creator first, like the admin
+    /// grant, so an owner's word counts the first time it is given this launch.
+    pub fn set_circle_web_access(self: &Arc<Self>, circle_id: String, allow: bool) -> bool {
+        let created = self.prefs.lock().created_circles.iter().any(|c| c == &circle_id);
+        if created {
+            self.social.set_circle_creator(circle_id.clone(), self.node_id_hex());
+        }
+        let ok = self.social.set_circle_web_access(circle_id, allow);
+        if ok {
+            self.persist();
+            self.emit_changed();
+        }
+        ok
+    }
+
+    /// Where a circle stands on web devices.
+    pub fn circle_web_access(&self, circle_id: &str) -> haven_ffi::CircleWebAccessFfi {
+        self.social.circle_web_access(circle_id.to_string())
     }
 
     /// The current admin accounts (hex) of a circle — the creator + creator-delegated admins.

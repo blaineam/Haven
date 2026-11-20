@@ -421,6 +421,8 @@ async fn enroll_ticket_lifecycle_for_a_new_seedless_device() {
     let (_, _, devices) = primary.device_roster_dto();
     assert!(devices.len() >= 2, "the approved device is in the signed roster ({} devices)", devices.len());
     assert!(primary.enroll_tickets.lock()[0].consumed, "tickets are single use");
+    // A device that scanned the PRIMARY's ticket keeps the name it gave: nothing marks it as web.
+    assert!(devices.iter().any(|d| d.name == "Laptop"));
 
     // A consumed ticket can't be replayed.
     primary.handle_seedless_enroll_request(None, &req);
@@ -459,6 +461,11 @@ async fn a_ticket_minted_for_a_scanned_code_enrolls_only_the_device_it_names() {
     let (_, _, devices) = primary.device_roster_dto();
     assert!(devices.iter().any(|d| d.node_hex == shown.device_node_hex()));
     assert!(devices.iter().all(|d| d.node_hex != other.device_node_hex()));
+    // A device that linked by SHOWING a code is enrolled as a web device whatever it called itself:
+    // the mark goes into the name the account signs.
+    let enrolled = devices.iter().find(|d| d.node_hex == shown.device_node_hex()).unwrap();
+    assert!(haven_ffi::is_web_device_name(enrolled.name.clone()), "{}", enrolled.name);
+    assert!(enrolled.name.ends_with("Browser"));
 }
 
 #[tokio::test]

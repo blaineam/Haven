@@ -132,6 +132,14 @@ async fn run() -> AnyResult<()> {
                 println!("TICKET{tickets}={}", engine.mint_enroll_ticket().map_err(|e| e.to_string())?);
                 continue;
             }
+            // `!web on|off` states this account's position on web devices in the circle
+            // (`WEB on|off allowed=<bool>`).
+            if let Some(v) = line.strip_prefix("!web ") {
+                let on = v.trim() == "on";
+                let ok = engine.set_circle_web_access(CIRCLE.into(), on);
+                println!("WEB {} set={ok} allowed={}", if on { "on" } else { "off" }, engine.circle_web_access(CIRCLE).allowed);
+                continue;
+            }
             // `!pair <haven-pair: code>` answers a code another device is showing (scan-to-link):
             // `PAIRED` once the offer was delivered, `PAIRFAIL <why>` otherwise.
             if let Some(code) = line.strip_prefix("!pair ") {

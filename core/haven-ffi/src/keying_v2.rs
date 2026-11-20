@@ -1489,7 +1489,9 @@ fn sync_roster(st: &mut NetState, idx: usize) {
     }
     let Some(public) = public_state(shadow, &cur.tip_hash) else { return };
     let me = my_device_id(st);
-    let authorized: Vec<[u8; 32]> = shadow_device_leaves(st, idx).iter().map(|(b, _)| b.node_id_bytes()).collect();
+    let leaves = shadow_device_leaves(st, idx);
+    let authorized: Vec<[u8; 32]> = leaves.iter().map(|(b, _)| b.node_id_bytes()).collect();
+    let web: HashSet<[u8; 32]> = leaves.iter().filter(|(_, c)| c.is_web()).map(|(b, _)| b.node_id_bytes()).collect();
     // Off the agreed tip only the revocation Removes are authored (see `author_commit`).
     let on_agreed = agreed_tip(shadow).is_none_or(|tip| tip == cur.tip_hash);
     let mut removes: Vec<u32> = Vec::new();
@@ -1520,7 +1522,10 @@ fn sync_roster(st: &mut NetState, idx: usize) {
                 adds.push(kp);
             }
             Some(_) => {}
-            None if public.removed.contains(device) => {} // removal is sticky
+            // Removal is sticky — except for a WEB device, which is in `authorized` only while
+            // the circle allows web devices: it was Removed because the circle stopped allowing
+            // them, and the circle saying yes again is the explicit, signed act that re-admits it.
+            None if public.removed.contains(device) && !web.contains(device) => {}
             None => adds.push(kp),
         }
     }

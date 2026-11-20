@@ -166,6 +166,7 @@ window.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeModal
 // Stroked glyphs shaped after the SF Symbols the macOS build names, so the two read as one app.
 // `fill` entries are filled shapes (paperplane.fill, person.2.fill…) — the rest stroke.
 const ICONS = {
+  "globe": { d: "M12 3a9 9 0 100 18 9 9 0 000-18zM3 12h18M12 3c2.6 2.4 4 5.6 4 9s-1.4 6.6-4 9c-2.6-2.4-4-5.6-4-9s1.4-6.6 4-9z" },
   "chevron.down": { d: "M4 8l6 6 6-6" },
   "chevron.right": { d: "M9 5l7 7-7 7" },
   "person.2.fill": { fill: true, d: "M9 11.2a3.4 3.4 0 100-6.8 3.4 3.4 0 000 6.8zm7 .3a2.9 2.9 0 100-5.8 2.9 2.9 0 000 5.8zM9 12.8c-3 0-5.6 1.7-5.6 3.9v1.1a.8.8 0 00.8.8h9.6a.8.8 0 00.8-.8v-1.1c0-2.2-2.6-3.9-5.6-3.9zm7 .2c-.7 0-1.4.1-2 .3 1.2 1 1.9 2.2 1.9 3.4v1.9h4.3a.8.8 0 00.8-.8v-.9c0-2-2.3-3.9-5-3.9z" },
@@ -1265,6 +1266,8 @@ async function renderFeed() {
   if (upgrade) list.append(upgrade);
   const nudge = await relayNudgeBanner(state.activeCircle, (active || {}).member_count || 0);
   if (nudge) list.append(nudge);
+  const webBlocked = await webBlockedBanner(state.activeCircle);
+  if (webBlocked) list.append(webBlocked);
   list.append(await storiesTray(storyItems));
   if (!items.length) {
     list.append(el("div", { class: "empty" },
@@ -4004,6 +4007,60 @@ async function circleSheet() {
   await manageCircleDialog(circles.find((c) => c.id === state.activeCircle));
 }
 
+// ---- Web access, per circle ---------------------------------------------------------------
+// A browser linked to someone's account reads a circle only when the circle allows web devices
+// (core `webpolicy`): its admins decide for a circle that has a creator, and every member has to
+// agree for one that does not (older circles, direct messages). This is each account's own
+// switch, plus a plain statement of where the circle stands and who it is waiting on.
+async function circleWebAccessSection(circleId, redraw) {
+  const s = await invoke("circle_web_access", { circleId }).catch(() => null);
+  if (!s) return null;   // an engine that predates it
+  const contacts = await invoke("contacts").catch(() => []);
+  const nameOf = (hex) => (contacts.find((c) => c.id_hex.toLowerCase() === hex.toLowerCase()) || {}).name;
+  const chk = el("input", { type: "checkbox", style: "width:auto", id: "cwa-switch" });
+  chk.checked = s.mine;
+  chk.disabled = !s.can_sign;
+  chk.onchange = async () => {
+    const want = chk.checked;
+    const ok = await invoke("set_circle_web_access", { circleId, allow: want }).catch(() => false);
+    if (!ok) { chk.checked = !want; toast(t("cwa_cant")); return; }
+    toast(t("updated_toast"));
+    if (redraw) redraw();
+  };
+  let who;
+  if (s.decided_by_admins) who = s.i_decide ? t("cwa_admin_you") : t("cwa_admin_other");
+  else if (!s.waiting_on.length) who = t("cwa_everyone_done");
+  else {
+    const others = s.waiting_on.map(nameOf).filter(Boolean);
+    const unnamed = s.waiting_on.length - others.length - (s.mine ? 0 : 1);
+    const parts = [...(s.mine ? [] : [t("cwa_you")]), ...others, ...(unnamed > 0 ? [t("cwa_n_others", unnamed)] : [])];
+    who = t("cwa_everyone_waiting", parts.join(", "));
+  }
+  return el("div", { class: "col", style: "gap:4px", id: "cwa" },
+    el("label", { class: "row", style: "gap:8px;align-items:center" }, chk, el("span", { style: "flex:1" }, t("cwa_mine"))),
+    el("div", { class: s.allowed ? "small ok-text" : "muted small", id: "cwa-state" }, s.allowed ? t("cwa_on") : t("cwa_off")),
+    el("div", { class: "muted small" }, who),
+    s.can_sign ? null : el("div", { class: "muted small" }, s.this_is_web ? t("cwa_browser_cant") : t("cwa_linked_cant")),
+    el("div", { class: "muted small", style: "opacity:0.8" }, t("cwa_warn")));
+}
+
+/// In a browser: say why a circle is empty when it is empty because it has not allowed browsers.
+async function webBlockedBanner(circleId) {
+  if (!HOST_WEB) return null;
+  const s = await invoke("circle_web_access", { circleId }).catch(() => null);
+  if (!s || s.allowed) return null;
+  return el("div", { class: "card", id: "cwa-blocked", style: "margin-bottom:10px" },
+    el("div", { style: "font-weight:600" }, t("cwa_blocked_t")),
+    el("div", { class: "muted small", style: "white-space:normal" }, t("cwa_blocked_s")));
+}
+
+/// The web-browser switch for one conversation.
+async function dmWebAccessSheet(dm) {
+  const section = await circleWebAccessSection(dm.id, () => { closeModal(); dmWebAccessSheet(dm); });
+  if (!section) return;
+  sheet(t("cwa_title"), el("div", { class: "col" }, el("div", { class: "muted small" }, dm.name), section));
+}
+
 async function manageCircleDialog(circle) {
   if (!circle) return;
   const isDefault = circle.id === "default";
@@ -4070,6 +4127,7 @@ async function manageCircleDialog(circle) {
     }
   }
   relaySection.append(el("button", { class: "btn small ghost", style: "align-self:flex-start", onclick: () => relaySheet() }, t("manage_relays_link")));
+  const webSection = await circleWebAccessSection(circle.id, () => { closeModal(); manageCircleDialog(circle); });
 
   // The circle's own name (nickname-resolved), not a hardcoded "My Circle" — this sheet manages
   // whichever circle is active.
@@ -4094,6 +4152,8 @@ async function manageCircleDialog(circle) {
     el("label", { class: "muted small", style: "margin-top:6px" }, t("relays_for_circle")),
     el("div", { class: "muted small" }, t("relays_for_circle_hint")),
     relaySection,
+    webSection ? el("label", { class: "muted small", style: "margin-top:6px" }, t("cwa_title")) : null,
+    webSection,
     el("label", { class: "muted small", style: "margin-top:6px" }, t("members_label")),
     memberList,
     isDefault ? null : el("button", { class: "btn danger", style: "margin-top:6px", onclick: async () => {
@@ -5238,6 +5298,8 @@ async function renderThread(root, dm) {
         el("div", { class: "dm-name" }, dm.name),
         presence),
       el("div", { class: "spacer" }),
+      // A conversation is a circle of two with no owner: a browser reads it only if BOTH agree.
+      el("button", { class: "icon-btn glass", id: "dm-web", title: t("cwa_title"), "aria-label": t("cwa_title"), onclick: () => dmWebAccessSheet(dm) }, icon("globe")),
       partner ? el("button", { class: "icon-btn glass", title: t("audio_call"), "aria-label": t("audio_call"), onclick: () => callStart([partner], dm.name, false) }, icon("phone.fill")) : null,
       partner ? el("button", { class: "icon-btn glass", title: t("video_call"), "aria-label": t("video_call"), onclick: () => callStart([partner], dm.name, true) }, icon("video.fill")) : null,
     ),

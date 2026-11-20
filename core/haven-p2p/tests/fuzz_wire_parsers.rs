@@ -87,6 +87,7 @@ fn parse_watching_allocs(t: &Target, bytes: &[u8]) -> (std::result::Result<bool,
     (r, PEAK_ALLOC.load(Ordering::Relaxed))
 }
 
+use haven_p2p::webpolicy::CircleWebPolicy;
 use haven_p2p::pair::PairCode;
 use haven_p2p::device::{AdminGrant, CircleUpgrade, DeviceCredential, DeviceList, SeedDropCapability};
 use haven_p2p::groupkey::{seal_event_in_epoch, EpochEnvelope};
@@ -504,6 +505,15 @@ fn targets() -> Vec<Target> {
                 sig: r.bytes(96),
             }
             .to_bytes()],
+            false
+        ),
+        // An account's signed position on web devices in a circle. The signature is the tail
+        // (`r.rest()`), like the admin grant, so a trailer lands in it and fails at verify.
+        target!(
+            "webpolicy::CircleWebPolicy",
+            CircleWebPolicy,
+            vec![CircleWebPolicy { circle_id: r.bytes(18), signer: r.arr32(), allow: true, version: 7, sig: r.bytes(96) }
+                .to_bytes()],
             false
         ),
         // A code shown on one device and typed or scanned into another: bytes straight from a

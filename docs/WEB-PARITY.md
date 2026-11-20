@@ -352,9 +352,16 @@ Next, in order:
         out of the circle and lets it in. The switch itself, through the app's own code
         (`host_web_access`): off by default (`/app/` is 404), on serves it at once, off again
         stops it at once, and the rest of the front door stays up throughout.
-      - [ ] Not run: a physical device, and the Mac host behind its Cloudflare tunnel (the
-            desktop engine's tunnel path is tested; the Mac app starts its tunnel through
-            different code).
+      - **And behind its own Cloudflare tunnel** (2 of 2): the same build with the tunnel helper
+        embedded and the front door left on automatic. The browser does everything through the
+        `trycloudflare.com` address the Mac app announced. Worth knowing: switching Web access
+        on or off restarts the front door, and a free tunnel gets a new address each time it
+        starts — so a browser opened at the old address has to be reopened at the new one.
+      - Seen once in about a dozen Android call runs and not reproduced: the app crashed with a
+        Compose "reading a state that was created after the snapshot was taken" error during a
+        call, on a heavily loaded machine. Not traced to anything in this work; recorded so it
+        is not lost.
+      - [ ] Not run: a physical device.
 - [x] **Calls** (`web-client/smoke/call.mjs`): accounts that are contacts on one relay, each
       with a browser linked to it; one browser calls, the other rings and answers with its real
       Accept button, the peer connection comes up in both, audio flows both ways, and hanging up

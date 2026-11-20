@@ -907,6 +907,12 @@ async fn call_frames_are_sealed_signed_parsed_and_gated_on_the_contact_list() {
     assert_eq!(hangup["kind"], "hangup");
     assert_eq!(receive_call(&a, &b, wire::CALL_CAMERA, &callwire::camera_state(&ah, "sess", true)).unwrap()["on"], true);
     assert_eq!(receive_call(&a, &b, wire::CALL_CAMERA, &callwire::camera_state(&ah, "sess", false)).unwrap()["on"], false);
+    // A camera-state frame that arrives after a LATER one from the same person is a stale copy
+    // off the slower lane: dropped, so "on" cannot overwrite the "off" that followed it.
+    assert_eq!(receive_call(&a, &b, wire::CALL_CAMERA, &callwire::camera_state_stamped(&ah, "sess", true, 100)).unwrap()["on"], true);
+    assert_eq!(receive_call(&a, &b, wire::CALL_CAMERA, &callwire::camera_state_stamped(&ah, "sess", false, 200)).unwrap()["on"], false);
+    assert!(receive_call(&a, &b, wire::CALL_CAMERA, &callwire::camera_state_stamped(&ah, "sess", true, 100)).is_none(), "the stale 'on' is dropped");
+    assert_eq!(receive_call(&a, &b, wire::CALL_CAMERA, &callwire::camera_state_stamped(&ah, "sess", true, 300)).unwrap()["on"], true);
     for (t, kind) in [(wire::SDP_OFFER, "offer"), (wire::SDP_ANSWER, "answer"), (wire::ICE, "ice")] {
         let ev = receive_call(&a, &b, t, &callwire::signal(&ah, "sess", br#"{"sdp":"x"}"#)).unwrap();
         assert_eq!(ev["kind"], kind);

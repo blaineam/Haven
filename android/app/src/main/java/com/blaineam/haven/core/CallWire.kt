@@ -80,12 +80,30 @@ object CallWire {
     fun handledElsewhere(myHex: String, sessionId: String): ByteArray = accept(myHex, sessionId)
 
     /** Frame 22: tell peers my camera is on/off so they show my avatar instead of a frozen last frame. */
-    fun cameraState(myHex: String, sessionId: String, on: Boolean): ByteArray {
+    /**
+     * `[hex64][lp sessionId][u64 LE stamp][flag]`. The stamp says WHEN the state was set: a call
+     * frame travels by more than one lane (sent directly, and left on the relay for the in-call
+     * poll), so "on" can arrive after the "off" that followed it, and the receiver drops the stale
+     * one ([cameraStamp]). A reader that predates the stamp takes the leading id and the last byte,
+     * as it always did.
+     */
+    fun cameraState(myHex: String, sessionId: String, on: Boolean, stamp: Long = System.currentTimeMillis()): ByteArray {
         val out = ArrayList<Byte>()
         myHex.toByteArray(Charsets.UTF_8).forEach { out.add(it) }
         Wire.lpAppend(out, sessionId.toByteArray(Charsets.UTF_8))
+        for (i in 0 until 8) out.add(((stamp ushr (8 * i)) and 0xff).toByte())
         out.add(if (on) 1 else 0)
         return out.toByteArray()
+    }
+
+    /** The stamp of a camera-state frame, or null for the older layout (applied as it arrives). */
+    fun cameraStamp(payload: ByteArray): Long? {
+        if (payload.size < 66) return null
+        val n = (payload[64].toInt() and 0xff) or ((payload[65].toInt() and 0xff) shl 8)
+        if (payload.size != 66 + n + 9) return null
+        var v = 0L
+        for (i in 0 until 8) v = v or ((payload[66 + n + i].toLong() and 0xff) shl (8 * i))
+        return v
     }
 
     /** (from, cameraOn). iOS reads only the leading hex + trailing flag byte, so we match that. */

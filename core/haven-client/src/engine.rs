@@ -242,6 +242,10 @@ struct DynState {
     /// Large media the person ASKED for in a browser (`media_download`): the one-time pass that lets
     /// [`Engine::web_defers_large`] fetch it. Cleared when the blob is released again.
     web_large_asked: std::collections::HashSet<String>,
+    /// Camera-state ordering (frame 22): the stamp of the last one sent, and the newest applied
+    /// from each peer — see [`Engine::camera_state_is_current`].
+    camera_stamp_sent: u64,
+    camera_stamp_seen: std::collections::HashMap<String, u64>,
 }
 
 /// Where a self-sync slot can be read/written: a Haven relay (by node hex) or the user's S3.
@@ -11904,7 +11908,7 @@ impl Engine {
             }),
             // Frame 22 — a peer's camera went on/off. Without it a peer who stops their video
             // leaves everyone staring at a frozen last frame instead of their avatar.
-            wire::CALL_CAMERA => callwire::parse_camera_state(body).map(|(from, on)| {
+            wire::CALL_CAMERA => callwire::parse_camera_state(body).filter(|(from, _)| self.camera_state_is_current(from, body)).map(|(from, on)| {
                 serde_json::json!({ "kind": "camera", "from": from, "on": on })
             }),
             _ => None,
@@ -12706,10 +12710,38 @@ impl Engine {
     /// the local video track leaves every peer staring at a frozen last frame instead of my avatar.
     /// Bounded by the call roster the caller passes; this is a user action, not a tick.
     pub fn call_camera_state(self: &Arc<Self>, session_id: String, on: bool, to: Vec<String>) {
-        let frame = callwire::camera_state(&self.node_id_hex(), &session_id, on);
+        // Stamped, and strictly later than the last one sent: two toggles in one millisecond must
+        // still be told apart by whoever receives them out of order.
+        let stamp = {
+            let mut st = self.dyn_state.lock();
+            st.camera_stamp_sent = now_ms().max(st.camera_stamp_sent + 1);
+            st.camera_stamp_sent
+        };
+        let frame = callwire::camera_state_stamped(&self.node_id_hex(), &session_id, on, stamp);
         for t in to {
             self.send_call_frame(wire::CALL_CAMERA, &frame, &t);
         }
+    }
+
+    /// Is this camera-state frame the newest heard from `from`? A frame older than one already
+    /// applied is a late copy from the slower lane and is dropped; one with no stamp (an older
+    /// sender) is applied as it arrives.
+    fn camera_state_is_current(&self, from: &str, body: &[u8]) -> bool {
+        let Some(stamp) = callwire::camera_state_stamp(body) else { return true };
+        // Per call: the stamp is the sender's clock, and a clock put back between two calls must
+        // not leave every later state looking stale.
+        let n = u16::from_le_bytes([body[64], body[65]]) as usize;
+        let session = String::from_utf8_lossy(&body[66..66 + n]).into_owned();
+        let mut st = self.dyn_state.lock();
+        if st.camera_stamp_seen.len() > 256 {
+            st.camera_stamp_seen.clear();
+        }
+        let last = st.camera_stamp_seen.entry(format!("{}|{session}", from.to_lowercase())).or_insert(0);
+        if stamp < *last {
+            return false;
+        }
+        *last = stamp;
+        true
     }
 
     /// QA-visible call state, pushed from the webview.

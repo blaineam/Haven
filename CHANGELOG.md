@@ -9,6 +9,13 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Fixed - A camera or screen-share change could be undone by an older one arriving late (all platforms)
+A call message can reach the other person by two routes at once, and the slower copy of "camera on" could arrive after the
+"camera off" that followed it, leaving a picture where an avatar belonged (or the reverse). The camera-state message now says
+when it was made, and a state older than the one already applied is ignored. Apps that predate this read the message exactly as
+before. No security impact. Regression tests: `a_camera_state_frame_carries_its_order_and_old_readers_still_read_it`, and the
+camera-state cases in the Android and Apple call tests.
+
 ### Fixed - In a call placed from the desktop app, later changes could fail to reach a phone (desktop; web client)
 The phone apps put every call-signalling message on the relay as well as sending it directly, and read the relay while they are
 in a call. The desktop engine only sent it directly. A call from the desktop app rang and connected, because the opening messages

@@ -513,6 +513,17 @@ final class CallsSignallingTests: XCTestCase {
         await until("their camera reads off") { self.cm.remoteCameraOff.contains(self.below.hex) }
         try inbound(22, from: below, lp(session()) + Data([1]))
         await until("their camera reads on") { !self.cm.remoteCameraOff.contains(self.below.hex) }
+        // A late copy of an OLDER state (off the slower lane) must not overwrite a newer one.
+        let later = UInt64(Date().timeIntervalSince1970 * 1000) + 60_000
+        func state(_ on: Bool, _ stamp: UInt64) -> Data { CallManager.cameraStateFrame(myHex: below.hex, sessionId: session(), on: on, stamp: stamp) }
+        XCTAssertEqual(CallManager.cameraStamp(state(true, later)), later)
+        XCTAssertNil(CallManager.cameraStamp(Data(below.hex.utf8) + lp(session()) + Data([1])), "the older layout carries no stamp")
+        cm.handleCameraState(state(false, later + 2))
+        XCTAssertTrue(cm.remoteCameraOff.contains(below.hex))
+        cm.handleCameraState(state(true, later + 1))
+        XCTAssertTrue(cm.remoteCameraOff.contains(below.hex), "a stale 'on' is dropped")
+        cm.handleCameraState(state(true, later + 3))
+        XCTAssertFalse(cm.remoteCameraOff.contains(below.hex))
         cm.handleCameraState(Data(third.hex.utf8) + Data([0]))   // not in the call: ignored
         XCTAssertFalse(cm.remoteCameraOff.contains(third.hex))
         XCTAssertEqual(cm.availableMicInputs().count, 0, "native macOS leaves device choice to the system")

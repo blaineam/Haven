@@ -236,6 +236,9 @@ object CallManager {
     private val hairpinPeers = HashSet<String>()
     /** Last ICE state per peer (call thread) — what [scheduleHairpinRace] reads. */
     private val lastIce = HashMap<String, PeerConnection.IceConnectionState>()
+    /** The newest camera-state stamp applied from each peer, and the last one I sent. */
+    private val cameraStampSeen = HashMap<String, Long>()
+    private var cameraStampSent = 0L
 
     // Active-speaker detection (Apple parity). Same threshold and debounce, so a group call
     // highlights the same person on every platform at the same moment.
@@ -785,9 +788,21 @@ object CallManager {
         connectPeerIfNeeded(a.from)
     }
 
+    /** Strictly later than the last one sent: two toggles in one millisecond are still ordered. */
+    private fun nextCameraStamp(): Long {
+        cameraStampSent = maxOf(System.currentTimeMillis(), cameraStampSent + 1)
+        return cameraStampSent
+    }
+
     private fun handleCameraState(body: ByteArray) {
         val (from, on) = CallWire.parseCameraState(body) ?: return
         if (!roster.contains(from)) return   // only a participant
+        // A frame older than one already applied is a late copy off the slower lane: dropped, so
+        // "on" cannot overwrite the "off" that followed it. No stamp (an older sender) = apply.
+        CallWire.cameraStamp(body)?.let { stamp ->
+            if (stamp < (cameraStampSeen[from] ?: 0L)) return
+            cameraStampSeen[from] = stamp
+        }
         if (on) remoteCameraOff.remove(from) else if (!remoteCameraOff.contains(from)) remoteCameraOff.add(from)
     }
 
@@ -979,7 +994,7 @@ object CallManager {
         // know show the avatar instead. Only the toggle announced this before, so the state every
         // call actually STARTS in was the one never sent.
         runCatching {
-            send(CallWire.CAMERA, CallWire.cameraState(myHex, sessionId, cameraOn.value), peer)
+            send(CallWire.CAMERA, CallWire.cameraState(myHex, sessionId, cameraOn.value, nextCameraStamp()), peer)
         }
         if (myHex < peer && mediaStarted) conn.makeOffer()   // smaller hex offers
         return conn
@@ -1456,7 +1471,8 @@ object CallManager {
             ?: Log.w(TAG, "camera: still no track after retry — this device cannot publish video")
         // Tell every peer so they swap to my avatar instead of freezing on my last camera frame.
         val on = cameraOn.value
-        invitees().forEach { send(CallWire.CAMERA, CallWire.cameraState(myHex, sessionId, on), it) }
+        val stamp = nextCameraStamp()
+        invitees().forEach { send(CallWire.CAMERA, CallWire.cameraState(myHex, sessionId, on, stamp), it) }
     }
     fun switchCamera() = onCall { if (!screenShare.value) capturer?.switchCamera(null) }
 
@@ -1658,6 +1674,7 @@ object CallManager {
         runCatching { CallHairpin.closeAll() }
         hairpinPeers.clear()
         lastIce.clear()
+        cameraStampSeen.clear()
         peers.values.forEach { it.close() }; peers.clear()
         releaseScreenCapture()
         screenShareStarting = false

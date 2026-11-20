@@ -79,6 +79,29 @@ pub fn camera_state(my_hex: &str, session_id: &str, on: bool) -> Vec<u8> {
     out
 }
 
+/// A camera-state frame that says WHEN it was made: `[hex64][lp session][u64 LE stamp][flag]`.
+///
+/// A call frame travels by more than one lane (sent directly, and left on the relay for the
+/// recipient's in-call poll), so "on" can arrive after the "off" that followed it. The stamp —
+/// the sender's own clock, compared only against that sender's earlier frames — lets a receiver
+/// drop the stale one. A receiver that predates this reads the leading id and the last byte, as
+/// it always did, and is unaffected.
+pub fn camera_state_stamped(my_hex: &str, session_id: &str, on: bool, stamp: u64) -> Vec<u8> {
+    let mut out = my_hex.as_bytes().to_vec();
+    lp_append(&mut out, session_id.as_bytes());
+    out.extend_from_slice(&stamp.to_le_bytes());
+    out.push(if on { 1 } else { 0 });
+    out
+}
+
+/// The stamp of a camera-state frame, when it carries one (see [`camera_state_stamped`]). `None`
+/// for the older layout, which a receiver applies as it arrives.
+pub fn camera_state_stamp(payload: &[u8]) -> Option<u64> {
+    let n = u16::from_le_bytes([*payload.get(64)?, *payload.get(65)?]) as usize;
+    let rest = payload.get(66 + n..)?;
+    (rest.len() == 9).then(|| u64::from_le_bytes(rest[..8].try_into().unwrap()))
+}
+
 /// `(from, camera_on)`. iOS/Android read only the leading hex and the trailing flag byte, so we
 /// match that rather than re-parsing the session id.
 pub fn parse_camera_state(payload: &[u8]) -> Option<(String, bool)> {
@@ -309,5 +332,19 @@ mod tests {
         let s = parse_signal(&p, "fallback").unwrap();
         assert_eq!(s.session_id, "fallback");
         assert!(s.json.starts_with(b"{"));
+    }
+
+    #[test]
+    fn a_camera_state_frame_carries_its_order_and_old_readers_still_read_it() {
+        let me = "ab".repeat(32);
+        let f = camera_state_stamped(&me, "sess-9", true, 1_800_000_000_123);
+        assert_eq!(parse_camera_state(&f), Some((me.clone(), true)), "the leading id and the last byte, as ever");
+        assert_eq!(camera_state_stamp(&f), Some(1_800_000_000_123));
+        assert_eq!(parse_camera_state(&camera_state_stamped(&me, "", false, 7)), Some((me.clone(), false)));
+        assert_eq!(camera_state_stamp(&camera_state_stamped(&me, "", false, 7)), Some(7));
+        // The older layout has no stamp; neither does anything too short or oddly sized.
+        assert_eq!(camera_state_stamp(&camera_state(&me, "sess-9", true)), None);
+        assert_eq!(camera_state_stamp(me.as_bytes()), None);
+        assert_eq!(camera_state_stamp(&[me.as_bytes(), &[0]].concat()), None);
     }
 }

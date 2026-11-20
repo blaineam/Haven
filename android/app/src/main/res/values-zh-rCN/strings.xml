@@ -502,6 +502,16 @@
     <string name="settings_pair_expired">该代码已过期。请在另一台设备上显示新的代码。</string>
     <string name="settings_pair_not_primary">只有你的主设备可以关联新设备。</string>
     <string name="settings_pair_unreachable">无法连接到那台设备。请保持它的页面打开，然后重试。</string>
+    <string name="circle_web_title">网页浏览器</string>
+    <string name="circle_web_allow">允许在网页浏览器中使用此圈子</string>
+    <string name="circle_web_on">已开启：成员关联的浏览器可以在此圈子中阅读和发布。</string>
+    <string name="circle_web_off">已关闭：浏览器不会收到此圈子的任何内容。</string>
+    <string name="circle_web_admin_you">你是此圈子的管理员，因此由你的选择决定。</string>
+    <string name="circle_web_admin_other">由此圈子的管理员决定。你的选择会被记录，但不会改变结果。</string>
+    <string name="circle_web_everyone_done">此圈子的所有人都已同意。</string>
+    <string name="circle_web_waiting">此圈子的所有人都需要同意。还差 %1$d 人。</string>
+    <string name="circle_web_linked_cant">请在你的主设备上更改此设置。</string>
+    <string name="circle_web_warn">浏览器中的 Haven 由中继提供，因此受到的保护不如应用。关闭后，浏览器不再收到任何新内容；已经收到的内容不会被收回。</string>
     <string name="settings_not_primary_device">这不是我的主设备</string>
     <string name="settings_link_new_device_title">关联新设备</string>
     <string name="settings_enroll_qr_instructions">在你的新设备上选择“将这台添加为我的另一台设备”，然后扫描这个二维码。它会获得自己的可撤销密钥，绝不是你的主密钥。</string>

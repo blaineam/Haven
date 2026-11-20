@@ -57,8 +57,15 @@ and the Mac teach the account's other devices the relay address (frame 37) the s
 linked from any of them. A browser can also be linked the other way round: it shows a code, and a device that has the account
 scans or is given it (desktop: Devices ▸ Add a device ▸ Scan its code; iPhone, iPad, Mac and Android: Link a device) — the
 ticket it answers with enrolls only the device that code names. Pictures and videos can be dropped onto the page. Still missing:
-shipping the bundle in any installer or store build, calls, per-circle consent; the phones' scanners are compiled but not yet
-run against a real browser. Design, trust statement and progress: [`docs/WEB-PARITY.md`](docs/WEB-PARITY.md) and D21 in
+shipping the bundle in any installer or store build, calls; the phones' screens for all of this are compiled but not yet run
+against a real browser.
+
+**A circle decides whether browsers may read it.** Linking a browser does not let it read anything: a circle's keys reach a
+browser only while that circle allows web devices. A circle with a creator follows its admins; an older circle or a direct
+message needs every member to agree, and one person withdrawing closes it again. The switch is in each circle's settings and in
+each conversation, on every platform, and a browser cannot flip it (it holds no account key). Turning it off stops anything new
+reaching browsers; it does not take back what they were already shown. An app from before this change does not know the rule
+and treats a browser like any other device until it is updated. Design, trust statement and progress: [`docs/WEB-PARITY.md`](docs/WEB-PARITY.md) and D21 in
 [`docs/DECISIONS.md`](docs/DECISIONS.md).
 
 ## 2.1.3 (security release, 2026-11-19)

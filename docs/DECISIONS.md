@@ -458,3 +458,30 @@ its owner, and labelled as weaker than a native app. The relay still writes no l
 request-signing transcript moved to `haven_p2p::httpauth` so relay, native clients and browser
 share one implementation; a new `core/haven-web` crate holds the browser transport. Before any
 release the web device class needs Tamarin coverage and CI guards (the security release bar).
+
+## D22 — A circle decides whether browsers may read it (2026-11-19)
+
+**Decision:** A web device (D21) receives a circle's keys only while that circle allows web
+devices. A creator-bound circle follows its admins' newest signed position. A circle with no
+provable owner — a legacy circle, a direct message — needs a signed yes from **every** member.
+Positions are signed with the account key (`CircleWebPolicy`), so a linked device, and therefore
+any browser, cannot state one. Silence is no. Spec and limits: [`WEB-PARITY.md`](WEB-PARITY.md).
+
+**Why two rules:** the creator-bound circles already have a verifiable authority (D-M3 admin
+grants) and people expect its admins to run it. The older circles and every conversation have
+none, and inventing one would repeat the first-claim-wins problem that circle upgrades exist to
+avoid. Where nobody can speak for a circle, nobody is spoken for.
+
+**Why the class lives in the device name:** every shipped app verifies device credentials and
+rosters over a fixed set of bytes. A new signed field would make them reject the roster of anyone
+who linked a browser; an unsigned trailer could be stripped by the same relay that serves the
+page (the model's `-DSTRIPPABLE` variant shows the result). The device name is already inside the
+signed bytes, so a mark there is tamper-proof and an old app simply displays it.
+
+**Consequences and limits:** the engine filters web devices out of key commits, the key trees,
+the dial set and media wraps per circle, re-keys on a change of answer, and refuses a key offered
+by a web device in a circle that has not agreed. An app that predates this ignores it; an
+up-to-date browser refuses what such an app offers. The mark is applied at approval — always when
+the browser linked by showing a code, by the browser itself otherwise. Circle names and member
+lists still reach a browser through the account's own device sync.
+

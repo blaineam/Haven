@@ -540,6 +540,16 @@
     <string name="settings_pair_expired">That code has expired. Show a fresh one on the other device.</string>
     <string name="settings_pair_not_primary">Only your primary device can link new devices.</string>
     <string name="settings_pair_unreachable">Couldn\'t reach that device. Keep its page open and try again.</string>
+    <string name="circle_web_title">Web browsers</string>
+    <string name="circle_web_allow">Allow this circle in web browsers</string>
+    <string name="circle_web_on">On: browsers that members have linked can read and post in this circle.</string>
+    <string name="circle_web_off">Off: browsers get nothing from this circle.</string>
+    <string name="circle_web_admin_you">You are an admin of this circle, so your choice decides it.</string>
+    <string name="circle_web_admin_other">This circle\'s admins decide. Your choice is recorded but does not change it.</string>
+    <string name="circle_web_everyone_done">Everyone in this circle has agreed.</string>
+    <string name="circle_web_waiting">Everyone in this circle has to agree. %1$d still to agree.</string>
+    <string name="circle_web_linked_cant">Change this on your primary device.</string>
+    <string name="circle_web_warn">A browser\'s copy of Haven is delivered by a relay, so it is less protected than the app. Turning this off stops browsers getting anything new; what they already received is not taken back.</string>
     <string name="settings_not_primary_device">This isn’t my primary device</string>
     <string name="settings_link_new_device_title">Link a new device</string>
     <string name="settings_enroll_qr_instructions">On your new device: “Add this as another of my devices”, then scan this code. It gets its own revocable key — never your master key.</string>

@@ -1450,6 +1450,20 @@ object HavenNet : InboundListener {
         return ok
     }
 
+    /** Where a circle (or a conversation) stands on web devices — browsers linked to a member's
+     *  account. Reads the engine: call off main. */
+    fun circleWebAccess(circleId: String): uniffi.haven_ffi.CircleWebAccessFfi? =
+        runCatching { social.circleWebAccess(circleId) }.getOrNull()
+
+    /** State my account's position on web devices in a circle. Account-key-signed (false on a linked
+     *  device), rides the circle's control lane, and re-keys the circle if its answer changes. */
+    fun setCircleWebAccess(circleId: String, allow: Boolean): Boolean {
+        if (core.seedless) return false                             // account-key holder only
+        val ok = runCatching { social.setCircleWebAccess(circleId, allow) }.getOrDefault(false)
+        if (ok) { persist(); scope.launch { runCatching { SelfSyncCoordinator.sync(social) } } }
+        return ok
+    }
+
     fun renameCircle(id: String, name: String) {
         runCatching { social.renameCircle(id, name) }; persist(); bumpCircles()
         selfSyncNudge()   // the new name rides the circle: record to my other devices now
@@ -2970,8 +2984,12 @@ object HavenNet : InboundListener {
             }
             pendingRequestSecret = secretHex
             val deviceHex = nodeHex(req.deviceBundle)
+            // The name is what the ACCOUNT signs into the device's credential, and a web device's
+            // carries the web mark there (per-circle consent, core `webpolicy`). A device that linked
+            // by SHOWING a code is marked here whatever it called itself; the prompt shows it too.
+            val name = if (bound != null) uniffi.haven_ffi.webDeviceName(req.name) else req.name
             scope.launch(Dispatchers.Main) {
-                seedlessPendingRequest.value = SeedlessEnrollPrompt(deviceHex, req.name, req.deviceBundle)
+                seedlessPendingRequest.value = SeedlessEnrollPrompt(deviceHex, name, req.deviceBundle)
             }
             return
         }

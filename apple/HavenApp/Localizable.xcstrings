@@ -45534,6 +45534,586 @@
           }
         }
       }
+    },
+    "Web browsers" : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Webbrowser"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Web browsers"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Navegadores web"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Navigateurs web"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Browser web"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ウェブブラウザ"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "웹 브라우저"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Navegadores"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "网页浏览器"
+          }
+        }
+      }
+    },
+    "Allow this circle in web browsers" : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Diesen Kreis in Webbrowsern erlauben"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Allow this circle in web browsers"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Permitir este círculo en navegadores web"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Autoriser ce cercle dans les navigateurs web"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Consenti questa cerchia nei browser web"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このサークルをウェブブラウザで許可する"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "이 서클을 웹 브라우저에서 허용"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Permitir este círculo em navegadores"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "允许在网页浏览器中使用此圈子"
+          }
+        }
+      }
+    },
+    "On: browsers that members have linked can read and post in this circle." : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "An: Browser, die Mitglieder verknüpft haben, können in diesem Kreis lesen und posten."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "On: browsers that members have linked can read and post in this circle."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Activado: los navegadores que los miembros han vinculado pueden leer y publicar en este círculo."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Activé : les navigateurs associés par les membres peuvent lire et publier dans ce cercle."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Attivo: i browser collegati dai membri possono leggere e pubblicare in questa cerchia."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "オン: メンバーがリンクしたブラウザで、このサークルの閲覧と投稿ができます。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "켜짐: 멤버가 연결한 브라우저에서 이 서클을 읽고 게시할 수 있습니다."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ativado: navegadores que os membros vincularam podem ler e publicar neste círculo."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已开启：成员关联的浏览器可以在此圈子中阅读和发布。"
+          }
+        }
+      }
+    },
+    "Off: browsers get nothing from this circle." : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Aus: Browser erhalten nichts aus diesem Kreis."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Off: browsers get nothing from this circle."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Desactivado: los navegadores no reciben nada de este círculo."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Désactivé : les navigateurs ne reçoivent rien de ce cercle."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Disattivato: i browser non ricevono nulla da questa cerchia."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "オフ: ブラウザにはこのサークルの内容は一切届きません。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "꺼짐: 브라우저는 이 서클에서 아무것도 받지 않습니다."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Desativado: navegadores não recebem nada deste círculo."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已关闭：浏览器不会收到此圈子的任何内容。"
+          }
+        }
+      }
+    },
+    "You are an admin of this circle, so your choice decides it." : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Du bist Admin dieses Kreises, deine Wahl entscheidet also."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "You are an admin of this circle, so your choice decides it."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Eres administrador de este círculo, así que tu elección decide."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Vous êtes administrateur de ce cercle, c’est donc votre choix qui décide."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sei amministratore di questa cerchia, quindi la tua scelta decide."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "あなたはこのサークルの管理者なので、あなたの選択で決まります。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "이 서클의 관리자이므로 내 선택으로 결정됩니다."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Você é administrador deste círculo, então a sua escolha decide."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "你是此圈子的管理员，因此由你的选择决定。"
+          }
+        }
+      }
+    },
+    "This circle's admins decide. Your choice is recorded but does not change it." : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Die Admins dieses Kreises entscheiden. Deine Wahl wird festgehalten, ändert aber nichts."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This circle's admins decide. Your choice is recorded but does not change it."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Deciden los administradores de este círculo. Tu elección queda registrada, pero no lo cambia."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ce sont les administrateurs de ce cercle qui décident. Votre choix est enregistré mais ne change rien."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Decidono gli amministratori di questa cerchia. La tua scelta viene registrata ma non cambia il risultato."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このサークルの管理者が決めます。あなたの選択は記録されますが、結果は変わりません。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "이 서클의 관리자가 결정합니다. 내 선택은 기록되지만 결과를 바꾸지 않습니다."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Quem decide são os administradores deste círculo. A sua escolha fica registrada, mas não muda isso."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "由此圈子的管理员决定。你的选择会被记录，但不会改变结果。"
+          }
+        }
+      }
+    },
+    "Everyone in this circle has agreed." : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Alle in diesem Kreis haben zugestimmt."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Everyone in this circle has agreed."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Todos en este círculo han aceptado."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tout le monde dans ce cercle a accepté."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tutti in questa cerchia hanno acconsentito."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このサークルの全員が同意しました。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "이 서클의 모두가 동의했습니다."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Todos neste círculo concordaram."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此圈子的所有人都已同意。"
+          }
+        }
+      }
+    },
+    "Change this on your primary device." : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ändere das auf deinem Hauptgerät."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Change this on your primary device."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Cámbialo en tu dispositivo principal."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Modifiez ce réglage sur votre appareil principal."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Cambialo sul tuo dispositivo principale."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "プライマリデバイスで変更してください。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "기본 기기에서 변경하세요."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mude isso no seu dispositivo principal."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "请在你的主设备上更改此设置。"
+          }
+        }
+      }
+    },
+    "A browser's copy of Haven is delivered by a relay, so it is less protected than the app. Turning this off stops browsers getting anything new; what they already received is not taken back." : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Die Browser-Version von Haven wird von einem Relay ausgeliefert und ist daher weniger geschützt als die App. Wenn du das ausschaltest, erhalten Browser nichts Neues mehr; bereits Empfangenes wird nicht zurückgenommen."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "A browser's copy of Haven is delivered by a relay, so it is less protected than the app. Turning this off stops browsers getting anything new; what they already received is not taken back."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "La copia de Haven de un navegador la entrega un relay, así que está menos protegida que la app. Al desactivarlo, los navegadores dejan de recibir cosas nuevas; lo que ya recibieron no se retira."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "La copie de Haven dans un navigateur est fournie par un relais ; elle est donc moins protégée que l’app. Désactiver ce réglage empêche les navigateurs de recevoir quoi que ce soit de nouveau ; ce qu’ils ont déjà reçu n’est pas retiré."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "La copia di Haven in un browser è consegnata da un relay, quindi è meno protetta dell’app. Disattivando, i browser non ricevono più nulla di nuovo; ciò che hanno già ricevuto non viene ritirato."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ブラウザ版の Haven はリレーから配信されるため、アプリほど保護されていません。オフにすると、ブラウザには新しい内容が届かなくなります。すでに届いた内容は取り消されません。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "브라우저용 Haven은 릴레이가 전달하므로 앱보다 보호 수준이 낮습니다. 끄면 브라우저는 새 내용을 받지 않습니다. 이미 받은 내용은 회수되지 않습니다."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "A cópia do Haven em um navegador é entregue por um relay, então é menos protegida que o app. Desativar impede que navegadores recebam coisas novas; o que já receberam não é retirado."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "浏览器中的 Haven 由中继提供，因此受到的保护不如应用。关闭后，浏览器不再收到任何新内容；已经收到的内容不会被收回。"
+          }
+        }
+      }
+    },
+    "Everyone in this circle has to agree. %lld still to agree." : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Alle in diesem Kreis müssen zustimmen. Es fehlen noch %lld."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Everyone in this circle has to agree. %lld still to agree."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Todos en este círculo tienen que aceptar. Faltan %lld."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tout le monde dans ce cercle doit accepter. Il en manque encore %lld."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tutti in questa cerchia devono acconsentire. Ne mancano ancora %lld."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このサークルの全員の同意が必要です。あと%lld人です。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "이 서클의 모두가 동의해야 합니다. 아직 %lld명이 남았습니다."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Todos neste círculo precisam concordar. Ainda faltam %lld."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此圈子的所有人都需要同意。还差 %lld 人。"
+          }
+        }
+      }
     }
   },
   "version" : "1.1"

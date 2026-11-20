@@ -7776,6 +7776,23 @@ final class FeedStore: ObservableObject {
         return ok
     }
 
+    /// Where a circle (or a conversation) stands on web devices — browsers linked to a member's
+    /// account. Nil before the engine is up.
+    func circleWebAccess(_ circleId: String) async -> CircleWebAccessFfi? {
+        guard let engine else { return nil }
+        return await engine.run { $0.circleWebAccess(circleId: circleId) }
+    }
+
+    /// State my account's position on web devices in a circle. Account-key-signed (so false on a
+    /// linked device), rides the circle's control lane, and re-keys the circle if its answer changes.
+    @discardableResult
+    func setCircleWebAccess(_ allow: Bool, in circleId: String) async -> Bool {
+        guard let engine else { return false }
+        let ok = await engine.run { $0.setCircleWebAccess(circleId: circleId, allow: allow) }
+        if ok, self.engine === engine { persistUserAction() }
+        return ok
+    }
+
     /// I hold the master seed → I can authorize. Issue the requesting device a credential, add it to my
     /// signed roster, and broadcast the grant back. (The requester keeps working as-is; the seed-drop
     /// that makes revocation final is a separate, guarded step.)
@@ -7954,8 +7971,12 @@ final class FeedStore: ObservableObject {
         guard deviceHex != DeviceKeyStore.deviceNodeHex() else { return }   // not our own device
         // Idempotent: don't stack duplicate sheets while one is already up for this device.
         if pendingEnrollRequest?.deviceHex == deviceHex { return }
-        pendingEnrollRequest = PendingEnrollRequest(deviceBundle: req.deviceBundle, deviceHex: deviceHex,
-                                                    name: req.name.isEmpty ? "New device" : req.name)
+        // The name is what the ACCOUNT signs into the device's credential, and a web device's carries
+        // the web mark there (per-circle consent, core `webpolicy`). A device that linked by SHOWING a
+        // code is marked here whatever it called itself; the confirmation then shows the mark too.
+        let given = req.name.isEmpty ? "New device" : req.name
+        let name = activeEnrollBoundCode != nil ? webDeviceName(name: given) : given
+        pendingEnrollRequest = PendingEnrollRequest(deviceBundle: req.deviceBundle, deviceHex: deviceHex, name: name)
     }
 
     /// PRIMARY: the user confirmed the link. Issue the credential + union the device into the roster +

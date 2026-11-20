@@ -502,6 +502,16 @@
     <string name="settings_pair_expired">Questo codice è scaduto. Mostrane uno nuovo sull’altro dispositivo.</string>
     <string name="settings_pair_not_primary">Solo il tuo dispositivo principale può collegare nuovi dispositivi.</string>
     <string name="settings_pair_unreachable">Impossibile raggiungere quel dispositivo. Tieni aperta la sua pagina e riprova.</string>
+    <string name="circle_web_title">Browser web</string>
+    <string name="circle_web_allow">Consenti questa cerchia nei browser web</string>
+    <string name="circle_web_on">Attivo: i browser collegati dai membri possono leggere e pubblicare in questa cerchia.</string>
+    <string name="circle_web_off">Disattivato: i browser non ricevono nulla da questa cerchia.</string>
+    <string name="circle_web_admin_you">Sei amministratore di questa cerchia, quindi la tua scelta decide.</string>
+    <string name="circle_web_admin_other">Decidono gli amministratori di questa cerchia. La tua scelta viene registrata ma non cambia il risultato.</string>
+    <string name="circle_web_everyone_done">Tutti in questa cerchia hanno acconsentito.</string>
+    <string name="circle_web_waiting">Tutti in questa cerchia devono acconsentire. Ne mancano ancora %1$d.</string>
+    <string name="circle_web_linked_cant">Cambialo sul tuo dispositivo principale.</string>
+    <string name="circle_web_warn">La copia di Haven in un browser è consegnata da un relay, quindi è meno protetta dell’app. Disattivando, i browser non ricevono più nulla di nuovo; ciò che hanno già ricevuto non viene ritirato.</string>
     <string name="settings_not_primary_device">Questo non è il mio dispositivo principale</string>
     <string name="settings_link_new_device_title">Collega un nuovo dispositivo</string>
     <string name="settings_enroll_qr_instructions">Sul nuovo dispositivo: “Aggiungi questo come un altro dei miei dispositivi”, poi scansiona questo codice. Riceve una sua chiave revocabile — mai la tua chiave principale.</string>

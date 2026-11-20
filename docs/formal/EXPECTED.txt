@@ -49,6 +49,16 @@ haven_pair -DUNBOUND :: P2_the_ticket_is_sealed_under_the_code :: verified
 haven_pair -DUNBOUND :: P3_an_unread_code_is_answered_only_by_whoever_scanned_it :: verified
 haven_pair -DUNBOUND :: executable_link_by_code :: verified
 haven_pair -DUNBOUND :: limit_whoever_read_the_code_can_answer_it :: verified
+haven_web_consent :: C1_a_web_device_is_keyed_only_with_every_members_yes :: verified
+haven_web_consent :: C2_a_web_device_cannot_pass_as_an_app :: verified
+haven_web_consent :: C3_a_circle_key_is_read_only_by_the_device_it_was_sealed_to :: verified
+haven_web_consent :: executable_app_device_keyed_without_any_position :: verified
+haven_web_consent :: executable_web_device_keyed_after_both_agree :: verified
+haven_web_consent -DSTRIPPABLE :: C1_a_web_device_is_keyed_only_with_every_members_yes :: verified
+haven_web_consent -DSTRIPPABLE :: C2_a_web_device_cannot_pass_as_an_app :: falsified
+haven_web_consent -DSTRIPPABLE :: C3_a_circle_key_is_read_only_by_the_device_it_was_sealed_to :: verified
+haven_web_consent -DSTRIPPABLE :: executable_app_device_keyed_without_any_position :: verified
+haven_web_consent -DSTRIPPABLE :: executable_web_device_keyed_after_both_agree :: verified
 haven_treekem_as_wired :: T1_secrecy_without_compromise :: verified
 haven_treekem_as_wired :: T2_removed_member_locked_out :: verified
 haven_treekem_as_wired :: T3_pcs_committer_state_heals :: falsified

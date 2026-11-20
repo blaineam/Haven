@@ -43,8 +43,39 @@ for. Sealed data survives all three; code does not. Nothing in a browser fully c
 So the design bounds the damage instead of pretending it away: a compromised web session can read
 and post **as that one device until it is revoked**. It never holds the master seed, cannot
 authorize other devices, and loses access to new content when revoked (the epoch rotates). Native
-apps remain the stronger client, and the UI will say so. Web access is off unless a circle's
-owner turns it on, because other members' posts become readable in that browser.
+apps remain the stronger client, and the UI says so. Two switches stand between a browser and a
+circle's posts, both off by default: the relay's host has to offer the web client at all, and
+**the circle has to allow web devices** (next section) — because it is the other members' posts
+that become readable in that browser.
+
+## Which circles a browser can read
+
+Linking a browser to your account does not let it read anything. A circle's keys go to a web
+device only while that circle allows web devices, and who decides depends on the circle:
+
+| Circle | Who decides |
+|---|---|
+| Has a creator (its id is bound to them) | Its admins — the newest signed word among them |
+| Has no provable owner: older circles, and every direct message | **Every member** has to say yes; one person withdrawing closes it |
+
+Each position is signed with the account's key, so a linked device — and therefore every browser
+— cannot state one: a browser cannot vote itself in. No answer, a tie, or anything unverifiable
+means no. When a circle's answer changes it re-keys, so a browser is cut off from (or brought
+into) everything from the next key on.
+
+What this does **not** do, said plainly:
+
+- **It does not take back what a browser was already shown.** Turning it off stops new content.
+- **An app that predates this rule does not follow it.** It seals to every device in a member's
+  roster, browsers included. An up-to-date browser refuses those keys, so the gap is a member on
+  an old app *and* a browser whose page was replaced — at which point that browser reads what that
+  one member posts. It closes as people update.
+- **The mark that says "this is a browser" is set when the device is approved.** A browser that
+  links by showing a code is always marked. One that links by a pasted ticket marks itself; a
+  replaced page could leave the mark off and claim to be an app, and the person approving it
+  would see only the name it gave. Linking a browser by its code avoids that.
+- **A browser still learns the names and member lists of all your circles.** Your devices share
+  that with each other so each can show your circles; only the posts are held back.
 
 ## What a browser cannot do
 
@@ -137,9 +168,32 @@ Next, in order:
 - [ ] Bundle size: ~10.8 MB of WebAssembly, ~3.5 MB on the wire (the proxy gzips every bundle
       file once, at load, and serves that to browsers that accept it). `wasm-opt` and a brotli
       variant (~2.3 MB measured) would cut it further; neither is done.
-- [ ] Per-circle consent. Web access is a host-level switch today. "This circle allows web
-      devices" needs a device class in the credential and members refusing to seal to a web device
-      a circle has not allowed — a protocol change, to be modelled before it is built.
+- [x] **Per-circle consent** (D22; "Which circles a browser can read" above).
+      - The rule and the signed record: `core/haven-p2p/src/webpolicy.rs` (`CircleWebPolicy`,
+        `web_allowed`), unit-tested and fuzzed. Records ride the circle's control lane as tag
+        `0x0b`, persist with the circle, and merge per signer (a replayed older yes loses).
+      - A web device is marked in its account-signed device NAME (`WEB_DEVICE_MARK`). The
+        credential has no spare field, and changing its signed bytes would make every shipped app
+        reject the roster; the name is already inside them. A relay cannot strip the mark, and a
+        mark on the wrong device only ever removes access.
+      - Engine (`core/haven-ffi`): a web device is left out of a circle's key commits, dial set,
+        media wraps and both key trees unless `circle_allows_web`; the circle re-keys when the
+        answer changes; a Removed web leaf is re-admitted by a later signed yes. A key OFFERED by a
+        web device is refused where the circle has not agreed — devices of one account converge on
+        the larger key, so without that a browser could hand its siblings the next key and read
+        along (the first test run found exactly this).
+      - UI on every platform: a switch in the circle's settings and in each conversation, with
+        where the circle stands and who it is waiting on; in a browser, a notice on a circle that
+        has not allowed it. Nine languages on Apple and Android, seven on desktop.
+      - Tests: `core/haven-ffi/src/web_consent_tests.rs` (six, sender-key lane),
+        `mls_a_web_device_is_a_leaf_only_while_the_circle_allows_web_devices` (v1 key tree), the
+        desktop UI tests, and the browser smoke (shut out when linked, keyed in when allowed).
+      - Formal model: `docs/formal/haven_web_consent.spthy` — C1 a web device is keyed only with
+        every member's yes; C2 a browser cannot pass as an app (`-DSTRIPPABLE`, the class outside
+        the signature, falsifies it); C3 a circle key is read only by the device it was sealed to.
+      - [ ] Not exercised: the v2 key tree with a web device (it uses the same filtered leaf set
+            and the same re-admission rule, but no test puts a browser in a v2 fleet); the phones'
+            and Mac's screens have been compiled, not run.
 - [x] **The UI.** The browser runs the desktop frontend (`desktop/ui`) unchanged, with a host shim
       in place of Tauri (`web-client/web-host.js`).
       - 141 of the desktop app's 164 commands need only the engine and moved to

@@ -250,6 +250,8 @@ struct CircleSettingsView: View {
     /// this one never leaves the device, exactly like a contact nickname.
     @State private var nick = ""
     @State private var showRelays = false   // macOS only — "Manage relays" is a NavigationLink on iOS
+    /// Where this circle stands on web browsers; loaded once when the sheet opens.
+    @State private var webAccess: CircleWebAccessFfi?
 
     private var isDefault: Bool { circleId == "default" }
 
@@ -262,6 +264,7 @@ struct CircleSettingsView: View {
                 name = FeedStore.shared.circles.first { $0.id == circleId }?.name ?? ""
                 nick = circleSettings.nickname(circleId) ?? ""
             }
+            .task { webAccess = await FeedStore.shared.circleWebAccess(circleId) }
             .onDisappear {
                 FeedStore.shared.renameCircle(circleId, to: name)   // persist a rename made without hitting return
                 circleSettings.setNickname(nick, for: circleId)
@@ -364,6 +367,7 @@ struct CircleSettingsView: View {
                 // global default. Configuring/adding relays lives in Settings ▸ Relays — this screen only
                 // SELECTS from already-configured relays, plus a link to go manage them.
                 CircleRelayOverrideSection(circleId: circleId)
+                CircleWebAccessSection(circleId: circleId, status: $webAccess)
                 Section {
                     NavigationLink { RelaysView() } label: {
                         Label("Manage relays", systemImage: "antenna.radiowaves.left.and.right")
@@ -460,6 +464,7 @@ struct CircleSettingsView: View {
             }
 
             CircleRelayOverrideSection(circleId: circleId)
+            CircleWebAccessSection(circleId: circleId, status: $webAccess)
             VStack(alignment: .leading, spacing: 8) {
                 Button { showRelays = true } label: {
                     Label("Manage relays", systemImage: "antenna.radiowaves.left.and.right")
@@ -498,6 +503,115 @@ struct CircleSettingsView: View {
             .fixedSize(horizontal: false, vertical: true)   // wrap fully; don't truncate on macOS
     }
     #endif
+}
+
+/// Web browsers, per circle. A browser linked to someone's account reads a circle only when the
+/// circle allows web devices (core `webpolicy`): its admins decide for a circle that has a creator,
+/// and every member has to agree for one that does not (older circles, conversations). This is my
+/// account's own switch, with a plain statement of where the circle stands.
+struct CircleWebAccessSection: View {
+    let circleId: String
+    @Binding var status: CircleWebAccessFfi?
+
+    private let warning = "A browser's copy of Haven is delivered by a relay, so it is less protected than the app. Turning this off stops browsers getting anything new; what they already received is not taken back."
+
+    var body: some View {
+        if let s = status {
+            #if os(macOS)
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Web browsers").font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+                toggle(s)
+                    .padding(.horizontal, 16).padding(.vertical, 10)
+                    .havenGlass(in: Capsule())
+                Text(standing(s)).font(.footnote).foregroundStyle(s.allowed ? Color.primary : Color.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(who(s)).font(.footnote).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(LocalizedStringKey(warning)).font(.footnote).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            #else
+            Section {
+                toggle(s)
+                Text(standing(s)).font(.footnote).foregroundStyle(s.allowed ? Color.primary : Color.secondary)
+                Text(who(s)).font(.footnote).foregroundStyle(.secondary)
+            } header: {
+                Text("Web browsers")
+            } footer: {
+                Text(LocalizedStringKey(warning)).fixedSize(horizontal: false, vertical: true)
+            }
+            #endif
+        }
+    }
+
+    private func toggle(_ s: CircleWebAccessFfi) -> some View {
+        Toggle(isOn: Binding(
+            get: { s.mine },
+            set: { want in
+                Task { @MainActor in
+                    await FeedStore.shared.setCircleWebAccess(want, in: circleId)
+                    status = await FeedStore.shared.circleWebAccess(circleId)
+                }
+            }
+        )) {
+            HStack {
+                Label("Allow this circle in web browsers", systemImage: "globe")
+                #if os(macOS)
+                Spacer()
+                #endif
+            }
+        }
+        #if os(macOS)
+        .toggleStyle(.switch)
+        #endif
+        .tint(HavenTheme.pink)
+        .disabled(!s.canSign)
+        .accessibilityIdentifier("circleWebAccessToggle")
+    }
+
+    private func standing(_ s: CircleWebAccessFfi) -> String {
+        s.allowed
+            ? String(localized: "On: browsers that members have linked can read and post in this circle.")
+            : String(localized: "Off: browsers get nothing from this circle.")
+    }
+
+    private func who(_ s: CircleWebAccessFfi) -> String {
+        if !s.canSign { return String(localized: "Change this on your primary device.") }
+        if s.decidedByAdmins {
+            return s.iDecide
+                ? String(localized: "You are an admin of this circle, so your choice decides it.")
+                : String(localized: "This circle's admins decide. Your choice is recorded but does not change it.")
+        }
+        if s.waitingOn.isEmpty { return String(localized: "Everyone in this circle has agreed.") }
+        return String(localized: "Everyone in this circle has to agree. \(s.waitingOn.count) still to agree.")
+    }
+}
+
+/// The web-browser switch for one conversation, as its own small sheet (a conversation has no
+/// settings screen of its own).
+struct ConversationWebAccessSheet: View {
+    let circleId: String
+    @State private var status: CircleWebAccessFfi?
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        #if os(macOS)
+        HavenMacSheet("Web browsers") { CircleWebAccessSection(circleId: circleId, status: $status) }
+            .task { status = await FeedStore.shared.circleWebAccess(circleId) }
+        #else
+        NavigationStack {
+            ZStack {
+                HavenBackground()
+                Form { CircleWebAccessSection(circleId: circleId, status: $status) }
+                    .scrollContentBackground(.hidden)
+            }
+            .navigationTitle("Web browsers").havenInlineNavTitle()
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+        }
+        .task { status = await FeedStore.shared.circleWebAccess(circleId) }
+        #endif
+    }
 }
 
 /// Per-circle relay OVERRIDE: toggle which of your configured relays THIS circle uses. The all-circles

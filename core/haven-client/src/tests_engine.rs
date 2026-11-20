@@ -545,3 +545,36 @@ async fn only_a_linked_browser_builds_a_web_push_registration() {
     assert!(e.web_push_register(ENDPOINT.into()).await.is_err());
     assert!(e.web_push_key().await.is_none());
 }
+
+
+/// Revoking a browser queues a message for the push worker, signed by the ACCOUNT, that makes it
+/// drop that browser's endpoint; revoking an app queues nothing. (The worker's side — and that
+/// nothing but the account's key can make this — is `push/worker.test.mjs`.)
+#[tokio::test]
+async fn revoking_a_browser_queues_its_push_registration_for_removal() {
+    let (primary, _) = engine(73);
+    let add = |name: &str, seed: u8| {
+        let dev = haven_ffi::Account::from_seed(vec![seed; 32]).unwrap();
+        let hex = dev.node_id_hex();
+        primary.roster.lock().entries.insert(hex.clone(), crate::roster::RosterEntry { bundle: dev.public_bundle(), name: name.into(), is_primary: false });
+        hex
+    };
+    let browser = add(&haven_ffi::web_device_name("Chrome on Mac".into()), 74);
+    let phone = add("Phone", 75);
+
+    primary.revoke_device(phone.clone());
+    assert!(primary.prefs.lock().web_push_revokes.is_empty(), "an app has no web push registration to remove");
+    primary.revoke_device(browser.clone());
+    assert_eq!(primary.prefs.lock().web_push_revokes, vec![browser.clone()], "queued until the worker answers (push is off in tests)");
+    primary.revoke_device(browser.clone());
+    assert_eq!(primary.prefs.lock().web_push_revokes.len(), 1, "never queued twice");
+
+    let body = crate::engine::web_push_revoke_body(&[73; 32], &browser, 1_800_000_000).unwrap();
+    assert_eq!(body["nodeId"], primary.node_id_hex(), "signed as the account");
+    assert_eq!(body["deviceId"], browser);
+    assert_eq!(body["ts"], 1_800_000_000u64);
+    // Exactly the purpose-tagged signature the worker checks.
+    let want = haven_ffi::Account::from_seed(vec![73; 32]).unwrap().sign_push_registration(format!("webpush-revoke-v1:{browser}"), 1_800_000_000);
+    assert_eq!(body["sig"], base64::engine::general_purpose::STANDARD.encode(want));
+    assert!(crate::engine::web_push_revoke_body(&[73; 32], "not-a-device", 1).is_none());
+}

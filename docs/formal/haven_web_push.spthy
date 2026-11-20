@@ -26,7 +26,9 @@
    - -DNO_CREDENTIAL models the looser rule deliberately NOT built: the worker takes any device
      key's word for which account it belongs to. R1 is falsified there — anyone files their own
      endpoint under any account and is rung whenever that account is.
-   - The account may REVOKE a device. The worker cannot see that (it holds no device list).
+   - The account may REVOKE a device. The worker holds no device list, so it learns of a
+     revocation only when a device holding the account key tells it (a signed notice); from then
+     on it files nothing for that device's key.
    - The adversary controls the network, may take any device's key (a browser whose page was
      replaced) or an account's key, and has devices of its own.
 
@@ -42,6 +44,8 @@ builtins: signing
 
 restriction Eq:   "All x y #i. Eq(x, y)@i ==> x = y"
 restriction Once: "All t #i #j. Once(t)@i & Once(t)@j ==> #i = #j"
+/* The worker refuses to file for a key it has been told is revoked. */
+restriction Barred: "All A dk e #b #f. Barred(A, dk)@b & Filed(A, dk, e)@f ==> #f < #b"
 
 /* ---- Keys ---------------------------------------------------------------------------------- */
 
@@ -75,9 +79,14 @@ rule EnrolWeb:
   --[ Enrolled($A, $D, 'web'), Once(<'enrol', $D>) ]->
   [ !Cred($D, cred, sign(cred, ask)), Out(<cred, sign(cred, ask)>) ]
 
-rule Revoke:             /* the account drops the device from its signed list; the worker sees nothing */
+rule Revoke:             /* the account drops the device and signs a notice for the worker */
   [ !Acct($A, ask), !Dev($D, dsk) ]
   --[ Revoked($A, $D) ]->
+  [ Out(sign(<'webpush-revoke', $A, pk(dsk)>, ask)) ]
+
+rule WorkerHears:        /* the notice reaches the worker (the network may delay or drop it) */
+  [ In(n), !Pin(A, pka) ]
+  --[ Eq(verify(n, <'webpush-revoke', A, dk>, pka), true), Barred(A, dk) ]->
   [ ]
 
 /* ---- A device asks, the worker files ------------------------------------------------------- */
@@ -136,13 +145,29 @@ lemma R3_an_app_credential_files_nothing:
   "All A D dk e #n #k #i. Enrolled(A, D, 'app')@n & DevKey(D, dk)@k & Filed(A, dk, e)@i ==>
       (Ex #r. RevealAccount(A)@r)"
 
+/* R4 — only the account can bar a browser. The worker bars a device's key only when that
+   account really revoked that device — unless the account's key leaked. A browser cannot bar
+   another browser, and nobody can bar the devices of an account that is not theirs. */
+lemma R4_only_the_account_bars_a_browser:
+  "All A dk #b. Barred(A, dk)@b ==>
+      (Ex D #k #v. DevKey(D, dk)@k & Revoked(A, D)@v)
+    | (Ex #r. RevealAccount(A)@r)"
+
 /* The stated LIMIT, on record as a reachable trace rather than left unsaid: the worker holds no
-   device list, so a browser the account has REVOKED can still be filed (and so rung) with the
-   credential it kept. What it gets is a doorbell with no content; the registration lapses after
-   thirty days unless that browser renews it. */
-lemma limit_a_revoked_browser_can_still_be_filed:
+   device list, so between the account revoking a browser and the worker hearing of it — the
+   notice needs a device with the account key to be online once — the browser can still be filed
+   (and so rung) with the credential it kept. What it gets is a doorbell with no content. After the
+   worker has heard, it cannot (the Barred restriction is the worker's rule; push/worker.test.mjs
+   holds the worker to it). */
+lemma limit_a_revoked_browser_can_be_filed_until_the_worker_hears:
   exists-trace
   "Ex A D dk e #v #k #i. Revoked(A, D)@v & DevKey(D, dk)@k & Filed(A, dk, e)@i & #v < #i
+     & not (Ex B #r. RevealAccount(B)@r) & not (Ex E #r. RevealDevice(E)@r)"
+
+/* …and the notice works: the worker can come to bar a revoked browser, with nobody's key leaked. */
+lemma executable_the_worker_hears_of_a_revocation:
+  exists-trace
+  "Ex A D dk #v #k #b. Revoked(A, D)@v & DevKey(D, dk)@k & Barred(A, dk)@b
      & not (Ex B #r. RevealAccount(B)@r) & not (Ex E #r. RevealDevice(E)@r)"
 
 end

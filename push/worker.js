@@ -53,9 +53,14 @@ export default {
         // unconditional put spent a KV WRITE per launch per device for a byte-identical record —
         // and the free tier allows just 1,000 writes/day, so idle relaunch churn alone could exhaust
         // it. Reads are 100x cheaper than writes here; compare first.
-        const next = JSON.stringify({ tokens });
-        if (next !== JSON.stringify({ tokens: rec.tokens || [] })) await env.TOKENS.put(nodeId, next);
+        const next = JSON.stringify(webRecord(tokens, rec.revokedWeb));
+        if (next !== JSON.stringify(webRecord(rec.tokens || [], rec.revokedWeb))) await env.TOKENS.put(nodeId, next);
         return json({ ok: true, devices: tokens.length });
+      }
+
+      if (url.pathname === "/unregister-web") {
+        // The ACCOUNT revoked a browser: forget its endpoint and refuse it from now on.
+        return await unregisterWeb(env, await request.json());
       }
 
       if (url.pathname === "/register-owner") {
@@ -309,9 +314,9 @@ export default {
         }
         if (survivors.length !== apnsTokens.length) {
           // Re-read so a concurrent Android prune above isn't undone, then keep every live token.
-          const keep = [...survivors, ...((await env.TOKENS.get(nodeId, "json"))?.tokens || []).filter((t) => t.platform === "android" || t.platform === "web")];
-          if (keep.length) await env.TOKENS.put(nodeId, JSON.stringify({ tokens: keep }));
-          else await env.TOKENS.delete(nodeId);
+          const cur = await env.TOKENS.get(nodeId, "json");
+          const keep = [...survivors, ...(cur?.tokens || []).filter((t) => t.platform === "android" || t.platform === "web")];
+          await putOrDelete(env, nodeId, keep, cur?.revokedWeb);
         }
         return json({ ok: anyOk, devices: tokens.length }, anyOk ? 200 : 502);
       }
@@ -474,7 +479,13 @@ const fcmToken = (t) => /^[A-Za-z0-9_:\-]{50,4096}$/.test(t || "");
 async function pruneTokens(env, nodeId, dead) {
   const rec = await env.TOKENS.get(nodeId, "json");
   const keep = (rec?.tokens || []).filter((t) => !dead.includes(t.token));
-  if (keep.length) await env.TOKENS.put(nodeId, JSON.stringify({ tokens: keep }));
+  await putOrDelete(env, nodeId, keep, rec?.revokedWeb);
+}
+
+/// Write a node's record, or delete it when nothing is left to remember — no tokens AND no revoked
+/// browsers (that list must outlive the last token, or a revoked browser could simply file again).
+async function putOrDelete(env, nodeId, tokens, revokedWeb) {
+  if (tokens.length || (revokedWeb && revokedWeb.length)) await env.TOKENS.put(nodeId, JSON.stringify(webRecord(tokens, revokedWeb)));
   else await env.TOKENS.delete(nodeId);
 }
 
@@ -491,11 +502,14 @@ async function pruneTokens(env, nodeId, dead) {
 // Microsoft) learns that this browser was rung and when, never by whom or about what. The page —
 // or the notification the service worker shows — does the rest through the circle's relay.
 //
-// STATED LIMIT: the worker cannot see an account's device list, so a browser the account later
-// REVOKES keeps its registration until it expires (WEB_REG_TTL_SECS; a live browser renews it on
-// every visit) or the browser itself unsubscribes. Until then it can still be rung — it learns
-// that something happened, and nothing else.
+// REVOCATION: the worker cannot see an account's device list, so the account tells it. A device
+// that holds the account key signs `webpush-revoke-v1:<device>` (`/unregister-web`); the worker
+// drops that browser's endpoint and remembers the device id, so the credential the browser kept
+// can never file an endpoint again. Until an account device has said so — it has to be online
+// once — a revoked browser can still be rung: it learns that something happened, nothing else.
+// A registration also lapses on its own (WEB_REG_TTL_SECS; a live browser renews it each visit).
 const WEB_REG_TTL_SECS = 30 * 24 * 3600;
+const WEB_REVOKED_MAX = 64;   // revoked browsers remembered per account (newest kept)
 const CRED_DOMAIN = new TextEncoder().encode("haven-device-cred-v1");   // core/haven-p2p/src/device.rs
 const WEB_MARK = new Uint8Array([0xf0, 0x9f, 0x8c, 0x90, 0x20]);        // "🌐 " — webpolicy::WEB_DEVICE_MARK
 
@@ -552,6 +566,9 @@ async function registerWeb(env, { nodeId, token, ts, sig, deviceId, cred, credSi
   }
   const now = Math.floor(Date.now() / 1000);
   const rec = (await env.TOKENS.get(nodeId, "json")) || { tokens: [] };
+  // The account has revoked this browser: its credential is still a valid signature, and is no
+  // longer the account's word.
+  if ((rec.revokedWeb || []).includes(named)) return json({ error: "unauthorized" }, 401);
   const before = rec.tokens || [];
   const same = before.find((t) => t.platform === "web" && t.token === token && t.device === named);
   // Renewing an unchanged registration costs a KV write only once a day (see /register).
@@ -560,8 +577,29 @@ async function registerWeb(env, { nodeId, token, ts, sig, deviceId, cred, credSi
   const tokens = before.filter((t) => t.token !== token && !(t.platform === "web" && t.device === named));
   tokens.push({ token, platform: "web", device: named, exp: now + WEB_REG_TTL_SECS });
   if (tokens.length > 10) tokens.splice(0, tokens.length - 10);
-  await env.TOKENS.put(nodeId, JSON.stringify({ tokens }));
+  await env.TOKENS.put(nodeId, JSON.stringify(webRecord(tokens, rec.revokedWeb)));
   return json({ ok: true, devices: tokens.length });
+}
+
+/// A node's record: its tokens, plus the browsers its account has revoked (only when there are any,
+/// so a record with none is byte-identical to what it always was).
+function webRecord(tokens, revokedWeb) {
+  return revokedWeb && revokedWeb.length ? { tokens, revokedWeb } : { tokens };
+}
+
+/// The account revokes a browser. Signed by the ACCOUNT key (the node id), like a phone's
+/// registration — a browser cannot do this to another browser, and nobody can do it to an account
+/// that is not theirs. Idempotent, and answers the same whether or not the device was registered.
+async function unregisterWeb(env, { nodeId, deviceId, ts, sig }) {
+  const device = String(deviceId || "").toLowerCase();
+  if (!nodeId || !/^[0-9a-f]{64}$/.test(device)) return json({ error: "nodeId + deviceId required" }, 400);
+  if (!(await verifyReg(nodeId, `webpush-revoke-v1:${device}`, ts, sig))) return json({ error: "unauthorized" }, 401);
+  const rec = (await env.TOKENS.get(nodeId, "json")) || { tokens: [] };
+  const tokens = (rec.tokens || []).filter((t) => !(t.platform === "web" && t.device === device));
+  const revokedWeb = [...(rec.revokedWeb || []).filter((d) => d !== device), device].slice(-WEB_REVOKED_MAX);
+  const next = JSON.stringify(webRecord(tokens, revokedWeb));
+  if (next !== JSON.stringify(webRecord(rec.tokens || [], rec.revokedWeb))) await env.TOKENS.put(nodeId, next);
+  return json({ ok: true });
 }
 
 let _vapid = new Map();   // audience → { jwt, at }

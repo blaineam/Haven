@@ -2818,7 +2818,11 @@ object HavenNet : InboundListener {
      *  read/LWW-write access to our account-state channel; publish the rotated-key grants promptly. */
     fun revokeDevice(nodeHex: String) {
         if (core.seedless) return   // only the seed-holding primary revokes
-        DeviceRosterManager.revoke(nodeHex, social, core.seed)
+        // A browser may be registered for Web Push under this account: the worker has to be told, or
+        // the browser goes on being rung with the credential it kept.
+        val wasWeb = DeviceRosterManager.nameOf(nodeHex)?.let { uniffi.haven_ffi.isWebDeviceName(it) } == true
+        val revoked = DeviceRosterManager.revoke(nodeHex, social, core.seed)
+        if (revoked && wasWeb) revokeWebPush(nodeHex)
         scope.launch { runCatching { SelfSyncCoordinator.sync(social) } }   // publish the rotated-key grants
     }
 
@@ -4721,6 +4725,7 @@ object HavenNet : InboundListener {
      *  [FcmPush]). Signed over `fcm-v1:<token>` so the worker can verify it is mine and a signature made
      *  for APNs or a /flag can't be replayed here. Fire-and-forget: polling stays the fallback. */
     fun registerAndroidPushToken(token: String) {
+        flushWebPushRevokes()   // a browser revoked while offline is reported now
         val acct = core.account ?: return
         if (token.isEmpty() || HavenOffline.enabled) return
         val ts = System.currentTimeMillis() / 1000
@@ -4731,6 +4736,44 @@ object HavenNet : InboundListener {
             .put("platform", "android")
             .put("ts", ts)
             .put("sig", Base64.encodeToString(sig, Base64.NO_WRAP)))
+    }
+
+    /** Browsers this account revoked that the push worker has not yet acknowledged (device hex). */
+    private fun webRevokes(): MutableSet<String> =
+        appContext.getSharedPreferences("haven.push", Context.MODE_PRIVATE).getStringSet("webRevokes", emptySet())!!.toMutableSet()
+    private fun saveWebRevokes(v: Set<String>) {
+        appContext.getSharedPreferences("haven.push", Context.MODE_PRIVATE).edit().putStringSet("webRevokes", v).apply()
+    }
+
+    /** The account revoked a browser: tell the push worker to drop that browser's endpoint and to
+     *  refuse its credential from now on (`/unregister-web`, signed by the account). Queued until the
+     *  worker answers, so a revocation made offline is delivered on a later launch. */
+    fun revokeWebPush(deviceHex: String) {
+        saveWebRevokes(webRevokes().apply { add(deviceHex.lowercase()) })
+        flushWebPushRevokes()
+    }
+
+    /** Send every queued revocation. Called on a revocation and at start. */
+    fun flushWebPushRevokes() {
+        val acct = core.account ?: return   // no account key here: a linked device cannot revoke
+        val pending = webRevokes()
+        if (pending.isEmpty() || HavenOffline.enabled) return
+        scope.launch {
+            for (hex in pending) {
+                val ts = System.currentTimeMillis() / 1000
+                val sig = acct.signPushRegistration("webpush-revoke-v1:$hex", ts.toULong())
+                val body = JSONObject().put("nodeId", accountNodeHex).put("deviceId", hex).put("ts", ts)
+                    .put("sig", Base64.encodeToString(sig, Base64.NO_WRAP)).toString().toByteArray(Charsets.UTF_8)
+                val ok = runCatching {
+                    val c = (java.net.URL("$pushRelayBase/unregister-web").openConnection() as java.net.HttpURLConnection).apply {
+                        requestMethod = "POST"; doOutput = true; connectTimeout = 8000; readTimeout = 8000
+                        setRequestProperty("Content-Type", "application/json")
+                    }
+                    try { c.outputStream.use { it.write(body) }; c.responseCode == 200 } finally { c.disconnect() }
+                }.getOrDefault(false)
+                if (ok) saveWebRevokes(webRevokes().apply { remove(hex) })   // otherwise it stays queued
+            }
+        }
     }
 
     /** The push worker's base URL. A seam for the JVM tests, which point it at an in-process server so no

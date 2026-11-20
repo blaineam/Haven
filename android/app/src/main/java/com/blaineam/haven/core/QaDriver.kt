@@ -561,6 +561,8 @@ object QaDriver {
             .put("remote_video_tracks", JSONArray(runCatching {
                 CallManager.remoteVideo.filter { it.value != null && !CallManager.remoteCameraOff.contains(it.key) }.keys.toList()
             }.getOrDefault(emptyList())))
+            // Peers who said their video slot is off: their tile shows an avatar, not their track.
+            .put("remote_camera_off", JSONArray(runCatching { CallManager.remoteCameraOff.toList() }.getOrDefault(emptyList())))
             .put("peers", JSONObject(runCatching { CallManager.qaPeerIce }.getOrDefault(emptyMap()) as Map<*, *>)))
         o.put("circles", circles)
         // Relay-first media counters + the heavy-work gate (e2e `relayfirst` / `callgate`).

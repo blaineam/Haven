@@ -736,6 +736,24 @@ pub(crate) fn now_ms() -> u64 {
 /// H3), and `flag-v1:…` is deliberately non-hex — that's what keeps it disjoint from the
 /// `/register` token space, which the worker's `hexToken` enforces. Parity with ReportUI.swift and
 /// Moderation.kt.
+/// The body of `/unregister-web`: the ACCOUNT's signature over `webpush-revoke-v1:<device>`, made
+/// with the one purpose-tagged signer the core exposes (the prefix keeps it apart from every
+/// registration and from a report).
+pub(crate) fn web_push_revoke_body(seed: &[u8; 32], device_hex: &str, ts: u64) -> Option<serde_json::Value> {
+    let device = device_hex.to_lowercase();
+    if device.len() != 64 || !device.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let acct = Account::from_seed(seed.to_vec()).ok()?;
+    let sig = acct.sign_push_registration(format!("webpush-revoke-v1:{device}"), ts);
+    Some(serde_json::json!({
+        "nodeId": acct.node_id_hex(),
+        "deviceId": device,
+        "ts": ts,
+        "sig": base64::engine::general_purpose::STANDARD.encode(sig),
+    }))
+}
+
 fn flag_body(seed: &[u8; 32], subject: &str, reason: &str, ts: u64) -> Option<serde_json::Value> {
     if subject.is_empty() {
         return None;
@@ -1105,6 +1123,37 @@ impl Engine {
     }
 
     // ---- Web Push (a browser with its tab closed) -----------------------------------------
+
+    /// Tell the push worker about every browser this account revoked that it has not yet
+    /// acknowledged (`/unregister-web`): it drops that browser's endpoint and refuses its
+    /// credential from then on. Account-key holder only. Each one stays queued until the worker
+    /// answers, so a revocation made offline is delivered the next time this runs.
+    pub(crate) fn flush_web_push_revokes(self: &Arc<Self>) {
+        let Some(seed) = self.seed else { return };
+        let pending = self.prefs.lock().web_push_revokes.clone();
+        if pending.is_empty() || crate::netgate::push_off() {
+            return;
+        }
+        let me = self.clone();
+        crate::rt::spawn(async move {
+            for device in pending {
+                let Some(body) = web_push_revoke_body(&seed, &device, now_ms() / 1000) else { continue };
+                let sent = me
+                    .http
+                    .post(format!("{PUSH_RELAY}/unregister-web"))
+                    .header("content-type", "application/json")
+                    .timeout(std::time::Duration::from_secs(15))
+                    .body(body.to_string())
+                    .send()
+                    .await;
+                if sent.is_ok_and(|r| r.status().is_success()) {
+                    let mut p = me.prefs.lock();
+                    p.web_push_revokes.retain(|d| d != &device);
+                    let _ = p.save(&me.paths);
+                }
+            }
+        });
+    }
 
     /// The body of this browser's registration with the push worker for `endpoint`, or `None` when
     /// this is not a linked web device. A browser has no account key: it files the endpoint under
@@ -1920,6 +1969,7 @@ impl Engine {
     /// is single-flight, so a slow pass is skipped over, never stacked.
     fn start_self_sync_loop(self: &Arc<Self>) {
         let me = self.clone();
+        me.flush_web_push_revokes();   // a revocation made offline last run is delivered now
         crate::rt::spawn(async move {
             loop {
                 crate::rt::sleep(std::time::Duration::from_secs(2)).await;
@@ -2428,8 +2478,25 @@ impl Engine {
 
     /// Revoke a linked device — it can decrypt nothing posted afterward.
     pub fn revoke_device(self: &Arc<Self>, node_hex: String) {
+        // A browser may be registered for Web Push under this account: the worker has to be told,
+        // or the browser goes on being rung with the credential it kept.
+        let was_web = self
+            .roster
+            .lock()
+            .entries
+            .get(&node_hex)
+            .is_some_and(|e| haven_ffi::is_web_device_name(e.name.clone()));
         if !self.roster.lock().revoke(&node_hex) {
             return;
+        }
+        if was_web {
+            let mut p = self.prefs.lock();
+            if !p.web_push_revokes.iter().any(|d| d == &node_hex) {
+                p.web_push_revokes.push(node_hex.clone());
+                let _ = p.save(&self.paths);
+            }
+            drop(p);
+            self.flush_web_push_revokes();
         }
         self.push_roster();
         // §6: rotate the account-state self-sync key so the revoked device can no longer read/LWW-write

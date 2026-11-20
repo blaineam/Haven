@@ -2013,6 +2013,8 @@ final class CallManager: NSObject, ObservableObject {
             "audio_unavailable": audioUnavailable,
             "audio_gate": "\(audioGate.state)",
             "remote_video_tracks": Array(remoteVideoTracks.keys),
+            // Peers who said their video slot is off: their tile shows an avatar, not their track.
+            "remote_camera_off": Array(remoteCameraOff),
             "inbound_audio_bytes": audioTotal,
             "inbound_video_bytes": videoTotal,
             "inbound_video_frames": framesTotal,

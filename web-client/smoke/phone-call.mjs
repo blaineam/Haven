@@ -5,7 +5,8 @@
 // relay, by the browser's own code. Then:
 //
 //   1. a browser calls the app and the app answers: audio both ways;
-//   2. video: the browser's camera reaches the app, and the app's camera reaches the browser;
+//   2. a screen shared from the browser (camera off) is shown by the app; then video: the
+//      browser's camera reaches the app, and the app's camera reaches the browser;
 //   3. a group call: the second browser is added mid-call, and the app and both browsers are all
 //      connected to each other; one leaving leaves the other two talking;
 //   4. hanging up in the browser ends it in the app;
@@ -51,7 +52,8 @@ const other = startPeer(bin, [join(root, "dist")], { HAVEN_SMOKE_GUEST: "1" });
 const third = TWO_PARTY ? null : startPeer(bin, [join(root, "dist")], { HAVEN_SMOKE_GUEST: "1" });
 const accounts = third ? [other, third] : [other];
 const browser = await chromium.launch({
-  args: ["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream", "--autoplay-policy=no-user-gesture-required"],
+  args: ["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream", "--autoplay-policy=no-user-gesture-required",
+    "--auto-select-desktop-capture-source=Entire screen"],
 });
 const browsers = [];
 
@@ -219,6 +221,18 @@ try {
   step("the app answered: connected, audio both ways");
 
   if (!TWO_PARTY) {
+    // 2a. The browser shares its screen while its camera is OFF. The page sends a screen in the
+    // camera's place, so the app must be told the video slot is live — or it shows an avatar over
+    // the shared screen (which is what it did).
+    const showsThem = async () => { const c = await appCall(); return (c.remote_video_tracks || []).includes(them) && !(c.remote_camera_off || []).includes(them); };
+    if (await showsThem()) throw new Error("the app shows the browser's video before anything was turned on");
+    await a.control(2).click();
+    await until("the app to show the browser's shared screen", showsThem, 60000);
+    step("a screen shared from the browser (camera off) is shown by the app");
+    await a.control(2).click();
+    await until("the app to go back to the browser's avatar", async () => !(await showsThem()), 30000);
+    step("stopping the share takes the app back to the avatar");
+
     // 2. Video, each way. Calls start audio-only on every platform.
     if (await a.picture()) throw new Error("the browser shows the app's picture before the app's camera was turned on");
     await a.control(1).click();

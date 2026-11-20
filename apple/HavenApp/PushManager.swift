@@ -113,6 +113,7 @@ final class PushManager: NSObject, ObservableObject {
         let platform = "ios"
         #endif
         post("/register", ["nodeId": nodeId, "token": hex, "sandbox": isSandbox, "platform": platform].merging(signedReg(token: hex)) { $1 })
+        flushWebPushRevokes()   // a browser revoked while offline is reported now
     }
 
     /// Register as an S3-bucket owner so the worker's cron can send a silent push to re-mint
@@ -186,6 +187,46 @@ final class PushManager: NSObject, ObservableObject {
         let ts = UInt64(Date().timeIntervalSince1970)
         let sig = acct.signPushRegistration(token: token, tsSecs: ts)
         return ["ts": ts, "sig": sig.base64EncodedString()]
+    }
+
+    // MARK: - A revoked browser's Web Push registration
+
+    static let webRevokesKey = "haven.push.webRevokes"
+
+    /// The account revoked a browser: tell the push worker to drop that browser's endpoint and to
+    /// refuse its credential from now on (`/unregister-web`, signed by the account). Queued until
+    /// the worker answers, so a revocation made offline is delivered on a later launch.
+    func revokeWebPush(deviceHex: String) {
+        let hex = deviceHex.lowercased()
+        var pending = UserDefaults.standard.stringArray(forKey: Self.webRevokesKey) ?? []
+        if !pending.contains(hex) {
+            pending.append(hex)
+            UserDefaults.standard.set(pending, forKey: Self.webRevokesKey)
+        }
+        flushWebPushRevokes()
+    }
+
+    /// Send every queued revocation. Called on a revocation and whenever this device registers.
+    func flushWebPushRevokes() {
+        let pending = UserDefaults.standard.stringArray(forKey: Self.webRevokesKey) ?? []
+        guard !pending.isEmpty, !HavenNet.offline, Self.pushEnabled, let nodeId = myNodeId(),
+              let url = URL(string: Self.relay + "/unregister-web") else { return }
+        for hex in pending {
+            let signed = signedReg(token: "webpush-revoke-v1:\(hex)")
+            guard !signed.isEmpty else { return }   // no account key here: a linked device cannot revoke
+            var req = URLRequest(url: url)
+            req.httpMethod = "POST"
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.httpBody = try? JSONSerialization.data(withJSONObject: ["nodeId": nodeId, "deviceId": hex].merging(signed) { $1 })
+            HavenHTTP.session.dataTask(with: req) { _, resp, _ in
+                guard (resp as? HTTPURLResponse)?.statusCode == 200 else { return }   // stays queued
+                DispatchQueue.main.async {
+                    let left = (UserDefaults.standard.stringArray(forKey: Self.webRevokesKey) ?? []).filter { $0 != hex }
+                    UserDefaults.standard.set(left, forKey: Self.webRevokesKey)
+                    HavenLog.call("push /unregister-web ok")
+                }
+            }.resume()
+        }
     }
 
     /// Every push-worker call reports its outcome. This was fire-and-forget: a rejected registration

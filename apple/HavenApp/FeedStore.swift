@@ -7798,8 +7798,12 @@ final class FeedStore: ObservableObject {
     /// keeps its stale key) can neither read nor LWW-write my account state afterward.
     func revokeDevice(_ nodeHex: String) {
         guard let seed = AccountStore.storedSeed(), let engine else { return }
+        // A browser may be registered for Web Push under this account: the worker has to be told,
+        // or the browser goes on being rung with the credential it kept.
+        let wasWeb = DeviceRosterManager.shared.name(of: nodeHex).map { isWebDeviceName(name: $0) } ?? false
         Task { @MainActor [weak self] in
             guard await DeviceRosterManager.shared.revoke(nodeHex, engine: engine, accountSeed: seed) else { return }
+            if wasWeb { PushManager.shared.revokeWebPush(deviceHex: nodeHex) }
             guard let self, self.engine === engine else { return }
             await self.rotateSelfSyncAfterRevocation(revokedHex: nodeHex, accountSeed: seed, engine: engine)
         }
@@ -11103,8 +11107,52 @@ final class FeedStore: ObservableObject {
             if !isDM { nearbyBroadcast(1, eventPayload(circleId, env)) }
             Task { await SharedStore.uploadEvent(circleId: circleId, env: env) }
         }
+        // …and tell THIS peer where the circle's relays are, now, behind the events (which carry
+        // the key the announce is sealed under). Android has always done this in its per-peer
+        // sync; here a peer learned the relays only from the broadcast re-announce — every ten
+        // minutes on a phone — or from the relay's own mailbox, which they cannot read before
+        // they know the relay. A friend with no relay of their own, whose invite I took, was left
+        // with nowhere to exchange anything with me for minutes: nothing of theirs arrived.
+        await announceRelays(circleId: circleId, to: idHex, engine: engine)
         refresh()
         return (true, "applied")
+    }
+
+    /// How many relay announces each peer has been sent directly (by account hex) — what a test
+    /// reads; nothing in the app does.
+    private(set) var relayAnnouncesSent: [String: Int] = [:]
+
+    /// The relays worth telling a peer about for `circleId`: the ones with proof of life in the
+    /// last five minutes or a public HTTPS address, plus one this device is hosting — the same
+    /// rule `reannounceOwnRelay` broadcasts by. Announcing every relay ever learned made dead
+    /// relay ids echo around the mesh forever.
+    func relaysWorthAnnouncing(circleId: String) -> [String] {
+        var hexes = RelayMailboxStore.shared.relays(forCircle: circleId).filter { hex in
+            guard !hex.hasPrefix("s3:"), hex.count == 64 else { return false }
+            if RelayHealth.shared.provenAlive(hex, withinMs: 300_000) { return true }
+            let urls = RelayMailboxStore.shared.httpInterface(hex)?.urls ?? []
+            return urls.contains { $0.hasPrefix("https://") && RelayMailboxStore.urlReachableByOthers($0) }
+        }
+        if RelayHost.shared.serving, RelayHost.shared.nodeId.count == 64, !hexes.contains(RelayHost.shared.nodeId) {
+            hexes.append(RelayHost.shared.nodeId)
+        }
+        return hexes
+    }
+
+    /// Send one peer the circle's relay announces (frame 19), sealed under the circle's key.
+    private func announceRelays(circleId: String, to idHex: String, engine: Engine) async {
+        let plains = relaysWorthAnnouncing(circleId: circleId).map { relayAnnounceData($0) }
+        guard !plains.isEmpty else { return }
+        let sealed: [Data] = await engine.run { s in
+            plains.compactMap { try? s.sealCircleMedia(circleId: circleId, data: $0) }
+        }
+        guard self.engine === engine else { return }
+        for blob in sealed {
+            var p = Data(); lpAppend(&p, Data(circleId.utf8)); p.append(blob)
+            sendIroh(19, p, to: idHex)
+        }
+        relayAnnouncesSent[idHex.lowercased(), default: 0] += sealed.count
+        HavenLog.relay("relay announce → \(idHex.prefix(8)) circle=\(circleId.prefix(12)) relays=\(sealed.count)")
     }
     /// Cooldown to break handshake ping-pong (see handleHello). Keyed by "<peerHex>|<circleId>".
     private var lastHelloReply: [String: Date] = [:]

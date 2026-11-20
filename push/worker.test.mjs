@@ -798,3 +798,63 @@ test('a browser registration built by the Rust core (shared vector) verifies in 
     assert.equal((await send(webEnv(), '/register', { ...v, cred: flipped.toString('base64') })).res.status, 401);
   } finally { Date.now = realNow; }
 });
+
+test('the account revokes a browser: its endpoint is dropped and its credential files nothing again', async () => {
+  const env = webEnv();
+  const account = edIdentity();
+  const d = webDevice(account), other = webDevice(account);
+  const next = 'https://updates.push.services.mozilla.com/wpush/v2/other';
+  await send(env, '/register', webReg(account, d));
+  await send(env, '/register', webReg(account, other, { token: next }));
+  const revoke = (signer, device, ts = now()) => ({
+    nodeId: account.hex, deviceId: device, ts,
+    sig: signer.signRaw(Buffer.from(`haven-push-register-v1:${account.hex}:webpush-revoke-v1:${device}:${ts}`)).toString('base64'),
+  });
+
+  // Only the ACCOUNT can: not the browser itself, not another of the account's browsers, not a stranger.
+  for (const [who, signer] of [['the browser', d.dev], ['another browser', other.dev], ['a stranger', edIdentity()]]) {
+    assert.equal((await send(env, '/unregister-web', revoke(signer, d.dev.hex))).res.status, 401, who);
+  }
+  assert.equal((await send(env, '/unregister-web', revoke(account, d.dev.hex, now() - 3600))).res.status, 401, 'stale');
+  assert.equal((await send(env, '/unregister-web', { ...revoke(account, d.dev.hex), deviceId: 'nope' })).res.status, 400);
+  assert.equal((await env.TOKENS.get(account.hex, 'json')).tokens.length, 2, 'nothing changed');
+
+  assert.equal((await send(env, '/unregister-web', revoke(account, d.dev.hex))).res.status, 200);
+  let rec = await env.TOKENS.get(account.hex, 'json');
+  assert.deepEqual(rec.tokens.map((t) => t.token), [next], 'only the revoked browser is dropped');
+  assert.deepEqual(rec.revokedWeb, [d.dev.hex]);
+  // Its credential is still a valid signature — and is refused; the other browser is untouched.
+  assert.equal((await send(env, '/register', webReg(account, d))).res.status, 401, 'a revoked browser cannot file again');
+  assert.equal((await send(env, '/register', webReg(account, other, { token: next }))).res.status, 200);
+  // Idempotent, and no extra write for a repeat.
+  const writes = env.TOKENS.writes.length;
+  assert.equal((await send(env, '/unregister-web', revoke(account, d.dev.hex))).res.status, 200);
+  assert.equal(env.TOKENS.writes.length, writes);
+
+  // The list survives everything else that rewrites the record: the last token going away…
+  const gone = stubApns(410);
+  try { await send(env, '/notify', { nodeId: account.hex, ciphertext: 'c2VhbGVk' }); } finally { gone.restore(); }
+  rec = await env.TOKENS.get(account.hex, 'json');
+  assert.deepEqual(rec, { tokens: [], revokedWeb: [d.dev.hex] }, 'remembered with no tokens left');
+  assert.equal((await send(env, '/register', webReg(account, d))).res.status, 401);
+  // …and a phone of the same account registering.
+  const ts = now();
+  const sig = account.signRaw(Buffer.from(`haven-push-register-v1:${account.hex}:${TOKEN_A}:${ts}`)).toString('base64');
+  assert.equal((await send(env, '/register', { nodeId: account.hex, token: TOKEN_A, ts, sig })).res.status, 200);
+  assert.deepEqual((await env.TOKENS.get(account.hex, 'json')).revokedWeb, [d.dev.hex]);
+  assert.equal((await send(env, '/register', webReg(account, d))).res.status, 401);
+});
+
+test('revoking a browser that never registered still bars it, and an account with no browsers is unchanged', async () => {
+  const env = webEnv();
+  const account = edIdentity();
+  const d = webDevice(account);
+  const ts = now();
+  const sig = account.signRaw(Buffer.from(`haven-push-register-v1:${account.hex}:webpush-revoke-v1:${d.dev.hex}:${ts}`)).toString('base64');
+  assert.equal((await send(env, '/unregister-web', { nodeId: account.hex, deviceId: d.dev.hex, ts, sig })).res.status, 200);
+  assert.equal((await send(env, '/register', webReg(account, d))).res.status, 401);
+  // A phone-only account's record keeps its old shape exactly.
+  const phone = identity();
+  await register(env, phone, TOKEN_A);
+  assert.deepEqual(Object.keys(await env.TOKENS.get(phone.nodeId, 'json')), ['tokens']);
+});

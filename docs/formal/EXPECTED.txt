@@ -62,13 +62,17 @@ haven_web_consent -DSTRIPPABLE :: executable_web_device_keyed_after_both_agree :
 haven_web_push :: R1_an_endpoint_is_filed_only_for_a_browser_the_account_linked :: verified
 haven_web_push :: R2_the_endpoint_is_the_one_the_browser_asked_for :: verified
 haven_web_push :: R3_an_app_credential_files_nothing :: verified
+haven_web_push :: R4_only_the_account_bars_a_browser :: verified
 haven_web_push :: executable_a_linked_browser_registers :: verified
-haven_web_push :: limit_a_revoked_browser_can_still_be_filed :: verified
+haven_web_push :: executable_the_worker_hears_of_a_revocation :: verified
+haven_web_push :: limit_a_revoked_browser_can_be_filed_until_the_worker_hears :: verified
 haven_web_push -DNO_CREDENTIAL :: R1_an_endpoint_is_filed_only_for_a_browser_the_account_linked :: falsified
 haven_web_push -DNO_CREDENTIAL :: R2_the_endpoint_is_the_one_the_browser_asked_for :: falsified
 haven_web_push -DNO_CREDENTIAL :: R3_an_app_credential_files_nothing :: falsified
+haven_web_push -DNO_CREDENTIAL :: R4_only_the_account_bars_a_browser :: verified
 haven_web_push -DNO_CREDENTIAL :: executable_a_linked_browser_registers :: verified
-haven_web_push -DNO_CREDENTIAL :: limit_a_revoked_browser_can_still_be_filed :: verified
+haven_web_push -DNO_CREDENTIAL :: executable_the_worker_hears_of_a_revocation :: verified
+haven_web_push -DNO_CREDENTIAL :: limit_a_revoked_browser_can_be_filed_until_the_worker_hears :: verified
 haven_treekem_as_wired :: T1_secrecy_without_compromise :: verified
 haven_treekem_as_wired :: T2_removed_member_locked_out :: verified
 haven_treekem_as_wired :: T3_pcs_committer_state_heals :: falsified

@@ -496,6 +496,10 @@ pub struct Prefs {
     /// `EvictedMediaStore`.
     #[serde(default)]
     pub evicted_media: std::collections::HashMap<String, u64>,
+    /// Browsers this account revoked whose push registration the worker has not yet been told to
+    /// drop (device hex). Sent until the worker answers; see `Engine::flush_web_push_revokes`.
+    #[serde(default)]
+    pub web_push_revokes: Vec<String>,
     /// Media we've asked an AUTHOR to put back (frame 31), awaiting their "it's back" (frame 32).
     ///
     /// A relay sweeps media on the operator's retention and a post outlives its blob, so "No longer

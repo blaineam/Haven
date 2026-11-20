@@ -326,14 +326,21 @@ pub fn prefer_volume(image: &Version, volume: Option<&Version>, bad: &[Version])
 /// Run `<bin> version` (bounded time) and parse `haven-relay X.Y.Z[-rc.N]`.
 pub fn binary_version(bin: &Path, timeout: Duration) -> Option<Version> {
     use std::process::{Command, Stdio};
-    let mut child = Command::new(bin)
-        .arg("version")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
     let deadline = std::time::Instant::now() + timeout;
+    // A file that was just written can still be "busy" for a moment: if any other thread forked
+    // while the writer's descriptor was open, the child holds it until its own exec, and the
+    // kernel refuses to run a file someone has open for writing. That is not "this binary does
+    // not run here" — treating it as such marked a good, signed update bad for ever — so wait
+    // it out within the same deadline.
+    let mut child = loop {
+        match Command::new(bin).arg("version").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn() {
+            Ok(c) => break c,
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(50))
+            }
+            Err(_) => return None,
+        }
+    };
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {

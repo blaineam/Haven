@@ -203,6 +203,27 @@ async fn end_to_end_volume_update_probation_rollback_and_never_retry() {
     let _ = std::fs::remove_dir_all(&data);
 }
 
+/// A binary that is still open for writing somewhere (another thread forked mid-write) cannot be
+/// run for a moment. That is a wait, not a verdict: the probe must not report "does not run".
+#[cfg(unix)]
+#[test]
+fn a_binary_that_is_briefly_busy_is_waited_for_not_called_broken() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tmpdir("busy");
+    std::fs::create_dir_all(&dir).unwrap();
+    let exe = dir.join("haven-relay");
+    std::fs::write(&exe, fake_binary("2.0.0")).unwrap();
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let held = std::fs::OpenOptions::new().append(true).open(&exe).unwrap();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(400));
+        drop(held);
+    });
+    assert_eq!(install::binary_version(&exe, Duration::from_secs(10)), Version::parse("2.0.0"));
+    release.join().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn end_to_end_inplace_update_commits_when_healthy() {

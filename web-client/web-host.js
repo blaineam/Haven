@@ -136,6 +136,9 @@
     app: { getVersion: async () => (await ready, haven.version()) },
   };
 
-  // For the smokes and the console.
+  // For the smokes and the console. `emit` hands the page one of its own UI events (the QA
+  // channel the desktop app's test driver uses, e.g. `haven:qa-ui`) — only for a harness that
+  // announced itself before any script ran.
   window.__HAVEN_WEB__ = { ready, flush: () => (storage ? storage.flush() : undefined), mode: () => (storage ? storage.mode : null), app: () => app, haven: () => haven };
+  if (window.__HAVEN_HARNESS__) window.__HAVEN_WEB__.emit = emit;
 })();

@@ -12175,34 +12175,52 @@ impl Engine {
         // nothing transmitted, nothing recorded. For an ACCEPT that is indistinguishable from the
         // network eating it: the callee has already flipped itself in-call, so it looks connected while
         // the caller waits out the full invite timer. Say so.
-        let sealed = match self.social.seal_call_frame(to_hex.to_string(), t, frame_body.to_vec()) {
-            Ok(s) if !s.is_empty() => s,
-            other => {
-                let known = self.social.device_node_ids_for(to_hex.to_string()).len();
-                log::info!(
-                    "call frame type={t} NOT SENT to {} — seal failed (recipient unresolvable: {known} known device id(s), {})",
-                    &to_hex.chars().take(8).collect::<String>(),
-                    if other.is_err() { "threw" } else { "empty" }
-                );
-                return;
-            }
-        };
-        // A call is the user saying "this person, now": a peer sitting in a dial backoff from earlier
-        // failures must be tried immediately (iOS/Android `CallDialPolicy` parity).
-        if crate::relayintro::call_setup_forgives_dial(t) {
-            self.forgive_dials(to_hex, None);
-        }
-        self.send_frame(t, &sealed, to_hex);
+        //
+        // ONE SEAL PER DEVICE. A frame sealed to the callee's ACCOUNT key opens only on a device
+        // that holds that key — a linked device that never received the seed (every browser, and
+        // any phone or tablet linked the seedless way) got the frame and could not open it, so it
+        // never rang. Each device the account's signed roster names gets its own copy, sealed to
+        // that device's key and addressed to its id (the receiver accepts a frame addressed to
+        // either of its ids). An account with no known devices keeps the single account-sealed
+        // frame, as does any device whose key is not known yet.
+        let account_sealed = self.social.seal_call_frame(to_hex.to_string(), t, frame_body.to_vec()).ok().filter(|s| !s.is_empty());
         let mut dests = self.social.device_node_ids_for(to_hex.to_string());
-        if dests.is_empty() {
-            dests.push(to_hex.to_string());
-        }
         for h in self.device_hints_for(to_hex) {
             if !dests.iter().any(|d| d.eq_ignore_ascii_case(&h)) {
                 dests.push(h);
             }
         }
-        self.originate_relay_internet(&dests, &wire::frame(t, &sealed));
+        if dests.is_empty() {
+            dests.push(to_hex.to_string());
+        }
+        // A call is the user saying "this person, now": a peer sitting in a dial backoff from earlier
+        // failures must be tried immediately (iOS/Android `CallDialPolicy` parity).
+        if crate::relayintro::call_setup_forgives_dial(t) {
+            self.forgive_dials(to_hex, None);
+        }
+        let mut sent = 0usize;
+        for dest in &dests {
+            let sealed = if dest.eq_ignore_ascii_case(to_hex) {
+                account_sealed.clone()
+            } else {
+                self.social
+                    .seal_call_frame(dest.clone(), t, frame_body.to_vec())
+                    .ok()
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| account_sealed.clone())
+            };
+            let Some(sealed) = sealed else { continue };
+            self.send_frame(t, &sealed, dest);
+            self.originate_relay_internet(std::slice::from_ref(dest), &wire::frame(t, &sealed));
+            sent += 1;
+        }
+        if sent == 0 {
+            log::info!(
+                "call frame type={t} NOT SENT to {} — seal failed (recipient unresolvable: {} known device id(s))",
+                &to_hex.chars().take(8).collect::<String>(),
+                self.social.device_node_ids_for(to_hex.to_string()).len(),
+            );
+        }
     }
 
     /// Originate a frame-9 live forward of `inner` to `dests` via up to 3 adopted internet relays.

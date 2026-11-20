@@ -320,11 +320,25 @@ Next, in order:
       - nothing else: scan answer, bound ticket, web mark, consent and re-keying worked first time.
       - [ ] Not run: the Android app (compiled, and it has the same driver ops), the Mac app as a
             host, and a physical device.
-- [ ] Calls. Nothing in the call path is desktop-only: every signalling command is in the shared
-      engine, the media is the browser's own WebRTC, the page's policy allows the relay's
-      WebSocket hairpin, and a page served over the relay's HTTPS address may ask for the camera
-      and microphone. It has NOT been run: a call needs two accounts that are contacts on one
-      relay, each with a browser, and the smoke's harness has one account.
+- [x] **Calls** (`web-client/smoke/call.mjs`): two accounts that are contacts on one relay, each
+      with a browser linked to it; one browser calls, the other rings and answers with its real
+      Accept button, the peer connection comes up in both, audio flows both ways, and hanging up
+      ends it on both. Passes repeatedly. It needs the internet (the two accounts find each
+      other as real ones do), so it is run by hand, not in CI. It found three things:
+      - **A call never rang on a device without the account key.** A call frame was sealed to
+        the callee's ACCOUNT key, so a linked device that never received the seed — every
+        browser, and any phone or tablet linked the seedless way — got it and could not open it
+        (`SEEDLESS-ENROLLMENT-PLAN.md` already said calls "degrade" there). Callers now seal one
+        copy to each device the callee's signed roster names, falling back to the account-sealed
+        frame for a device whose key is unknown. Changed in the shared engine, the Apple app and
+        the Android app; the Apple and Android changes are compiled, not run.
+      - Two copies of one offer, handled at the same moment, made the second "set local answer"
+        throw. Call events are now handled one at a time, and a duplicate offer or answer is
+        ignored.
+      - A re-sent invite made the offering side create a SECOND offer on a connection that
+        already had one. One offer per connection now; a repeat re-sends the same one.
+      - [ ] Not tested: video, screen sharing, group calls of three or more, and a call between a
+            browser and a phone.
 - Decided: a browser does not publish itself to, or look people up in, public discovery (the
   native apps do, to find a contact's devices with no relay in common). A browser reaches the
   network through its circle's relay and nothing else — that is the point of it — so it learns

@@ -9370,15 +9370,34 @@ final class FeedStore: ObservableObject {
         // earlier failures must be tried immediately, not when the cooldown happens to expire.
         if CallDialPolicy.forgivesBackoff(type) { forgiveDials(accountHex: nodeHex) }
         Task.detached(priority: .userInitiated) {
-            let sealedOpt = await engine.run {
+            // ONE SEAL PER DEVICE. A frame sealed to the callee's ACCOUNT key opens only on a device
+            // that holds that key — a linked device that never received the seed (every browser, and
+            // any device linked the seedless way) got the frame and could not open it, so it never
+            // rang. Each device the account's signed roster names gets its own copy, sealed to that
+            // device's key and addressed to its id; an account with no known devices, and any device
+            // whose key is not known yet, keeps the account-sealed frame. Desktop parity:
+            // `Engine::send_call_frame`.
+            let accountSealed = await engine.run {
                 try? $0.sealCallFrame(recipientNodeHex: nodeHex, frameType: type, data: payload)
             }
-            guard let sealed = sealedOpt, !sealed.isEmpty else {
-                let known = await engine.run { $0.deviceNodeIdsFor(accountHex: nodeHex).count }
-                HavenLog.call("call frame type=\(type) NOT SENT to \(nodeHex.prefix(8)) — seal failed (recipient unresolvable: \(known) known device id(s), \(sealedOpt == nil ? "threw" : "empty"))")
-                return
+            let known = await engine.run { $0.deviceNodeIdsFor(accountHex: nodeHex) }
+            let dests = known.isEmpty ? [nodeHex] : known
+            var sent = 0
+            for dest in dests {
+                var sealed = accountSealed
+                if dest.lowercased() != nodeHex.lowercased() {
+                    let own = await engine.run {
+                        try? $0.sealCallFrame(recipientNodeHex: dest, frameType: type, data: payload)
+                    }
+                    if let own, !own.isEmpty { sealed = own }
+                }
+                guard let sealed, !sealed.isEmpty else { continue }
+                await MainActor.run { FeedStore.shared.deliverSealedCallFrame(type, sealed, to: dest) }
+                sent += 1
             }
-            await MainActor.run { FeedStore.shared.deliverSealedCallFrame(type, sealed, to: nodeHex) }
+            if sent == 0 {
+                HavenLog.call("call frame type=\(type) NOT SENT to \(nodeHex.prefix(8)) — seal failed (recipient unresolvable: \(known.count) known device id(s))")
+            }
         }
     }
 

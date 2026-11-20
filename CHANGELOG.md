@@ -54,6 +54,14 @@ receiving device tried the key it already had, failed, discarded the post, and t
 app stayed open. The post is now kept and opened as soon as the key arrives. No security impact: nothing was readable that should not
 have been. Regression test: `s4_ffi_own_device_events_open_in_any_delivery_order`.
 
+### Fixed - A call did not ring on a linked device that holds no account key (not shipped; `feat/web-client`)
+A call's signalling was sealed to the account being called, so only a device holding that account's master key could open it. A
+device linked the newer, safer way never receives that key: it got the call and could not read it, so it never rang. Callers now
+seal a copy to each of the other person's devices. This is what makes calls work in a browser, and it also applies to phones,
+tablets and computers linked without the master key. Changed in the desktop engine, the Apple app and the Android app; tested
+between two browsers, compiled on Apple and Android. Also fixed in the desktop interface: two copies of the same call offer
+arriving together, or an invite re-sent mid-setup, could break the connection's negotiation.
+
 ### Added - Web client (not shipped; `feat/web-client`)
 Haven can run in a web browser. A circle's relay can serve the web client under `/app/`, and a member links the browser as one more
 of their own devices with a secure link code from a device they already use; the browser never holds the account's master key and
@@ -66,8 +74,8 @@ and the Mac teach the account's other devices the relay address (frame 37) the s
 linked from any of them. A browser can also be linked the other way round: it shows a code, and a device that has the account
 scans or is given it (desktop: Devices ▸ Add a device ▸ Scan its code; iPhone, iPad, Mac and Android: Link a device) — the
 ticket it answers with enrolls only the device that code names. Pictures and videos can be dropped onto the page. Still missing:
-shipping the bundle in any installer or store build, calls; the phones' screens for all of this are compiled but not yet run
-against a real browser.
+video and group calls in a browser (a one-to-one audio call between two browsers is tested), and a store build that carries the
+bundle.
 
 **A circle decides whether browsers may read it.** Linking a browser does not let it read anything: a circle's keys reach a
 browser only while that circle allows web devices. A circle with a creator follows its admins; an older circle or a direct

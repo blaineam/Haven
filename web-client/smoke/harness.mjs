@@ -45,8 +45,8 @@ export async function serve() {
 
 /** Start a native peer binary. `line(prefix)` resolves with the rest of the first stdout line that
  *  starts with `prefix` (already printed or yet to come); `lines` is everything printed so far. */
-export function startPeer(bin, args = ["127.0.0.1:0"]) {
-  const proc = spawn(bin, args, { stdio: ["pipe", "pipe", "inherit"] });
+export function startPeer(bin, args = ["127.0.0.1:0"], env = {}) {
+  const proc = spawn(bin, args, { stdio: ["pipe", "pipe", "inherit"], env: { ...process.env, ...env } });
   const lines = [];
   const waiters = [];
   let buf = "";

@@ -114,8 +114,15 @@ async fn run() -> AnyResult<()> {
         web_app: Some(Arc::new(bundle)),
     });
     engine.start().await;
-    engine.start_hosting().await.map_err(|e| e.to_string())?;
-    let origin = if tunnel {
+    // `HAVEN_SMOKE_GUEST=1`: a second account that hosts nothing — it becomes a contact of the
+    // hosting one and uses that account's relay, like a friend joining a circle.
+    let guest = std::env::var("HAVEN_SMOKE_GUEST").is_ok_and(|v| v == "1");
+    if !guest {
+        engine.start_hosting().await.map_err(|e| e.to_string())?;
+    }
+    let origin = if guest {
+        "none".to_string()
+    } else if tunnel {
         let mut public = None;
         for _ in 0..240 {
             if let (Some(url), _, true) = engine.live_front_door() {
@@ -160,8 +167,27 @@ async fn run() -> AnyResult<()> {
 
     let mut tickets = 1;
     let mut shown: HashSet<String> = HashSet::new();
+    let mut known_contacts: HashSet<String> = HashSet::new();
+    let mut web_allowed = false;
     loop {
         tokio::time::sleep(Duration::from_millis(200)).await;
+        // Accept every connection request (the person on the other end of an invite), and say
+        // when someone has become a contact (`CONTACT <account hex>`).
+        for req in engine.pending() {
+            engine.approve(req.id_hex.clone());
+            println!("APPROVED {}", req.id_hex);
+        }
+        for c in engine.contacts() {
+            if known_contacts.insert(c.id_hex.clone()) {
+                println!("CONTACT {}", c.id_hex);
+            }
+        }
+        // The circle's standing on web devices, whenever it changes (`WEBSTATE allowed=<bool>`).
+        let now_allowed = engine.circle_web_access(CIRCLE).allowed;
+        if now_allowed != web_allowed {
+            web_allowed = now_allowed;
+            println!("WEBSTATE allowed={web_allowed}");
+        }
         // Approve every enrollment request that verified against a ticket this device minted.
         for (device, _name) in engine.enroll_pending() {
             engine.approve_enroll(device.clone()).map_err(|e| e.to_string())?;
@@ -176,6 +202,15 @@ async fn run() -> AnyResult<()> {
             if line == "!ticket" {
                 tickets += 1;
                 println!("TICKET{tickets}={}", engine.mint_enroll_ticket().map_err(|e| e.to_string())?);
+                continue;
+            }
+            // `!invite` prints this account's invite link (`INVITE=`); `!connect <link>` uses one.
+            if line == "!invite" {
+                println!("INVITE={}", engine.invite_uri());
+                continue;
+            }
+            if let Some(uri) = line.strip_prefix("!connect ") {
+                println!("CONNECTING {}", engine.connect_by_link(uri.trim().to_string()));
                 continue;
             }
             // `!web on|off` states this account's position on web devices in the circle

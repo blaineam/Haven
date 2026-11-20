@@ -7726,9 +7726,23 @@ async function connectPeerIfNeeded(peer) {
   openHairpinForPeer(peer);
   const pc = pcFor(peer);
   if (call.me < peer) {
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    invoke("call_signal", { kind: "offer", sessionId: call.session, to: peer, json: JSON.stringify({ t: "offer", sdp: offer.sdp }) });
+    // ONE offer per connection. This runs from several places (accepting, each re-sent invite,
+    // a roster merge), sometimes at the same moment, and a second `createOffer` on a connection
+    // that already has one — or is already connected — fails ("order of m-lines…") or, worse,
+    // half-applies. Answered already: nothing to do. Offer outstanding: send the SAME offer again
+    // (the first copy may have been lost). Otherwise make it, once.
+    const send = (sdp) => invoke("call_signal", { kind: "offer", sessionId: call.session, to: peer, json: JSON.stringify({ t: "offer", sdp }) });
+    if (pc.currentRemoteDescription || pc.__offering) return;
+    if (pc.signalingState === "have-local-offer" && pc.localDescription) { send(pc.localDescription.sdp); return; }
+    if (pc.signalingState !== "stable") return;
+    pc.__offering = true;
+    try {
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      send(offer.sdp);
+    } finally {
+      pc.__offering = false;
+    }
   }
 }
 
@@ -7836,6 +7850,8 @@ async function onCallEvent(payload) {
       if (!call.localStream) await startMesh();
       const pc = pcFor(c.from);
       const { sdp } = JSON.parse(c.json);
+      // The same offer again (a second copy of the frame): it is already answered.
+      if (pc.signalingState === "stable" && pc.remoteDescription && pc.remoteDescription.sdp === sdp) return;
       await pc.setRemoteDescription({ type: "offer", sdp });
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
@@ -7846,6 +7862,8 @@ async function onCallEvent(payload) {
       if (!validSession(c.sessionId)) return;
       const pc = call.pcs.get(c.from); if (!pc) return;
       const { sdp } = JSON.parse(c.json);
+      // An answer is only meaningful while our offer is outstanding; a second copy is not.
+      if (pc.signalingState !== "have-local-offer") return;
       await pc.setRemoteDescription({ type: "answer", sdp });
       break;
     }
@@ -8899,7 +8917,15 @@ async function boot() {
   // A resumed import (see igimport::resume_if_needed) starts before this webview exists, so the
   // first event can land with nobody listening — ask once at boot rather than showing nothing.
   invoke("instagram_status").then((s) => { IG.status = s; renderImportPill(s); }).catch(() => {});
-  listen("haven:call", (e) => onCallEvent(e.payload));
+  // ONE call event at a time. `onCallEvent` awaits between reading the peer connection's state and
+  // changing it, and the same signalling frame routinely arrives twice (direct, and forwarded by a
+  // relay). Run concurrently, two copies of an offer each set the remote description and each
+  // tried to set a local answer — the second one into a connection already back in "stable",
+  // which throws. A queue keeps every event's read-then-write whole, and nothing it throws is
+  // left unhandled.
+  let callEvents = Promise.resolve();
+  listen("haven:call", (e) =>
+    (callEvents = callEvents.then(() => onCallEvent(e.payload)).catch((err) => console.warn("call event failed", err))));
   // QA driver → webview: deterministic call-UI actions (qa.rs "ui" op). Calls live in the page on
   // desktop, so this is the only way a test can make this leg PLACE or ANSWER one.
   listen("haven:qa-ui", (e) => {

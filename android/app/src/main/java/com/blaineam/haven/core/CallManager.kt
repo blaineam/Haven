@@ -353,14 +353,26 @@ object CallManager {
         // nothing is transmitted and nothing is recorded. For an ACCEPT that is indistinguishable from
         // the network eating it: the callee has already flipped itself in-call, so it looks connected
         // while the caller waits out the full invite timer. Say so. iOS parity.
-        val sealed = runCatching { HavenNet.engine.sealCallFrame(to, type.toUByte(), body) }.getOrNull()
-        if (sealed == null || sealed.isEmpty()) {
-            val known = runCatching { HavenNet.engine.deviceNodeIdsFor(to).size }.getOrDefault(0)
-            Log.i(TAG, "call frame type=$type NOT SENT to ${to.take(8)} — seal failed " +
-                "(recipient unresolvable: $known known device id(s), ${if (sealed == null) "threw" else "empty"})")
-            return
+        //
+        // ONE SEAL PER DEVICE. A frame sealed to the callee's ACCOUNT key opens only on a device that
+        // holds that key — a linked device that never received the seed (every browser, and any
+        // device linked the seedless way) got the frame and could not open it, so it never rang.
+        // Each device the account's signed roster names gets its own copy, sealed to that device's
+        // key and addressed to its id; an account with no known devices, and any device whose key
+        // is not known yet, keeps the account-sealed frame. Desktop/iOS parity.
+        val seal = { hex: String -> runCatching { HavenNet.engine.sealCallFrame(hex, type.toUByte(), body) }.getOrNull()?.takeIf { it.isNotEmpty() } }
+        val accountSealed = seal(to)
+        val known = runCatching { HavenNet.engine.deviceNodeIdsFor(to) }.getOrDefault(emptyList())
+        var sent = 0
+        for (dest in known.ifEmpty { listOf(to) }) {
+            val sealed = (if (dest.equals(to, ignoreCase = true)) null else seal(dest)) ?: accountSealed ?: continue
+            HavenNet.sendCallFrame(type, sealed, dest)
+            sent++
         }
-        HavenNet.sendCallFrame(type, sealed, to)
+        if (sent == 0) {
+            Log.i(TAG, "call frame type=$type NOT SENT to ${to.take(8)} — seal failed " +
+                "(recipient unresolvable: ${known.size} known device id(s))")
+        }
     }
 
     /** Seal + send a NON-call frame that must be as unforgeable as a call frame — today the media

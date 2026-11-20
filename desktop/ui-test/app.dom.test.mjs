@@ -2033,8 +2033,39 @@ test('calls: the callee side answers an offer and applies ICE candidates only fo
   assert.equal(pc.ice.length, 1);
   await ev(app, 'ice', { sessionId: 'stale', json: JSON.stringify({ c: 'late' }) });
   assert.equal(pc.ice.length, 1);
+  // The same offer delivered again (direct, and forwarded by a relay) is not answered twice — a
+  // real connection is already back in "stable", and a second local answer there throws.
+  const answers = () => app.calls.filter((c) => c.cmd === 'call_signal' && c.args.kind === 'answer').length;
+  const before = answers();
+  await ev(app, 'offer', { json: JSON.stringify({ t: 'offer', sdp: 'their-offer' }) });
+  assert.equal(answers(), before, 'a duplicate offer is ignored');
+  // An answer with no offer of ours outstanding is not applied (a real connection refuses it).
   await ev(app, 'answer', { json: JSON.stringify({ sdp: 'their-answer' }) });
-  assert.equal(pc.remote.sdp, 'their-answer');
+  assert.equal(pc.remote.sdp, 'their-offer');
+});
+
+test('calls: one offer per connection — repeated asks re-send the same offer, and an answered one sends none', async () => {
+  const { app } = await callOn();
+  await app.ev(`callStart([${JSON.stringify(BO)}], "Bo", false)`);
+  await ev(app, 'accept', { sessionId: callState(app).session });
+  const offers = () => app.calls.filter((c) => c.cmd === 'call_signal' && c.args.kind === 'offer');
+  const first = offers();
+  assert.equal(first.length, 1, 'the smaller id makes the one offer');
+  {
+    const sdp = JSON.parse(first[0].args.json).sdp;
+    // The invite is re-sent while unanswered: the offer goes again, byte for byte, never a new one.
+    await ev(app, 'accept', { sessionId: callState(app).session });
+    assert.ok(offers().every((o) => JSON.parse(o.args.json).sdp === sdp), 'only ever the same offer');
+    const pc = app.rtc.at(-1);
+    await ev(app, 'answer', { sessionId: callState(app).session, json: JSON.stringify({ sdp: 'their-answer' }) });
+    assert.equal(pc.remote.sdp, 'their-answer');
+    const n = offers().length;
+    await ev(app, 'accept', { sessionId: callState(app).session });
+    assert.equal(offers().length, n, 'an answered connection is not offered again');
+    // A second copy of the answer is ignored rather than thrown on.
+    await ev(app, 'answer', { sessionId: callState(app).session, json: JSON.stringify({ sdp: 'other' }) });
+    assert.equal(pc.remote.sdp, 'their-answer');
+  }
 });
 
 test('calls: a peer hanging up the last other participant ends the call; a stale BYE is ignored', async () => {

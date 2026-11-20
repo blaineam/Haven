@@ -102,7 +102,12 @@ try {
   // Their shared circle allows web devices only when both say so.
   other.write("!web on\n");
   await qa({ op: "web_access", circle_id: "default", allow: true });
+  // The second account's answer goes to the app's relay, which refuses it until the app has told
+  // the relay about its new contact (seconds on Android, up to half a minute on iPhone). A refused
+  // write is retried on the account's next sync, minutes later — so say it again instead of waiting.
+  let asked = 0;
   await until("both to see the circle allow web devices", async () => {
+    if (++asked % 5 === 0) other.write("!web on\n");
     await qa({ op: "web_access", circle_id: "default" });   // no `allow`: read the standing again
     return has(other, "WEBSTATE allowed=true") && (await dump()).web_access?.allowed === true;
   }, 180000, 4000);

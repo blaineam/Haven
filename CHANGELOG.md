@@ -9,6 +9,10 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Changed - The web client's module is a quarter smaller (not shipped; `feat/web-client`)
+The release build now runs `wasm-opt -Oz` on the WebAssembly module (10.9 MB to 8.3 MB; about 3.2 MB as served). CI requires the
+tool and runs the browser smoke against the optimized module.
+
 ### Added - The web client is tested against the Android app, and in calls with it (not shipped; `feat/web-client`)
 The browser-against-a-real-app test now also drives the Android app (over adb), and passes: linking by the browser's code, the web
 mark, per-circle consent, posts each way. A new test places a call between a browser and the Android app in each direction, and the

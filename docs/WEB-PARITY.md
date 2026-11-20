@@ -174,9 +174,17 @@ Next, in order:
       - None of it can hold a release back: called from an installer workflow the build step is
         allowed to fail, and an installer without the archive is a complete app with no switch.
       - Not verified until it has run: see the workflow's own runs.
-- [ ] Bundle size: ~10.8 MB of WebAssembly, ~3.5 MB on the wire (the proxy gzips every bundle
-      file once, at load, and serves that to browsers that accept it). `wasm-opt` and a brotli
-      variant (~2.3 MB measured) would cut it further; neither is done.
+- [x] Bundle size: the build runs Binaryen's `wasm-opt -Oz` on the module when it is installed,
+      and CI requires it (`HAVEN_REQUIRE_WASM_OPT=1`), so the release archive is always the
+      optimized one: 10.9 MB → 8.3 MB of WebAssembly, about 3.2 MB on the wire (the proxy gzips
+      every bundle file once, at load, and serves that to browsers that accept it). The browser
+      smoke in CI runs against the optimized module. A local build without `wasm-opt` is the same
+      program, larger.
+      - Decided, not done: a brotli variant (~2.3 MB measured before `wasm-opt`). The relay would
+        need a brotli encoder, or a decoder to check a pre-compressed file against the body it
+        claims to be — a new dependency in the relay and in every app that can host one, for
+        about a megabyte on a first visit. A relay behind a CDN or tunnel that compresses
+        responses may already get it; that was not measured.
 - [x] **Per-circle consent** (D22; "Which circles a browser can read" above).
       - The rule and the signed record: `core/haven-p2p/src/webpolicy.rs` (`CircleWebPolicy`,
         `web_allowed`), unit-tested and fuzzed. Records ride the circle's control lane as tag
@@ -364,8 +372,17 @@ Next, in order:
         `main` (`DisconnectGraceTest`); iPhone and Mac already had the guard.
       - The emulator the QA fleet keeps is in airplane mode; the two accounts find each other by
         public discovery, so the test needs it off (docs/QA.md).
-      - [ ] Not tested: a call with the iPhone app (same driver ops; not run), video or a group
-            call between a browser and an app, and a physical device.
+      - [ ] **Not passing against the iPhone app, and not understood.** The same test in a
+            simulator gets as far as "the two accounts are contacts" and stops: the app never
+            registers the second account's yes to web devices, so no call is attempted and the
+            iPhone's per-device call sealing is still unproven. Observed: the app told its relay
+            about the new contact 27 s to 3 min 20 s after taking their invite (the relay refuses
+            the contact's writes until then), and in seven minutes the app showed nothing received
+            from that account. Whether that is the test's unusual shape (the other account hosts
+            no relay and was added seconds earlier) or a real delay for a friend you add by taking
+            THEIR invite is not established. Contacts left over from earlier runs also hold the
+            default circle shut (every member must agree), so each attempt needs a fresh simulator.
+      - [ ] Not tested: video or a group call between a browser and an app, and a physical device.
 - Decided: a browser does not publish itself to, or look people up in, public discovery (the
   native apps do, to find a contact's devices with no relay in common). A browser reaches the
   network through its circle's relay and nothing else — that is the point of it — so it learns

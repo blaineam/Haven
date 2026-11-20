@@ -1,0 +1,144 @@
+/*
+  Haven scan-to-link — a NEW device shows a code and a device that has the account answers it.
+  Symbolic model (Tamarin).
+
+  Ordinary seedless enrollment runs the other way: the primary shows a ticket and the new device
+  scans it. A browser on a borrowed computer cannot scan and cannot be typed into from a phone, so
+  it shows a `haven-pair:` code instead and the primary answers with a ticket (frame 38). The
+  ticket then does what tickets always did. This model checks what the extra step changes.
+
+  Code: core/haven-p2p/src/pair.rs (PairCode, pair_offer_wire, open_pair_offer),
+  core/haven-client/src/engine.rs (link_scanned_device, handle_seedless_enroll_request — the
+  `bound_to` check), core/haven-client/src/pairing.rs. Spec: docs/WEB-PARITY.md.
+
+  Run:  tamarin-prover --prove docs/formal/haven_pair.spthy
+        tamarin-prover --prove -DUNBOUND docs/formal/haven_pair.spthy
+
+  What is modelled
+   - A DEVICE has a key. To be linked it SHOWS a code: its public key and a fresh one-time secret.
+   - The code can be READ by the adversary (LeakCode): someone photographs the screen, or the
+     page that showed it was served by a hostile relay. It cannot be altered on its way to the
+     scanning device — the person is looking at the screen they are scanning.
+   - The seed-holding device SCANS the code, mints a ticket secret, and sends it back sealed under
+     a key derived from the code's secret and the device's key.
+   - The new device opens the offer with its own code and sends an enrollment request: its key,
+     MAC'd under the ticket secret. The primary approves.
+     AS BUILT, a ticket minted for a scanned code is BOUND to that code's device: a request under
+     it for any other key is refused.
+   - -DUNBOUND models the looser rule deliberately NOT built: the ticket is an ordinary ticket and
+     enrolls whoever proves they hold it. P1 is falsified there — reading the code off the screen
+     would be enough to put a device of one's own on the account.
+   - The adversary controls the network and every relay, may read any code, may take any device's
+     key or an account's key, and has devices of its own.
+   - The person's "Approve" tap is not modelled: every well-formed request is approved. That makes
+     the properties hold WITHOUT relying on anyone reading a device name correctly.
+*/
+
+theory HavenPair
+begin
+
+builtins: signing, symmetric-encryption, hashing
+
+restriction Once: "All t #i #j. Once(t)@i & Once(t)@j ==> #i = #j"
+
+/* ---- Keys ---------------------------------------------------------------------------------- */
+
+rule Account:
+  [ Fr(~ask) ]
+  --[ Once(<'acct', $A>), AccountKey($A, ~ask) ]->
+  [ !Acct($A, ~ask), Out(pk(~ask)) ]
+
+rule RevealAccount:
+  [ !Acct(A, ask) ] --[ RevealAccount(A) ]-> [ Out(ask) ]
+
+rule Device:
+  [ Fr(~dsk) ]
+  --[ Once(<'dev', $D>), DevKey($D, pk(~dsk)) ]->
+  [ !Dev($D, ~dsk), Out(pk(~dsk)) ]
+
+rule RevealDevice:       /* the adversary's own devices, and any device it takes over */
+  [ !Dev(D, dsk) ] --[ RevealDevice(D) ]-> [ Out(dsk) ]
+
+/* ---- The code ------------------------------------------------------------------------------ */
+
+rule ShowCode:           /* the new device shows <its key, a fresh secret> and waits */
+  [ !Dev($D, dsk), Fr(~s) ]
+  --[ Showing($D, pk(dsk), ~s) ]->
+  [ !Code($D, pk(dsk), ~s), Waiting($D, dsk, ~s) ]
+
+rule LeakCode:           /* the screen is photographed, or the page that drew it was hostile */
+  [ !Code(D, k, s) ] --[ LeakCode(D) ]-> [ Out(s) ]
+
+/* ---- The answer (frame 38) ----------------------------------------------------------------- */
+
+rule Scan:               /* the seed holder scans D's screen and answers with a ticket */
+  let key   = h(<'pair-offer', s, k>)
+      offer = senc(<'offer', pk(ask), ~t>, key) in
+  [ !Acct($A, ask), !Code(D, k, s), Fr(~t) ]
+  --[ Scanned($A, D, k), Offered($A, D, pk(ask), ~t), TicketFor($A, D, k, ~t) ]->
+  [ !Ticket($A, ~t, k), Out(offer) ]
+
+rule AcceptOffer:        /* the new device opens an offer under ITS code and asks to be enrolled */
+  let key = h(<'pair-offer', s, pk(dsk)>) in
+  [ Waiting($D, dsk, s), In(senc(<'offer', pka, t>, key)) ]
+  --[ AcceptOffer($D, pka, t) ]->
+  [ Out(<'req', pk(dsk), h(<'req-mac', t, pk(dsk)>)>) ]
+
+/* ---- Enrollment ---------------------------------------------------------------------------- */
+
+#ifdef UNBOUND
+/* NOT BUILT: the ticket enrolls whoever proves they hold it. */
+rule Approve:
+  [ !Acct($A, ask), !Ticket($A, t, bound), In(<'req', k, h(<'req-mac', t, k>)>) ]
+  --[ EnrolledByScan($A, k) ]->
+  [ Out(sign(<'cred', $A, k>, ask)) ]
+#else
+/* AS BUILT: the request must be for the key the scanned code named. */
+rule Approve:
+  [ !Acct($A, ask), !Ticket($A, t, k), In(<'req', k, h(<'req-mac', t, k>)>) ]
+  --[ EnrolledByScan($A, k) ]->
+  [ Out(sign(<'cred', $A, k>, ask)) ]
+#endif
+
+/* ---- Sanity -------------------------------------------------------------------------------- */
+
+lemma executable_link_by_code:
+  exists-trace
+  "Ex A k #i. EnrolledByScan(A, k)@i
+     & not (Ex B #r. RevealAccount(B)@r) & not (Ex E #r. RevealDevice(E)@r)
+     & not (Ex E #l. LeakCode(E)@l)"
+
+/* ---- Properties ---------------------------------------------------------------------------- */
+
+/* P1 — only the scanned device is enrolled. Whatever key ends up enrolled on the strength of a
+   scan, the account's own device scanned a code naming exactly that key — even when the code was
+   read by the adversary, on a hostile network, with adversary-owned devices around. Reading a
+   code is not a way onto someone's account.
+   Under -DUNBOUND this is FALSIFIED: the adversary reads the code, opens the offer, and asks for
+   its own key under the ticket. */
+lemma P1_only_the_scanned_device_is_enrolled:
+  "All A k #i. EnrolledByScan(A, k)@i ==>
+      (Ex D #s. Scanned(A, D, k)@s) | (Ex #r. RevealAccount(A)@r)"
+
+/* P2 — the ticket stays between the two devices. The ticket secret in the offer is learned by
+   the adversary only if it read that device's code; the network and the relays carrying the
+   offer see nothing they can use. */
+lemma P2_the_ticket_is_sealed_under_the_code:
+  "All A D k t #i #j. TicketFor(A, D, k, t)@i & K(t)@j ==> (Ex #l. LeakCode(D)@l)"
+
+/* P3 — if nobody else read the code, the device joins the account that scanned it: an offer the
+   device accepts was sent by an account's own device, for this device, with that account's key. */
+lemma P3_an_unread_code_is_answered_only_by_whoever_scanned_it:
+  "All D pka t #i. AcceptOffer(D, pka, t)@i ==>
+      (Ex A #s. Offered(A, D, pka, t)@s) | (Ex #l. LeakCode(D)@l)"
+
+/* The stated LIMIT, on record as a reachable trace rather than left unsaid: whoever read the code
+   can answer it themselves, so the device accepts an offer no account's device sent it — in
+   practice, the browser joins the reader's account instead of its owner's. Nothing of the owner's
+   is exposed by that (P1, P2), and the owner sees the wrong account. */
+lemma limit_whoever_read_the_code_can_answer_it:
+  exists-trace
+  "Ex D pka t #i #l. AcceptOffer(D, pka, t)@i & LeakCode(D)@l
+     & not (Ex A #s. Offered(A, D, pka, t)@s)"
+
+end

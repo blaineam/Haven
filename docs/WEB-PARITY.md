@@ -205,7 +205,13 @@ Next, in order:
             "Scan its code" (camera) or paste. The smoke links a browser this way end to end.
       - [ ] iPhone/iPad, Mac and Android: a "Scan its code" action in their Devices screens, and
             the same bound-ticket check in their own enrollment handlers.
-      - [ ] The formal model (`haven_web_device.spthy`) does not cover the offer yet.
+      - [x] Formal model: `docs/formal/haven_pair.spthy`, in `verify.sh` / `EXPECTED.txt`. With
+            the network and relays hostile, adversary-owned devices around, and the code READ by
+            the adversary: P1 only the scanned device is enrolled; P2 the ticket is learned only by
+            reading that code; P3 an unread code is answered only by whoever scanned it. The
+            `-DUNBOUND` variant (an ordinary, unbound ticket — NOT built) falsifies P1. The limit
+            below is in the model too, as a reachable trace. The person's Approve tap is not
+            modelled, so none of this depends on someone reading a device name correctly.
       - What it does not protect against, stated plainly: someone who can read the code off the
         screen can answer it first with a ticket for THEIR account, so that browser joins their
         account instead (the person sees the wrong name and an empty feed; nothing of theirs is

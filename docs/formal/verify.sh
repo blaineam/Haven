@@ -34,6 +34,8 @@ CONFIGS=(
   "haven_device_roster||lemma"
   "haven_web_device||lemma"
   "haven_web_device|-DDEVICE_SPEAKS|lemma"
+  "haven_pair||lemma"
+  "haven_pair|-DUNBOUND|lemma"
   "haven_treekem_as_wired||lemma"
   "haven_treekem_stage1||lemma"
   "haven_treekem_stage1|-DLEGACY|lemma"

@@ -39,6 +39,16 @@ haven_web_device -DDEVICE_SPEAKS :: W3_the_account_key_survives_any_linked_devic
 haven_web_device -DDEVICE_SPEAKS :: W4_the_relay_token_is_sealed_to_its_device :: verified
 haven_web_device -DDEVICE_SPEAKS :: executable_accept_device :: verified
 haven_web_device -DDEVICE_SPEAKS :: executable_learn :: verified
+haven_pair :: P1_only_the_scanned_device_is_enrolled :: verified
+haven_pair :: P2_the_ticket_is_sealed_under_the_code :: verified
+haven_pair :: P3_an_unread_code_is_answered_only_by_whoever_scanned_it :: verified
+haven_pair :: executable_link_by_code :: verified
+haven_pair :: limit_whoever_read_the_code_can_answer_it :: verified
+haven_pair -DUNBOUND :: P1_only_the_scanned_device_is_enrolled :: falsified
+haven_pair -DUNBOUND :: P2_the_ticket_is_sealed_under_the_code :: verified
+haven_pair -DUNBOUND :: P3_an_unread_code_is_answered_only_by_whoever_scanned_it :: verified
+haven_pair -DUNBOUND :: executable_link_by_code :: verified
+haven_pair -DUNBOUND :: limit_whoever_read_the_code_can_answer_it :: verified
 haven_treekem_as_wired :: T1_secrecy_without_compromise :: verified
 haven_treekem_as_wired :: T2_removed_member_locked_out :: verified
 haven_treekem_as_wired :: T3_pcs_committer_state_heals :: falsified

@@ -324,7 +324,7 @@ Next, in order:
         it in, first time. The relay's ports are forwarded into the emulator with `adb reverse`.
       - [ ] Not run: the Mac app as a host (it cannot be launched from a worktree without touching
             the owner's real data), and a physical device.
-- [x] **Calls** (`web-client/smoke/call.mjs`): two accounts that are contacts on one relay, each
+- [x] **Calls** (`web-client/smoke/call.mjs`): accounts that are contacts on one relay, each
       with a browser linked to it; one browser calls, the other rings and answers with its real
       Accept button, the peer connection comes up in both, audio flows both ways, and hanging up
       ends it on both. Passes repeatedly. It needs the internet (the two accounts find each
@@ -345,6 +345,11 @@ Next, in order:
         up in the other browser (judged by the picture — a camera that is off still sends black
         frames at full rate, so a frame count proves nothing), both ways; a shared screen replaces
         it; stopping the share brings the camera back.
+      - **A group call of three** is in it too: a third account's browser is added to the call
+        in progress with the real "add" control, rings, answers, and every browser ends up
+        connected to the other two with media arriving; one person leaving leaves the other two
+        talking. Everyone in a group call has to be a contact of everyone else (a stranger's call
+        frames are dropped), so the test makes all three pairs contacts first.
 - [x] **A call between a browser and a real app** (`web-client/smoke/phone-call.mjs`): the Android
       app in the emulator is one account; a second account becomes its contact by invite link and
       links a browser through the app's relay. The browser calls the app and the app answers; the
@@ -358,8 +363,8 @@ Next, in order:
         `main` (`DisconnectGraceTest`); iPhone and Mac already had the guard.
       - The emulator the QA fleet keeps is in airplane mode; the two accounts find each other by
         public discovery, so the test needs it off (docs/QA.md).
-      - [ ] Not tested: group calls of three or more, a call with the iPhone app (same driver
-            ops; not run), video between a browser and an app, and a physical device.
+      - [ ] Not tested: a call with the iPhone app (same driver ops; not run), video or a group
+            call between a browser and an app, and a physical device.
 - Decided: a browser does not publish itself to, or look people up in, public discovery (the
   native apps do, to find a contact's devices with no relay in common). A browser reaches the
   network through its circle's relay and nothing else — that is the point of it — so it learns

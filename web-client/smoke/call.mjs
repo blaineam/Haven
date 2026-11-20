@@ -1,6 +1,7 @@
-// A CALL between two browsers: two accounts that are contacts on one relay, each with a browser
-// linked to it (by the browser's own code), both in a circle that allows web devices. One browser
-// calls, the other answers, and media flows — WebRTC in the page, signalling through the engine
+// CALLS between browsers: three accounts that are contacts on one relay, each with a browser
+// linked to it (by the browser's own code), all in a circle that allows web devices. One browser
+// calls, another answers, media flows, the camera and a shared screen get through, and a third
+// person is added mid-call — WebRTC in the page, signalling through the engine
 // and the relay, exactly the desktop app's call code.
 //
 //   node web-client/smoke/call.mjs <web_primary_engine binary>
@@ -29,10 +30,13 @@ async function until(what, f, ms = 120000) {
 }
 const step = (s) => console.log(`ok  ${s}`);
 const has = (peer, line) => peer.lines.some((l) => l.startsWith(line));
+/** The circle's standing as the account last printed it (it flips as members join and answer). */
+const webAllowed = (peer) => peer.lines.filter((l) => l.startsWith("WEBSTATE ")).pop() === "WEBSTATE allowed=true";
 
 let browsers = [];
 const host = startPeer(bin, [join(root, "dist")]);
 const guest = startPeer(bin, [join(root, "dist")], { HAVEN_SMOKE_GUEST: "1" });
+const third = startPeer(bin, [join(root, "dist")], { HAVEN_SMOKE_GUEST: "1" });
 const browser = await chromium.launch({
   args: ["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream", "--autoplay-policy=no-user-gesture-required",
     "--auto-select-desktop-capture-source=Entire screen"],
@@ -76,31 +80,44 @@ try {
   const origin = await host.line("ORIGIN=", 60000);
   const hostAccount = await host.line("ACCOUNT=");
   const guestAccount = await guest.line("ACCOUNT=");
+  const thirdAccount = await third.line("ACCOUNT=");
 
-  // The two accounts become contacts, by invite link.
+  // The three accounts become contacts of each other, by invite link.
   host.write("!invite\n");
   const invite = await host.line("INVITE=");
   guest.write(`!connect ${invite}\n`);
-  await until("the two accounts to be contacts", () => has(host, `CONTACT ${guestAccount}`) && has(guest, `CONTACT ${hostAccount}`), 180000);
-  step("two accounts are contacts (invite link, the real connection flow)");
+  third.write(`!connect ${invite}\n`);
+  const knows = (peer, ...others) => others.every((o) => has(peer, `CONTACT ${o}`));
+  // The two that host nothing connect to each other once both know the host's relay: an invite
+  // made before that names no relay, and neither would have anywhere to leave its acceptance.
+  await until("both to be the host's contacts", () => knows(host, guestAccount, thirdAccount) && knows(guest, hostAccount) && knows(third, hostAccount), 240000);
+  await sleep(5000);
+  guest.write("!invite\n");
+  third.write(`!connect ${await guest.line("INVITE=")}\n`);
+  await until("the three accounts to be contacts", () =>
+    knows(host, guestAccount, thirdAccount) && knows(guest, hostAccount, thirdAccount) && knows(third, hostAccount, guestAccount), 240000);
+  step("three accounts are contacts of each other (invite links, the real connection flow)");
 
-  // Their circle allows web devices only when BOTH say so.
-  host.write("!web on\n");
-  guest.write("!web on\n");
-  await until("both accounts to see the circle allow web devices", () => has(host, "WEBSTATE allowed=true") && has(guest, "WEBSTATE allowed=true"), 180000);
-  step("both members agreed, so the circle allows web devices");
+  // Their circle allows web devices only when EVERY member says so.
+  for (const p of [host, guest, third]) p.write("!web on\n");
+  await until("every account to see the circle allow web devices", () => [host, guest, third].every(webAllowed), 240000);
+  step("every member agreed, so the circle allows web devices");
 
   // Each account links a browser, both served by the hosting account's relay.
   const a = await linkedBrowser(origin, host, "the host's browser");
   const b = await linkedBrowser(origin, guest, "the guest's browser");
-  browsers = [a, b];
+  const c = await linkedBrowser(origin, third, "the third browser");
+  browsers = [a, b, c];
   step("each account linked a browser through the same relay");
 
-  for (const [w, other] of [[a, guestAccount], [b, hostAccount]]) {
-    await until(`${w.label} to know its account's contact`, async () => ((await w.invoke("contacts")) || []).some((c) => c.id_hex === other), 180000);
+  for (const [w, others] of [[a, [guestAccount, thirdAccount]], [b, [hostAccount, thirdAccount]], [c, [hostAccount, guestAccount]]]) {
+    await until(`${w.label} to know its account's contacts`, async () => {
+      const known = ((await w.invoke("contacts")) || []).map((x) => x.id_hex);
+      return others.every((o) => known.includes(o));
+    }, 180000);
     await until(`${w.label} to be let into the circle`, async () => (await w.invoke("circle_web_access", { circleId: "" }))?.allowed, 180000);
   }
-  step("both browsers know the other account and are let into the circle");
+  step("every browser knows the other accounts and is let into the circle");
 
   // The host's browser calls the guest's account; the guest's browser answers.
   const emit = (w, payload) => w.page.evaluate((p) => window.__HAVEN_WEB__.emit("haven:qa-ui", p), payload);
@@ -189,12 +206,33 @@ try {
   await flowing("the guest's browser to decode the camera again", a, b);
   step("stopping the share brings the camera back");
 
+  // A THIRD person, added to the call in progress with the real "add" control: everyone meshes.
+  await control(a, 3).click();
+  await a.page.locator(".modal .list-item button").first().click();   // the only contact not in the call
+  await a.page.keyboard.press("Escape");
+  await until("the third browser to ring", () => c.page.evaluate(() => !!document.querySelector(".call-overlay")), 90000);
+  await c.page.locator(".call-overlay button.btn.primary").click();
+  const links = (w) => w.page.evaluate(() => (window.__pcs || []).filter((pc) => pc.connectionState === "connected").length);
+  await until("every browser to be connected to the other two", async () => (await links(a)) === 2 && (await links(b)) === 2 && (await links(c)) === 2, 120000);
+  for (const w of [a, b, c]) {
+    const r0 = await received(w);
+    await until(`${w.label} to receive media in the group call`, async () => (await received(w)) > r0 + 4000, 60000);
+  }
+  await until("the group layout in the caller's browser", () => a.page.evaluate(() => document.querySelectorAll(".call-grid .call-tile").length === 2), 30000);
+  step("a third person added mid-call rings, answers, and all three are connected to each other");
+
+  // One person leaving does not end it for the other two.
+  await emit(c, { action: "call_end" });
+  await until("the third browser to leave", async () => !(await c.page.evaluate(() => !!document.querySelector(".call-screen, .call-overlay"))) && (await links(a)) === 1 && (await links(b)) === 1, 60000);
+  if (!(await a.page.evaluate(() => !!document.querySelector(".call-screen")))) throw new Error("one person leaving ended the call for everyone");
+  step("one person leaving leaves the other two in the call");
+
   await emit(a, { action: "call_end" });
   await until("the call to end in both browsers", async () =>
     !(await a.page.evaluate(() => !!document.querySelector(".call-screen, .call-overlay"))) && !(await b.page.evaluate(() => !!document.querySelector(".call-screen, .call-overlay"))), 60000);
   step("hanging up ends the call in both browsers");
 
-  for (const w of [a, b]) if (w.crashes.length) throw new Error(`${w.label} crashed: ${w.crashes.join(" | ")}`);
+  for (const w of [a, b, c]) if (w.crashes.length) throw new Error(`${w.label} crashed: ${w.crashes.join(" | ")}`);
   console.log("PASS");
 } catch (e) {
   failed = true;
@@ -214,5 +252,6 @@ try {
   await browser.close();
   host.kill();
   guest.kill();
+  third.kill();
 }
 process.exit(failed ? 1 : 0);

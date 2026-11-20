@@ -12,7 +12,7 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 ### Added - The web client is tested against the Android app, and in calls with it (not shipped; `feat/web-client`)
 The browser-against-a-real-app test now also drives the Android app (over adb), and passes: linking by the browser's code, the web
 mark, per-circle consent, posts each way. A new test places a call between a browser and the Android app in each direction, and the
-two-browser call test now covers the camera and screen sharing. The Android app's per-device call sealing ran for the first time
+browser call test now covers the camera, screen sharing, and a group call of three with a person added mid-call. The Android app's per-device call sealing ran for the first time
 here and works. Test-only additions to the debug driver: `connect_link` on Android, and `web_access` without `allow` reads a
 circle's standing without changing it (Apple and Android). The call test found the Android hang-up bug recorded above.
 

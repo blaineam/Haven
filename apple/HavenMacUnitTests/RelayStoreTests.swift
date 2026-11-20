@@ -297,6 +297,17 @@ final class RelayStoreTests: XCTestCase {
         XCTAssertTrue(store.allRelays().contains(r), "it is still a known relay (mesh, device roster)")
     }
 
+    /// What a sibling device is told a relay serves (frame 37 `circles`): the circles that use it and
+    /// no others — the receiver assigns it to exactly these (it used to assign every circle it had,
+    /// e2e `multirelay: no private circle's media on a friend's relay that doesn't serve it`).
+    func testASiblingDeviceIsToldARelayServesOnlyTheCirclesThatUseIt() {
+        let r = relay(), shared = circle(), priv = circle()
+        store.add(circleId: shared, nodeHex: r)
+        let served = [shared: store.relays(forCircle: shared), priv: store.relays(forCircle: priv)]
+        XCTAssertEqual(FeedStore.circlesServed(by: r, relaysByCircle: served), [shared])
+        XCTAssertEqual(FeedStore.circlesServed(by: relay(), relaysByCircle: served), [])
+    }
+
     func testBackoffStepGrowsOnlyAfterTheWindowExpires() {
         let first = RelayBackoffStep.next(fails: 0, nextRetryMs: 0, now: 1_000)
         XCTAssertEqual(first?.backoffMs, RelayBackoffStep.baseMs)

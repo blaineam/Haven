@@ -1038,6 +1038,39 @@ async fn linked_seedless(p: &Arc<Engine>) -> Arc<Engine> {
     Engine::new_seedless(paths).expect("relaunches linked")
 }
 
+/// The privacy rule behind frame 37: hearing how to reach a relay never puts a circle ON it. A
+/// sibling device used to assign every relay it was told about to every circle it held, so a
+/// private circle's photos were mirrored to a friend's relay that serves only the circle we share.
+#[tokio::test]
+async fn a_relay_interface_assigns_a_relay_only_to_the_circles_it_serves() {
+    const SHARED_RELAY: &str = "a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7";
+    const UNLISTED_RELAY: &str = "b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8";
+    let (p, _) = new_engine(243);
+    let s = linked_seedless(&p).await;
+    let me = p.node_id_hex();
+    let dev_hex = s.social.my_device_node_hex();
+    let private = s.create_circle("Private".into());
+    let before = s.prefs.lock().relays.clone();
+    let relays = serde_json::json!([
+        { "node": SHARED_RELAY, "urls": ["https://friend.example"], "token": "t", "circles": [DEFAULT_CIRCLE] },
+        { "node": UNLISTED_RELAY, "urls": ["https://other.example"], "token": "u" },
+    ]);
+    let frame = wire::relay_interface_frame(&me, &serde_json::to_vec(&relays).unwrap());
+    let sealed = p.social.seal_call_frame(dev_hex, wire::RELAY_INTERFACE, frame).expect("seals");
+    s.handle_relay_interface(&sealed).await;
+
+    let prefs = s.prefs.lock();
+    assert!(prefs.relay_http(SHARED_RELAY).is_some() && prefs.relay_http(UNLISTED_RELAY).is_some(), "both are reachable");
+    assert!(prefs.relays[DEFAULT_CIRCLE].iter().any(|h| h == SHARED_RELAY), "the circle it serves gets it");
+    let on_private = prefs.relays.get(&private).cloned().unwrap_or_default();
+    assert!(!on_private.iter().any(|h| h == SHARED_RELAY || h == UNLISTED_RELAY), "the private circle gets neither");
+    for (circle, list) in prefs.relays.iter() {
+        assert!(!list.iter().any(|h| h == UNLISTED_RELAY), "a relay with no circles named is assigned nowhere ({circle})");
+        let had = before.get(circle).cloned().unwrap_or_default();
+        assert!(list.iter().all(|h| had.contains(h) || (circle == DEFAULT_CIRCLE && h == SHARED_RELAY)));
+    }
+}
+
 #[tokio::test]
 async fn a_relay_interface_is_learned_only_from_the_accounts_own_key() {
     const RELAY: &str = "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1";
@@ -1047,7 +1080,8 @@ async fn a_relay_interface_is_learned_only_from_the_accounts_own_key() {
     assert_eq!(s.social.my_node_hex(), me, "the linked device is on the primary's account");
     let dev_hex = s.social.my_device_node_hex();
     let relays = serde_json::json!([
-        { "node": RELAY, "urls": ["https://relay.example"], "token": "tok", "derp": "https://relay.example/" },
+        { "node": RELAY, "urls": ["https://relay.example"], "token": "tok", "derp": "https://relay.example/",
+          "circles": [DEFAULT_CIRCLE, "a-circle-this-device-does-not-hold"] },
         { "node": "not-a-node", "urls": ["https://evil.example"], "token": "x" },
         { "node": "d2".repeat(32), "urls": ["ftp://nope"], "token": "x" },
     ]);
@@ -1081,6 +1115,7 @@ async fn a_relay_interface_is_learned_only_from_the_accounts_own_key() {
         let prefs = s.prefs.lock();
         assert_eq!(prefs.relay_entries[RELAY].derp_url, "https://relay.example");
         assert!(prefs.relays.get(DEFAULT_CIRCLE).is_some_and(|l| l.iter().any(|h| h == RELAY)));
+        assert!(!prefs.relays.contains_key("a-circle-this-device-does-not-hold"), "only circles held here");
         assert!(!prefs.relay_entries.contains_key("not-a-node"));
         assert!(prefs.relay_http(&"d2".repeat(32)).is_none(), "a non-http URL is not an interface");
     }

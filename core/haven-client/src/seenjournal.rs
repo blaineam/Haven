@@ -110,8 +110,12 @@ mod tests {
         crate::fs::create_dir_all(&d).unwrap();
         d
     }
-    fn rand_suffix() -> u128 {
-        web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).unwrap().as_nanos()
+    /// Unique per call. The clock alone is not: it ticks in microseconds here, so two tests starting
+    /// together shared one directory and the first to finish deleted it under the other.
+    fn rand_suffix() -> String {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        format!("{}-{n}", web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).unwrap().as_nanos())
     }
 
     #[test]

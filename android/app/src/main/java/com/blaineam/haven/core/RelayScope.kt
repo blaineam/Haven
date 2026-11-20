@@ -57,6 +57,11 @@ class RelayScope(private val now: () -> Long = System::currentTimeMillis, privat
     }
 
     companion object {
+        /** The circles (sorted) whose relay list holds [relay] — frame 37's `circles` for that relay:
+         *  a sibling device assigns the relay to exactly these, never to every circle it has. */
+        fun circlesServed(relay: String, relaysByCircle: Map<String, List<String>>): List<String> =
+            relaysByCircle.filterValues { relay in it }.keys.sorted()
+
         /**
          * The relays a circle with NO relays of its own may be guessed onto (a self-sync-learned circle
          * whose record carried an empty list): a relay listed for another circle Y is usable only when

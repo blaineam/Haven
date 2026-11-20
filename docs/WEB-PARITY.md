@@ -135,10 +135,17 @@ Next, in order:
         filesystem (it has a test for that).
       - A hosting engine hands it the bundle (`HostingOptions.web_app`) only while the
         `relay_web_access` setting is on — **off by default**.
-      - A new frame, 36 (`wire::RELAY_INTERFACE`): the account's seed-holding device tells its own
+      - A new frame, 37 (`wire::RELAY_INTERFACE`): the account's seed-holding device tells its own
         other devices each relay's URLs + token. A browser has no blob transport and holds no
         circle key yet, so it could not learn them any other way. Accepted only when signed by the
         account's own key — not a contact, not another linked device.
+      - Each relay in that frame names the circles it serves (`circles`), and the receiving device
+        assigns it to exactly those. The first build assigned every relay to every circle the
+        device held, which put a private circle on a friend's relay: the release gate caught a
+        private photo mirrored to two relays that serve only a shared circle (e2e `multirelay: no
+        private circle's media on a friend's relay that doesn't serve it`). Never shipped.
+        Regression test: `a_relay_interface_assigns_a_relay_only_to_the_circles_it_serves`, plus
+        the sender-side tests on Apple and Android.
       - Fixed on the way: the proxy stripped `Connection: Upgrade` from WebSocket upgrades, which
         every browser rejects (native clients never checked).
 - [x] **Hosts can offer it.**

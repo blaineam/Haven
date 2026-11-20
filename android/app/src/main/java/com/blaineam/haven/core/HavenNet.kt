@@ -5042,9 +5042,13 @@ object HavenNet : InboundListener {
         val targets = only?.let { listOf(it.lowercase()) } ?: runCatching { myOtherDeviceHexes() }.getOrDefault(emptyList())
         if (targets.isEmpty()) return
         val relays = JSONArray()
+        // WHICH circles each relay serves here rides along: the receiver assigns it to exactly those.
+        // It used to assign every relay to every circle it had, which carried a private circle onto a
+        // friend's relay (e2e `multirelay: no private circle's media on a friend's relay`).
+        val served = runCatching { social.circles() }.getOrDefault(emptyList()).associate { it.id to relaysFor(it.id) }
         for ((hex, e) in relayEntries.toSortedMap()) {
             if (hex.length != 64 || e.isS3 || !e.active || e.httpUrls.isEmpty() || e.httpToken.isEmpty()) continue
-            relayAnnounceJson(hex)?.let { relays.put(it) }
+            relayAnnounceJson(hex)?.let { relays.put(it.put("circles", JSONArray(RelayScope.circlesServed(hex, served)))) }
         }
         if (relays.length() == 0) return
         val account = runCatching { social.myNodeHex() }.getOrNull()?.lowercase() ?: return

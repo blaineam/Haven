@@ -57,6 +57,10 @@ pub const CALL_ENDED_ELSEWHERE: u8 = 35;
 /// could never take the first step. Receivers accept it ONLY from their own account's key — never
 /// from a contact, and never from another (possibly seedless) device of the account, so a
 /// compromised linked device cannot repoint its siblings' relays.
+///
+/// Each relay object may carry `circles`: the circle ids that relay serves on the sender. The
+/// receiver assigns the relay to exactly those (the ones it holds) and to no other circle — how to
+/// reach a relay is never, by itself, a reason to put a circle on it.
 pub const RELAY_INTERFACE: u8 = 37;
 
 /// Scan-to-link offer (`haven_p2p::pair`): a device that holds the account sends an enrollment

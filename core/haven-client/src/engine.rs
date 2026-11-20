@@ -7398,10 +7398,21 @@ impl Engine {
                 .map(|e| e.hex.clone())
                 .collect()
         };
+        // WHICH circles each relay serves here rides along (`circles`), and the receiver assigns the
+        // relay to exactly those. It used to assign every relay to every circle it had, which put a
+        // private circle on a friend's relay the moment a sibling device heard this frame: its media
+        // was mirrored there (e2e `multirelay: no private circle's media on a friend's relay`).
+        let by_circle: Vec<(String, Vec<String>)> =
+            self.social.circles().into_iter().map(|c| (c.id.clone(), self.relays_for(&c.id))).collect();
         let relays: Vec<serde_json::Value> = hexes
             .iter()
-            .filter_map(|h| serde_json::from_slice::<serde_json::Value>(&self.relay_announce_body(h)).ok())
-            .filter(|v| v.is_object())
+            .filter_map(|h| {
+                let mut v = serde_json::from_slice::<serde_json::Value>(&self.relay_announce_body(h)).ok()?;
+                let circles: Vec<&str> =
+                    by_circle.iter().filter(|(_, l)| l.contains(h)).map(|(c, _)| c.as_str()).collect();
+                v.as_object_mut()?.insert("circles".into(), serde_json::json!(circles));
+                Some(v)
+            })
             .collect();
         if relays.is_empty() {
             return;
@@ -7417,6 +7428,9 @@ impl Engine {
     /// not a contact (they use the circle-sealed frame 19), and not another device of mine speaking
     /// for the account — a linked device that was compromised must not be able to repoint its
     /// siblings at a relay of an attacker's choosing.
+    /// How many circle ids one relay's entry in a frame-37 body may name.
+    const RELAY_INTERFACE_MAX_CIRCLES: usize = 512;
+
     async fn handle_relay_interface(self: &Arc<Self>, sealed: &[u8]) {
         let Some(opened) = self.social.open_call_frame(wire::RELAY_INTERFACE, sealed.to_vec()) else { return };
         let me = self.social.my_node_hex().to_lowercase();
@@ -7451,7 +7465,15 @@ impl Engine {
                 if let Some(d) = v["derp"].as_str().map(|d| d.trim().trim_end_matches('/')).filter(|d| d.starts_with("http")) {
                     changed |= p.set_relay_derp(&node, d);
                 }
-                for cid in &circle_ids {
+                // Only the circles the sender says this relay serves, and only ones held here. A
+                // frame that names none teaches how to REACH the relay and assigns it nowhere: the
+                // circle's own relay list arrives by self-sync. Never "every circle I have" — that
+                // carried a private circle onto relays its members never chose.
+                let serves: Vec<&str> = v["circles"]
+                    .as_array()
+                    .map(|a| a.iter().filter_map(|c| c.as_str()).take(Self::RELAY_INTERFACE_MAX_CIRCLES).collect())
+                    .unwrap_or_default();
+                for cid in circle_ids.iter().filter(|c| serves.contains(&c.as_str())) {
                     let list = p.relays.entry(cid.clone()).or_default();
                     if !list.contains(&node) {
                         list.push(node.clone());

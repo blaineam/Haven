@@ -53,6 +53,14 @@ class HavenNetFriendRelayScopeTest {
         assertEquals(listOf(own), HavenNet.relaysForCircle("cS"))
     }
 
+    /** What a sibling device is told a relay serves (frame 37 `circles`): the circles that use it and
+     *  no others — the receiver assigns it to exactly these (it used to assign every circle it had). */
+    @Test fun a_sibling_device_is_told_a_relay_serves_only_the_circles_that_use_it() {
+        val served = listOf("cA", "cS", "dm:b").associateWith { HavenNet.relaysForCircle(it) }
+        assertEquals(listOf("cS", "dm:b"), RelayScope.circlesServed(bDevice, served))
+        assertEquals(emptyList<String>(), RelayScope.circlesServed("ff".repeat(32), served))
+    }
+
     @Test fun ticking_the_friends_relay_for_a_circle_explicitly_is_the_users_choice() {
         env.bindCircleRelay("cA", bDevice)
         assertEquals(listOf(bDevice), HavenNet.relaysForCircle("cA"))

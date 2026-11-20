@@ -187,13 +187,16 @@ Next, in order:
         has not allowed it. Nine languages on Apple and Android, seven on desktop.
       - Tests: `core/haven-ffi/src/web_consent_tests.rs` (six, sender-key lane),
         `mls_a_web_device_is_a_leaf_only_while_the_circle_allows_web_devices` (v1 key tree), the
-        desktop UI tests, and the browser smoke (shut out when linked, keyed in when allowed).
+        v2 tree test below, the desktop UI tests, and the browser smoke (shut out when linked, keyed in when allowed).
       - Formal model: `docs/formal/haven_web_consent.spthy` — C1 a web device is keyed only with
         every member's yes; C2 a browser cannot pass as an app (`-DSTRIPPABLE`, the class outside
         the signature, falsifies it); C3 a circle key is read only by the device it was sealed to.
-      - [ ] Not exercised: the v2 key tree with a web device (it uses the same filtered leaf set
-            and the same re-admission rule, but no test puts a browser in a v2 fleet); the phones'
-            and Mac's screens have been compiled, not run.
+      - The v2 key tree has its own test
+        (`a_web_device_is_a_v2_leaf_only_while_the_circle_allows_web_devices`): out, in, out, back
+        in. It found that a Removed browser never asked to come back on that tree (a device does
+        not re-offer a key package once it has been Removed); a web device now does when its
+        circle allows web devices again.
+      - [ ] Not exercised: the phones' and Mac's screens have been compiled, not run.
 - [x] **The UI.** The browser runs the desktop frontend (`desktop/ui`) unchanged, with a host shim
       in place of Tauri (`web-client/web-host.js`).
       - 141 of the desktop app's 164 commands need only the engine and moved to

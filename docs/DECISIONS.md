@@ -467,8 +467,8 @@ provable owner — a legacy circle, a direct message — needs a signed yes from
 Positions are signed with the account key (`CircleWebPolicy`), so a linked device, and therefore
 any browser, cannot state one. Silence is no. Spec and limits: [`WEB-PARITY.md`](WEB-PARITY.md).
 
-**Why two rules:** the creator-bound circles already have a verifiable authority (D-M3 admin
-grants) and people expect its admins to run it. The older circles and every conversation have
+**Why two rules:** the creator-bound circles already have a verifiable authority (admin grants,
+`TREEKEM-DESIGN.md` §4.3) and people expect its admins to run it. The older circles and every conversation have
 none, and inventing one would repeat the first-claim-wins problem that circle upgrades exist to
 avoid. Where nobody can speak for a circle, nobody is spoken for.
 

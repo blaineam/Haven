@@ -1185,10 +1185,18 @@ fn offer_key_package(st: &mut NetState, idx: usize) -> Option<Vec<u8>> {
     let me = my_device_id(st)?;
     let cred = my_credential(st)?;
     let seed = st.device.as_ref()?.secret_seed();
+    // A WEB device that was Removed because its circle stopped allowing web devices asks to come
+    // back once the circle allows them again (per-circle consent). Removal is otherwise final for
+    // the device's own asking; here the circle's signed yes is the explicit act, and the committer
+    // applies the same exception when it considers the package (`sync_roster`).
+    let web_allowed_here = cred.is_web() && circle_allows_web(st, idx);
     let shadow = tree_mut(st, &circle_id);
     let cur = mls_replay(shadow, None);
     let waited = welcome_overdue(shadow, &me, &cur);
-    if !wants_entry(shadow, &me, &cur, waited) {
+    let asks_back = web_allowed_here
+        && canonical(shadow)
+            .is_some_and(|(_, state)| leaf_of_device(&state.tree, &me).is_none() && state.removed.contains(&me));
+    if !wants_entry(shadow, &me, &cur, waited) && !asks_back {
         return None;
     }
     let used: HashSet<[u8; 32]> = canonical(shadow).map(|(_, s)| s.added).unwrap_or_default();

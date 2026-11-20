@@ -348,3 +348,69 @@ mod tests {
         assert_eq!(camera_state_stamp(&[me.as_bytes(), &[0]].concat()), None);
     }
 }
+
+
+/// Offers and answers already applied, by the exact sealed bytes that carried them.
+///
+/// A call frame travels by more than one route (direct, relay forward, the relay's live lane under
+/// each circle), and the relay copies can land many seconds late. A late copy of an OLD offer was
+/// applied again: a screen share that had ended came back and went away again on the other side,
+/// and the next real offer then failed to carry its picture (e2e `screenshare … [again]`). Sealing
+/// is randomised, so identical bytes are always the same transmission, never a new offer that
+/// happens to say the same thing.
+#[derive(Default)]
+pub struct SdpReplay {
+    seen: std::collections::HashSet<[u8; 32]>,
+    order: std::collections::VecDeque<[u8; 32]>,
+}
+
+impl SdpReplay {
+    const KEEP: usize = 512;
+
+    /// True the first time these bytes are offered (and for every frame that is not an offer or an
+    /// answer); false for a copy already applied.
+    pub fn first_time(&mut self, frame_type: u8, sealed: &[u8]) -> bool {
+        use sha2::{Digest, Sha256};
+        if frame_type != crate::wire::SDP_OFFER && frame_type != crate::wire::SDP_ANSWER {
+            return true;
+        }
+        let mut h = Sha256::new();
+        h.update([frame_type]);
+        h.update(sealed);
+        let key: [u8; 32] = h.finalize().into();
+        if !self.seen.insert(key) {
+            return false;
+        }
+        self.order.push_back(key);
+        if self.order.len() > Self::KEEP {
+            if let Some(old) = self.order.pop_front() {
+                self.seen.remove(&old);
+            }
+        }
+        true
+    }
+}
+
+#[cfg(test)]
+mod sdp_replay_tests {
+    use super::SdpReplay;
+    use crate::wire;
+
+    #[test]
+    fn a_late_copy_of_an_offer_or_answer_is_applied_once() {
+        let mut r = SdpReplay::default();
+        assert!(r.first_time(wire::SDP_OFFER, b"offer-1"));
+        assert!(!r.first_time(wire::SDP_OFFER, b"offer-1"), "the relay's late copy");
+        assert!(r.first_time(wire::SDP_OFFER, b"offer-2"), "a new offer is new bytes");
+        assert!(r.first_time(wire::SDP_ANSWER, b"offer-1"), "the type is part of the identity");
+        assert!(!r.first_time(wire::SDP_ANSWER, b"offer-1"));
+        // Other frames are never held back: ICE repeats are harmless and invites are retransmitted.
+        assert!(r.first_time(wire::ICE, b"x") && r.first_time(wire::ICE, b"x"));
+        // Bounded: the oldest is forgotten, the newest still remembered.
+        for i in 0..600u32 {
+            assert!(r.first_time(wire::SDP_OFFER, &i.to_le_bytes()));
+        }
+        assert!(r.first_time(wire::SDP_OFFER, b"offer-1"), "long gone from the window");
+        assert!(!r.first_time(wire::SDP_OFFER, &599u32.to_le_bytes()));
+    }
+}

@@ -616,6 +616,19 @@ final class CallsSignallingTests: XCTestCase {
         XCTAssertFalse(CallManager.forceHairpin)
     }
 
+    /// e2e `screenshare … [again]`: the relay's late copy of an old offer was applied a second time.
+    func testALateCopyOfAnOfferOrAnswerIsAppliedOnce() {
+        var r = SdpReplay(keep: 4)
+        XCTAssertTrue(r.firstTime(type: 16, sealed: Data("offer-1".utf8)))
+        XCTAssertFalse(r.firstTime(type: 16, sealed: Data("offer-1".utf8)), "the relay's late copy")
+        XCTAssertTrue(r.firstTime(type: 16, sealed: Data("offer-2".utf8)), "a new offer is new bytes")
+        XCTAssertTrue(r.firstTime(type: 17, sealed: Data("offer-1".utf8)), "the type is part of the identity")
+        XCTAssertTrue(r.firstTime(type: 18, sealed: Data("x".utf8)) && r.firstTime(type: 18, sealed: Data("x".utf8)))
+        for i in 0..<6 { XCTAssertTrue(r.firstTime(type: 16, sealed: Data([UInt8(i)]))) }
+        XCTAssertTrue(r.firstTime(type: 16, sealed: Data("offer-1".utf8)), "long gone from the window")
+        XCTAssertFalse(r.firstTime(type: 16, sealed: Data([5])))
+    }
+
     func testCallsAreIdleWhenNothingIsHappening() {
         XCTAssertFalse(cm.callAudioAvailable && cm.callInProgress)
         XCTAssertFalse(cm.mediaConnected)

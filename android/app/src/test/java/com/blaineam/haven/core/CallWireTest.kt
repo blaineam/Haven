@@ -136,4 +136,16 @@ class CallWireTest {
         assertEquals(18, CallWire.ICE)
         assertEquals(21, CallWire.GROUP_INVITE)
     }
+
+    @Test fun a_late_copy_of_an_offer_or_answer_is_applied_once() {
+        val r = SdpReplay(keep = 4)
+        assertTrue(r.firstTime(Wire.SDP_OFFER, "offer-1".toByteArray()))
+        assertFalse("the relay's late copy", r.firstTime(Wire.SDP_OFFER, "offer-1".toByteArray()))
+        assertTrue("a new offer is new bytes", r.firstTime(Wire.SDP_OFFER, "offer-2".toByteArray()))
+        assertTrue("the type is part of the identity", r.firstTime(Wire.SDP_ANSWER, "offer-1".toByteArray()))
+        assertTrue(r.firstTime(Wire.ICE, "x".toByteArray()) && r.firstTime(Wire.ICE, "x".toByteArray()))
+        for (i in 0 until 6) assertTrue(r.firstTime(Wire.SDP_OFFER, byteArrayOf(i.toByte())))
+        assertTrue("long gone from the window", r.firstTime(Wire.SDP_OFFER, "offer-1".toByteArray()))
+        assertFalse(r.firstTime(Wire.SDP_OFFER, byteArrayOf(5)))
+    }
 }

@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import AVFoundation
 import AVKit
 import CoreImage
@@ -3041,3 +3042,32 @@ struct ScreenPickerSheet: View {
     }
 }
 #endif
+
+
+/// Offers and answers already applied, by the exact sealed bytes that carried them.
+///
+/// A call frame travels by more than one route (direct, relay forward, the relay's live lane under
+/// each circle) and the relay copies can land many seconds late. A late copy of an OLD offer was
+/// applied again: a screen share that had ended came back and went away again here, and the next
+/// real offer then failed to carry its picture (e2e `screenshare … [again]`). Sealing is
+/// randomised, so identical bytes are always the same transmission. Rust / Android `SdpReplay` parity.
+struct SdpReplay {
+    private var seen = Set<Data>()
+    private var order: [Data] = []
+    let keep: Int
+
+    init(keep: Int = 512) { self.keep = keep }
+
+    /// True the first time these bytes are offered (and for every frame that is not an offer or an
+    /// answer); false for a copy already applied.
+    mutating func firstTime(type: UInt8, sealed: Data) -> Bool {
+        guard type == 16 || type == 17 else { return true }
+        var h = SHA256()
+        h.update(data: Data([type])); h.update(data: sealed)
+        let key = Data(h.finalize())
+        guard seen.insert(key).inserted else { return false }
+        order.append(key)
+        if order.count > keep { seen.remove(order.removeFirst()) }
+        return true
+    }
+}

@@ -310,6 +310,8 @@ object CallManager {
         TelecomCalls.register(appContext)   // self-managed phone account; harmless if the platform refuses
     }
 
+    private val sdpReplay = SdpReplay()
+
     /**
      * Inbound call frame, called OFF main by HavenNet. Opening + verifying it is an engine call
      * that waits on the engine lock — on main that parked the UI behind any background ingest or
@@ -319,6 +321,11 @@ object CallManager {
      */
     private suspend fun receive(type: Int, sealedBody: ByteArray) {
         val body = openCallFrame(type, sealedBody)
+        // Only a frame that OPENED is remembered: a forged copy must not shadow the real one.
+        if (body != null && !sdpReplay.firstTime(type, sealedBody)) {
+            Log.i(TAG, "call frame type=$type already applied (a late copy by another route) — ignored")
+            return
+        }
         kotlinx.coroutines.withContext(callDispatcher) { handle(type, body) }
     }
 

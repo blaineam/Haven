@@ -1237,6 +1237,8 @@ final class FeedStore: ObservableObject {
     }
 
     private var liveCallPollInFlight = false
+    /// Offers/answers already applied — see `SdpReplay`.
+    private var sdpReplay = SdpReplay()
 
     /// Pull HTTP-mailbox live-call frames addressed to this device/account and dispatch as inbound frames.
     @MainActor
@@ -7463,6 +7465,11 @@ final class FeedStore: ObservableObject {
                 }
                 if ConnectionsStore.shared.isBlocked(opened.verified) {
                     HavenLog.call("call frame type=\(type) DROPPED — sender \(opened.verified.prefix(8)) is blocked")
+                    return
+                }
+                // Only a frame that OPENED is remembered: a forged copy must not shadow the real one.
+                guard self.sdpReplay.firstTime(type: type, sealed: payload) else {
+                    HavenLog.call("call frame type=\(type) already applied (a late copy by another route) — ignored")
                     return
                 }
                 HavenLog.call("call frame type=\(type) accepted from \(signerAccount.prefix(8))")

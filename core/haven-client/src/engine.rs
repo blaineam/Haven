@@ -479,6 +479,8 @@ impl Default for HostingOptions {
 pub struct Engine {
     /// A coalesced state write is already scheduled — see `persist_coalesced`.
     persist_pending: std::sync::atomic::AtomicBool,
+    /// The host has been told this device was removed from its account (once is enough).
+    revoked_told: std::sync::atomic::AtomicBool,
     /// QA-visible call state pushed from the webview: bit0 = ringing, bit1 = in_call. See
     /// `set_qa_call_state` for why this exists.
     qa_call: std::sync::atomic::AtomicU8,
@@ -685,6 +687,17 @@ const MEDIA_MANIFEST_MAGIC: &[u8] = b"HVCHUNK1\n";
 /// mapped to `RelayErr::Unreachable` like any other transport failure, so the URL's bad-window and
 /// the iroh rung take over exactly as they do for a refused connection.
 const HTTP_LIST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+/// Emitted once when a linked, seedless device finds its own account's roster no longer lists it.
+pub const EVENT_DEVICE_REVOKED: &str = "haven:device-revoked";
+
+/// Does the account's roster say this device is gone? `devices` is what the roster resolves to
+/// for the account (its authorized device ids, plus the account id itself, which is always
+/// there and proves nothing). An account with no device listed at all has no roster yet.
+pub(crate) fn this_device_was_revoked(devices: &[String], account_hex: &str, device_hex: &str) -> bool {
+    let listed: Vec<&String> = devices.iter().filter(|d| !d.eq_ignore_ascii_case(account_hex)).collect();
+    !listed.is_empty() && !listed.iter().any(|d| d.eq_ignore_ascii_case(device_hex))
+}
+
 /// A GET returns at most one relay chunk (`MEDIA_CHUNK_BYTES`, 8 MB) or a mailbox envelope.
 const HTTP_GET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
@@ -961,6 +974,7 @@ impl Engine {
         };
         Ok(Arc::new(Self {
             persist_pending: std::sync::atomic::AtomicBool::new(false),
+            revoked_told: std::sync::atomic::AtomicBool::new(false),
             qa_call: std::sync::atomic::AtomicU8::new(0),
             last_epoch_reseal: StdMutex::new(0),
             qa_last_call_event: StdMutex::new("none".into()),
@@ -1084,6 +1098,7 @@ impl Engine {
         };
         Ok(Arc::new(Self {
             persist_pending: std::sync::atomic::AtomicBool::new(false),
+            revoked_told: std::sync::atomic::AtomicBool::new(false),
             qa_call: std::sync::atomic::AtomicU8::new(0),
             last_epoch_reseal: StdMutex::new(0),
             qa_last_call_event: StdMutex::new("none".into()),
@@ -2523,6 +2538,14 @@ impl Engine {
             self.flush_web_push_revokes();
         }
         self.push_roster();
+        // Tell the removed device, once, with the roster that no longer lists it. It is refused
+        // by every relay from here on, so this direct send is the only way it finds out; without
+        // it a removed browser sat on what it had for ever. Best effort: an offline device
+        // learns nothing, and can read nothing either way.
+        let roster_wire = self.social.my_device_roster_wire();
+        if !roster_wire.is_empty() {
+            self.send_frame(wire::DEVICE_ROSTER, &roster_wire, &node_hex);
+        }
         // §6: rotate the account-state self-sync key so the revoked device can no longer read/LWW-write
         // our account state (gated exactly like retirement — a no-op while on the v0 seed-derived path).
         self.rotate_self_sync_on_revocation();
@@ -7274,7 +7297,28 @@ impl Engine {
         if self.social.ingest_roster_wire(body.to_vec()) {
             self.persist_coalesced(); // network-driven: coalesce (see persist_coalesced)
             self.authorize_membership();
+            self.note_if_this_device_was_revoked();
         }
+    }
+
+    /// A LINKED device that holds no account key learns it was removed: its own account's signed
+    /// roster (verified and version-checked on the way in) no longer lists it. Nothing it holds
+    /// will ever update again and every relay now refuses it, so the host is told once
+    /// ([`EVENT_DEVICE_REVOKED`]) and decides what to do. A browser forgets everything and shows
+    /// its link screen again; before this it sat on stale posts for ever with no way to tell why.
+    fn note_if_this_device_was_revoked(self: &Arc<Self>) {
+        if !self.is_seedless() || !self.seedless.lock().linked {
+            return;
+        }
+        let devices = self.social.device_node_ids_for(self.social.my_node_hex());
+        if !this_device_was_revoked(&devices, &self.social.my_node_hex(), &self.social.my_device_node_hex()) {
+            return;
+        }
+        if self.revoked_told.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        log::info!("this device was removed from its account");
+        self.emit_event(EVENT_DEVICE_REVOKED, serde_json::Value::Null);
     }
 
     /// Push current circle membership to the in-process relay so each circle's mailbox is served ONLY

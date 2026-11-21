@@ -31,6 +31,13 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   process id, which a browser does not have; the request stops the page's whole engine, so no
   media appeared and nothing else loaded afterwards either. The browser now names those files
   without one. The site smoke now sends pictures each way and checks the page draws them.
+- **A browser removed from the account stayed broken.** After "remove" on another device the page
+  kept showing what it had, loaded nothing new, and gave no reason; only clearing the site's
+  data got it back. The device doing the removing now sends the removed device the roster that
+  no longer lists it (desktop, iPhone, iPad, Mac, Android), and a linked browser that sees its
+  account's roster without itself erases everything, says it was removed, and shows its link
+  screen again. The page half is live with the web client; a phone or computer sends the notice
+  from the next full release on.
 
 ### Changed
 - **A fix to the browser client alone no longer needs a full release.** A `web-vX.Y.Z-N` tag builds

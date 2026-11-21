@@ -183,6 +183,18 @@ try {
   await until("a post made after the page came back", async () => (await feed()).some((p) => p.body === "after coming back"), 180000);
   step("the link survives leaving and coming back, and the circle keeps arriving");
 
+  // Removed from the account on another device: the page must not sit on what it had. It
+  // forgets everything, says why, and is back on its link screen with a fresh code.
+  peer.write("!revoke web\n");
+  if ((await peer.line("REVOKED ")) !== "1") throw new Error("the primary did not find exactly one browser to remove");
+  await until("the removed page to return to its link screen", () => page.evaluate(() => !!document.querySelector("#web-removed-note") && !!document.querySelector("#pair-copy")?.dataset.code), 120000);
+  if (!(await page.evaluate(() => window.__HAVEN_WEB__.app().needsOnboarding()))) throw new Error("a removed browser still holds a link");
+  await page.goto(`${site.url}/`);
+  await page.waitForFunction(() => !!window.__HAVEN_WEB__, null, { timeout: 30000 });
+  await page.evaluate(() => window.__HAVEN_WEB__.ready);
+  if (!(await page.evaluate(() => window.__HAVEN_WEB__.app().needsOnboarding()))) throw new Error("a removed browser was linked again after a reload");
+  step("a browser removed from the account erases itself, says why, and offers to link again");
+
   if (dotted.size) throw new Error(`the page asked for hosts Safari will not connect to: ${[...dotted].join(", ")}`);
   if (crashes.length) throw new Error(`the page crashed: ${crashes.join(" | ")}`);
   console.log("PASS");

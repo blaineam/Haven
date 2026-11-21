@@ -2823,6 +2823,13 @@ object HavenNet : InboundListener {
         val wasWeb = DeviceRosterManager.nameOf(nodeHex)?.let { uniffi.haven_ffi.isWebDeviceName(it) } == true
         val revoked = DeviceRosterManager.revoke(nodeHex, social, core.seed)
         if (revoked && wasWeb) revokeWebPush(nodeHex)
+        // Tell the removed device, once, with the roster that no longer lists it. Every relay
+        // refuses it from here on, so this direct send is the only way it finds out; without it a
+        // removed browser sat on what it had for ever. Best effort.
+        if (revoked) {
+            val rosterWire = runCatching { social.myDeviceRosterWire() }.getOrDefault(ByteArray(0))
+            if (rosterWire.isNotEmpty()) sendFrame(Wire.DEVICE_ROSTER, rosterWire, nodeHex)
+        }
         scope.launch { runCatching { SelfSyncCoordinator.sync(social) } }   // publish the rotated-key grants
     }
 

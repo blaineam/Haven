@@ -5418,6 +5418,11 @@ function contactMenu(anchor, c) {
   ], { align: "right" });
 }
 
+/** Was this browser just erased because the account removed it? (Set by the revoked handler.) */
+function webRemovedNote() {
+  try { return sessionStorage.getItem("haven.web.removed") === "1"; } catch (_) { return false; }
+}
+
 function makeQrSvg(text) {
   const qr = qrcode(0, "M");
   qr.addData(text);
@@ -8562,6 +8567,7 @@ function renderOnboarding() {
       }
     };
     listen("haven:pair-offer", async () => {
+      try { sessionStorage.removeItem("haven.web.removed"); } catch (_) {}
       pairBox.replaceChildren(el("div", { class: "muted small" }, t("web_pair_answered")));
       Terms.accept();
       try { await invoke("pair_finish", { remember: remember.checked }); }
@@ -8573,6 +8579,7 @@ function renderOnboarding() {
   const linkBox = () => el("div", { class: "col", style: "width:100%;gap:8px" },
     HOST_WEB ? el("div", { class: "muted small", id: "web-trust-note", style: "white-space:normal" },
       HOST_SITE ? t("web_trust_note_site", HOST_SITE) : t("web_trust_note")) : null,
+    HOST_WEB && webRemovedNote() ? el("div", { class: "small", id: "web-removed-note", style: "white-space:normal;font-weight:600" }, t("web_removed_note")) : null,
     HOST_WEB ? rememberRow() : null,
     HOST_WEB ? (startPair(), pairBox) : null,
     HOST_WEB ? null : el("div", { class: "muted small" }, linkMode === "move"
@@ -8813,6 +8820,14 @@ async function boot() {
     try { await applyChanged(); } finally { changeRunning = false; }
   };
   const fireChanged = () => { changePending = null; onChanged(); };
+  // This browser was removed from the account on another device (the engine saw the account's
+  // roster without it). Nothing here will update again, so forget everything and say why on
+  // the link screen it returns to. Before this the page sat on what it had, with no way out.
+  if (HOST_WEB) listen("haven:device-revoked", async () => {
+    try { sessionStorage.setItem("haven.web.removed", "1"); } catch (_) {}
+    try { await invoke("reset"); } catch (_) {}
+    location.reload();
+  });
   listen("haven:changed", () => {
     if (changePending) return;                 // already scheduled — one read will cover both
     changePending = setTimeout(fireChanged, 400);

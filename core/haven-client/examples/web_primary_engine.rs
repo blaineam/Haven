@@ -221,6 +221,20 @@ async fn run() -> AnyResult<()> {
                 println!("WEB {} set={ok} allowed={}", if on { "on" } else { "off" }, engine.circle_web_access(CIRCLE).allowed);
                 continue;
             }
+            // `!revoke web` removes every browser from this account (`REVOKED <n>`).
+            if line == "!revoke web" {
+                let web: Vec<String> = haven_client::commands::device_roster(Eng(&engine))
+                    .devices
+                    .into_iter()
+                    .filter(|d| haven_ffi::is_web_device_name(d.name.clone()))
+                    .map(|d| d.node_hex)
+                    .collect();
+                for d in &web {
+                    engine.revoke_device(d.clone());
+                }
+                println!("REVOKED {}", web.len());
+                continue;
+            }
             // `!pair <haven-pair: code>` answers a code another device is showing (scan-to-link):
             // `PAIRED` once the offer was delivered, `PAIRFAIL <why>` otherwise.
             if let Some(code) = line.strip_prefix("!pair ") {

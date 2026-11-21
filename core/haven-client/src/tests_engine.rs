@@ -595,3 +595,16 @@ async fn revoking_a_browser_queues_its_push_registration_for_removal() {
     assert_eq!(body["sig"], base64::engine::general_purpose::STANDARD.encode(want));
     assert!(crate::engine::web_push_revoke_body(&[73; 32], "not-a-device", 1).is_none());
 }
+
+/// A linked device is revoked only when its account's roster lists devices and it is not one of
+/// them. The account id is always in the list and is nobody's device.
+#[test]
+fn a_device_missing_from_its_accounts_roster_knows_it_was_removed() {
+    use crate::engine::this_device_was_revoked as gone;
+    let (acct, me, phone) = ("aa".repeat(32), "bb".repeat(32), "cc".repeat(32));
+    assert!(!gone(&[], &acct, &me), "no roster at all");
+    assert!(!gone(&[acct.clone()], &acct, &me), "only the account id: no roster yet");
+    assert!(!gone(&[phone.clone(), me.to_uppercase(), acct.clone()], &acct, &me), "listed");
+    assert!(gone(&[phone.clone(), acct.clone()], &acct, &me), "others listed, not this one");
+    assert!(gone(&[phone], &acct, &me));
+}

@@ -7823,6 +7823,11 @@ final class FeedStore: ObservableObject {
             guard await DeviceRosterManager.shared.revoke(nodeHex, engine: engine, accountSeed: seed) else { return }
             if wasWeb { PushManager.shared.revokeWebPush(deviceHex: nodeHex) }
             guard let self, self.engine === engine else { return }
+            // Tell the removed device, once, with the roster that no longer lists it. Every relay
+            // refuses it from here on, so this direct send is the only way it finds out; without
+            // it a removed browser sat on what it had for ever. Best effort.
+            let rosterWire = await engine.run { $0.myDeviceRosterWire() }
+            if !rosterWire.isEmpty { self.sendToDeviceHex(27, rosterWire, nodeHex) }
             await self.rotateSelfSyncAfterRevocation(revokedHex: nodeHex, accountSeed: seed, engine: engine)
         }
     }

@@ -508,16 +508,6 @@ Se configura para arrancar en cada reinicio y luego muestra un id de nodo. Añá
     <string name="settings_pair_expired">Ese código ha caducado. Muestra uno nuevo en el otro dispositivo.</string>
     <string name="settings_pair_not_primary">Solo tu dispositivo principal puede vincular dispositivos nuevos.</string>
     <string name="settings_pair_unreachable">No se pudo llegar a ese dispositivo. Mantén su página abierta e inténtalo de nuevo.</string>
-    <string name="circle_web_title">Navegadores web</string>
-    <string name="circle_web_allow">Permitir este círculo en navegadores web</string>
-    <string name="circle_web_on">Activado: los navegadores que los miembros han vinculado pueden leer y publicar en este círculo.</string>
-    <string name="circle_web_off">Desactivado: los navegadores no reciben nada de este círculo.</string>
-    <string name="circle_web_admin_you">Eres administrador de este círculo, así que tu elección decide.</string>
-    <string name="circle_web_admin_other">Deciden los administradores de este círculo. Tu elección queda registrada, pero no lo cambia.</string>
-    <string name="circle_web_everyone_done">Todos en este círculo han aceptado.</string>
-    <string name="circle_web_waiting">Todos en este círculo tienen que aceptar. Faltan %1$d.</string>
-    <string name="circle_web_linked_cant">Cámbialo en tu dispositivo principal.</string>
-    <string name="circle_web_warn">La copia de Haven de un navegador la entrega un relay, así que está menos protegida que la app. Al desactivarlo, los navegadores dejan de recibir cosas nuevas; lo que ya recibieron no se retira.</string>
     <string name="settings_not_primary_device">Este no es mi dispositivo principal</string>
     <string name="settings_link_new_device_title">Vincular un dispositivo nuevo</string>
     <string name="settings_enroll_qr_instructions">En tu dispositivo nuevo: “Añadir este como otro de mis dispositivos” y luego escanea este código. Recibirá su propia clave revocable, nunca tu clave maestra.</string>

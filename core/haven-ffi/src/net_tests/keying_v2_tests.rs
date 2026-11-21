@@ -199,50 +199,29 @@ const B1: [u8; 32] = [53u8; 32];
 const B2: [u8; 32] = [55u8; 32];
 const C1: [u8; 32] = [54u8; 32];
 
-/// Per-circle consent on the v2 tree (docs/WEB-PARITY.md): a member's browser is a leaf only while
-/// the circle allows web devices. Same four steps as on the v1 tree — out, in, out, back in — and
-/// the member's phone is never disturbed.
+/// A member's browser on the v2 tree: a leaf like any other device, with nobody having stated
+/// anything (D22 withdrawn), and a stored "no" does not take it out again.
 #[test]
-fn a_web_device_is_a_v2_leaf_only_while_the_circle_allows_web_devices() {
+fn a_web_device_is_a_v2_leaf_like_any_other_device() {
     let f = fleet_with_web(&[(A, &[A1]), (B, &[B1, B2])], &[2, 2, 2], &[B2]);
     let (a, b, w) = (&f.devs[0].s, &f.devs[1].s, &f.devs[2].s);
     assert!(w.is_web_device() && !b.is_web_device());
-    sync_fleet(&f, 8);
-
-    // Not allowed: the circle keys from the v2 tree without waiting for the browser.
+    sync_fleet(&f, 12);
     assert_eq!(lane(a, &f.cid), 2);
     assert_eq!(lane(b, &f.cid), 2);
-    assert_ne!(lane(w, &f.cid), 2, "the browser is not a leaf");
-    post(a, &f.cid, "v2-before", 1_000);
-    sync_fleet(&f, 4);
-    assert!(reads(b, &f.cid, "v2-before"));
-    assert!(!reads(w, &f.cid, "v2-before"));
-
-    // An admin (the creator's device) allows web devices: the browser's key package is used.
-    let admin = &f.devs[committer_index(&f)].s;
-    assert!(admin.set_circle_web_access(f.cid.clone(), true));
-    sync_fleet(&f, 12);
-    assert_eq!(lane(w, &f.cid), 2, "the browser entered the v2 tree");
-    post(a, &f.cid, "v2-allowed", 2_000);
+    assert_eq!(lane(w, &f.cid), 2, "the browser is a leaf with nobody asked");
+    post(a, &f.cid, "v2-post", 1_000);
     sync_fleet(&f, 6);
-    assert!(reads(w, &f.cid, "v2-allowed") && reads(b, &f.cid, "v2-allowed"));
+    assert!(reads(b, &f.cid, "v2-post") && reads(w, &f.cid, "v2-post"));
 
-    // Taken back: its leaf is Removed, and it cannot follow.
+    // A position left over from the old rule changes nothing.
+    let admin = &f.devs[committer_index(&f)].s;
     assert!(admin.set_circle_web_access(f.cid.clone(), false));
     sync_fleet(&f, 12);
-    assert_ne!(lane(w, &f.cid), 2);
-    post(a, &f.cid, "v2-closed", 3_000);
+    assert_eq!(lane(w, &f.cid), 2, "a stored no does not remove the browser");
+    post(a, &f.cid, "v2-after-no", 2_000);
     sync_fleet(&f, 6);
-    assert!(reads(b, &f.cid, "v2-closed"), "the member's phone is untouched");
-    assert!(!reads(w, &f.cid, "v2-closed"));
-
-    // Allowed again: re-admitted although it was Removed — the signed yes is the explicit act.
-    assert!(admin.set_circle_web_access(f.cid.clone(), true));
-    sync_fleet(&f, 14);
-    assert_eq!(lane(w, &f.cid), 2, "a signed yes brings the browser back");
-    post(a, &f.cid, "v2-reopened", 4_000);
-    sync_fleet(&f, 6);
-    assert!(reads(w, &f.cid, "v2-reopened") && reads(b, &f.cid, "v2-reopened"));
+    assert!(reads(w, &f.cid, "v2-after-no") && reads(b, &f.cid, "v2-after-no"));
 }
 
 /// THE MIGRATION. A fully upgraded fleet (3 accounts, one with two devices) whose circle is already

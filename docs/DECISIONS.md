@@ -486,27 +486,32 @@ the browser linked by showing a code, by the browser itself otherwise. Circle na
 lists still reach a browser through the account's own device sync.
 
 
-### D22 amended — My Circle is decided by its own account (2026-11-21)
+### D22 withdrawn — a linked browser is a device like any other (2026-11-21)
 
-**Decision:** My Circle (`default`) no longer needs every member's yes. The account it belongs to
-decides, alone, with the same signed position.
+**Decision:** Per-circle consent to web devices is removed. Linking a browser, and approving it
+on a device that holds the account, is the only approval. A browser then reads every circle and
+conversation its account is in, like any linked device. (An intermediate step the same day, My
+Circle decided by its own account, is superseded by this.)
 
-**Why:** My Circle was filed under "no provable owner" because its id binds to no creator. But it
-is not one shared circle: every account has its own, made of its own contacts, and what an
-account posts there is its own. Treating it as ownerless meant a person had to collect a yes
-from every contact before their own browser could show their own posts, which in practice was
-never. Its owner was never in doubt.
+**Why:** tried on a real account, the rule left a linked browser empty. Every contact and every
+conversation partner had to update and opt in before anything of theirs appeared, and under the
+rule as first written even a person's own posts needed every contact's yes. The risk the rule
+addressed is one each person already controls: whether to link a browser at all, and when to
+remove it. Nobody is asked to consent to a contact's choice of phone either.
 
-**What is kept:** each device asks the question of its own account. So an account's yes covers
-the posts that account makes, and a contact's My Circle posts still reach a browser only if that
-contact allowed browsers in theirs. The author decides; the reader never does. Older shared
-circles and direct messages still need every member. Silence is still no, and a browser still
-cannot sign a position.
+**What is kept:** a browser never holds the account key and cannot sign for the account; it is
+marked as a browser in the account-signed device name, on the approval screen and in the device
+list; removing it cuts it off from everything new and tells it so; the page says it is weaker
+than the app before it is linked.
 
-**Cost, said plainly:** a member of an older app sees no change until it updates, because the
-rule is evaluated by the device that seals each post. The Tamarin model covers the two
-mechanisms (deciders, unanimity); My Circle now uses the first with a set of one, and was not
-given a model of its own.
+**Cost, said plainly:** whoever delivers the page's code (the site, a relay host, a tunnel, a
+TLS-inspecting network) could change it, and a changed page reads everything that account's
+devices read, in every circle, not only circles that had agreed, until the browser is removed.
+Other members of a circle are no longer asked and are not told that a member has linked one.
+The signed positions (`CircleWebPolicy`) are still stored and exchanged so the wire is unchanged
+and an older app goes on applying the old rule to what it seals; this build ignores them. The
+Tamarin model `docs/formal/haven_web_consent.spthy` describes the withdrawn rule and no longer
+describes what ships.
 
 ## D23 — A browser is rung with a content-free doorbell, filed by its own device key (2026-11-20)
 

@@ -19,7 +19,7 @@
 //
 // Proves: the page says which site it trusts; it shows a code that names a relay it can be
 // reached through although it was served by none; the primary's answer links it; nothing of a
-// circle reaches it before the circle allows browsers; then posts travel each way, with every
+// circle reaches it before it is linked; then posts travel each way, with every
 // mailbox call crossing origins.
 import { join } from "node:path";
 import { openPage, root, serveSite, startPeer } from "./harness.mjs";
@@ -143,21 +143,13 @@ try {
   }, 180000);
   step("the primary answered the code and the browser is a linked device of its account");
 
-  const access = () => invoke(page, "circle_web_access", { circleId: "" });
   const feed = async () => (await invoke(page, "feed", { circleId: "" })) || [];
-  const first = await until("the circle's standing", access, 60000);
-  if (!first.this_is_web || first.allowed) throw new Error(`a freshly linked browser must be a shut-out web device: ${JSON.stringify(first)}`);
-  peer.write("sealed before the circle agreed\n");
-  await until("the primary to have posted", async () => peer.lines.includes("FEED me sealed before the circle agreed"));
-  await page.waitForTimeout(6000);
-  if ((await feed()).some((p) => p.body === "sealed before the circle agreed")) throw new Error("the browser read a circle that has not allowed web devices");
-  step("it gets nothing from a circle that has not allowed browsers");
-
-  peer.write("!web on\n");
-  if (!(await peer.line("WEB on ")).includes("allowed=true")) throw new Error("the primary could not allow web devices");
-  await until("the browser to learn the circle allows it", async () => (await access())?.allowed, 180000);
-  await until("the earlier post in the browser", async () => (await feed()).some((p) => p.body === "sealed before the circle agreed"), 180000);
-  step("once the circle allows browsers, the page reads the circle from its relay");
+  const first = await until("the circle's standing", () => invoke(page, "circle_web_access", { circleId: "" }), 60000);
+  if (!first.this_is_web || first.can_sign) throw new Error(`a linked browser must be a marked web device that cannot sign: ${JSON.stringify(first)}`);
+  peer.write("posted with nobody asked\n");
+  await until("the primary to have posted", async () => peer.lines.includes("FEED me posted with nobody asked"));
+  await until("that post in the browser", async () => (await feed()).some((p) => p.body === "posted with nobody asked"), 180000);
+  step("linking is the only approval: the page reads the circle from its relay with nobody asked");
 
   await invoke(page, "post", { circleId: "", body: "hello from a page on a web site", media: [] });
   await until("the page's post on the primary", async () => peer.lines.includes("FEED me hello from a page on a web site"), 180000);

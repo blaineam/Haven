@@ -502,16 +502,6 @@
     <string name="settings_pair_expired">このコードは期限切れです。相手のデバイスで新しいコードを表示してください。</string>
     <string name="settings_pair_not_primary">新しいデバイスをリンクできるのはプライマリデバイスだけです。</string>
     <string name="settings_pair_unreachable">そのデバイスに届きませんでした。相手のページを開いたまま、もう一度お試しください。</string>
-    <string name="circle_web_title">ウェブブラウザ</string>
-    <string name="circle_web_allow">このサークルをウェブブラウザで許可する</string>
-    <string name="circle_web_on">オン: メンバーがリンクしたブラウザで、このサークルの閲覧と投稿ができます。</string>
-    <string name="circle_web_off">オフ: ブラウザにはこのサークルの内容は一切届きません。</string>
-    <string name="circle_web_admin_you">あなたはこのサークルの管理者なので、あなたの選択で決まります。</string>
-    <string name="circle_web_admin_other">このサークルの管理者が決めます。あなたの選択は記録されますが、結果は変わりません。</string>
-    <string name="circle_web_everyone_done">このサークルの全員が同意しました。</string>
-    <string name="circle_web_waiting">このサークルの全員の同意が必要です。あと%1$d人です。</string>
-    <string name="circle_web_linked_cant">プライマリデバイスで変更してください。</string>
-    <string name="circle_web_warn">ブラウザ版の Haven はリレーから配信されるため、アプリほど保護されていません。オフにすると、ブラウザには新しい内容が届かなくなります。すでに届いた内容は取り消されません。</string>
     <string name="settings_not_primary_device">この端末はメインの端末ではない</string>
     <string name="settings_link_new_device_title">新しい端末をリンク</string>
     <string name="settings_enroll_qr_instructions">新しい端末で「この端末を自分の端末として追加」を選び、このコードをスキャンしてください。新しい端末には、いつでも取り消せる専用の鍵が渡されます。マスターキーが渡されることはありません。</string>

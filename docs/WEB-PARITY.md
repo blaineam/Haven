@@ -114,33 +114,20 @@ relays. `PHONE_SITE=1 … phone.mjs` does it against a real app.
 
 ## Which circles a browser can read
 
-Linking a browser to your account does not let it read anything. A circle's keys go to a web
-device only while that circle allows web devices, and who decides depends on the circle:
+All of them. A linked browser is a device of your account like any other: once you approve it on
+a device that holds the account, it reads every circle and conversation the account is in.
+There is no per-circle switch (it was removed: [`DECISIONS.md`](DECISIONS.md), D22 withdrawn).
 
-| Circle | Who decides |
-|---|---|
-| **My Circle** | The account it belongs to, alone. Everyone has their own My Circle, so this decides for that account's own posts: a contact's My Circle posts reach your browser only if *they* allowed browsers in theirs |
-| Has a creator (its id is bound to them) | Its admins — the newest signed word among them |
-| Has no provable owner: older shared circles, and every direct message | **Every member** has to say yes; one person withdrawing closes it |
+What that means, said plainly:
 
-Each position is signed with the account's key, so a linked device — and therefore every browser
-— cannot state one: a browser cannot vote itself in. No answer, a tie, or anything unverifiable
-means no. When a circle's answer changes it re-keys, so a browser is cut off from (or brought
-into) everything from the next key on.
-
-What this does **not** do, said plainly:
-
-- **It does not take back what a browser was already shown.** Turning it off stops new content.
-- **An app that predates this rule does not follow it.** It seals to every device in a member's
-  roster, browsers included. An up-to-date browser refuses those keys, so the gap is a member on
-  an old app *and* a browser whose page was replaced — at which point that browser reads what that
-  one member posts. It closes as people update.
-- **The mark that says "this is a browser" is set when the device is approved.** A browser that
-  links by showing a code is always marked. One that links by a pasted ticket marks itself; a
-  replaced page could leave the mark off and claim to be an app, and the person approving it
-  would see only the name it gave. Linking a browser by its code avoids that.
-- **A browser still learns the names and member lists of all your circles.** Your devices share
-  that with each other so each can show your circles; only the posts are held back.
+- The approval on your phone is the only gate. The approval screen marks the device as a browser.
+- A browser never holds the account key and cannot sign for the account.
+- Whoever serves the page's code could change it, and a changed page reads what your devices
+  read, everywhere, until you remove that browser (You ▸ Devices). Removing it cuts it off from
+  everything new and sends it back to its link screen.
+- Other members of a circle are not asked and are not told.
+- An app from before this change still applies the old rule to what it seals, so its posts reach
+  a browser only if that circle had allowed browsers.
 
 ## What a browser cannot do
 
@@ -260,7 +247,8 @@ Next, in order:
         claims to be — a new dependency in the relay and in every app that can host one, for
         about a megabyte on a first visit. A relay behind a CDN or tunnel that compresses
         responses may already get it; that was not measured.
-- [x] **Per-circle consent** (D22; "Which circles a browser can read" above).
+- [x] ~~**Per-circle consent**~~ **withdrawn 2026-11-21** (D22 withdrawn; "Which circles a browser can
+      read" above). What follows is the record of what was built; the engine no longer applies it.
       - The rule and the signed record: `core/haven-p2p/src/webpolicy.rs` (`CircleWebPolicy`,
         `web_allowed`), unit-tested and fuzzed. Records ride the circle's control lane as tag
         `0x0b`, persist with the circle, and merge per signer (a replayed older yes loses).

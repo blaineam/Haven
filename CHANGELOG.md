@@ -56,11 +56,13 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   it was removed, erases itself and shows its link screen.
 
 ### Changed
-- **My Circle: you decide whether your browser can read it.** It used to need a yes from every
-  contact in it, so in practice a browser never showed your own posts. Your own answer now
-  decides for your posts. A contact's My Circle posts still reach your browser only if they
-  allowed browsers in theirs. Older shared circles and direct messages still need everyone.
-  Takes effect on each device when its app updates.
+- **A linked browser now reads everything its account reads.** Each circle used to have to allow
+  browsers first (its admins, or every member), and each conversation needed the other person's
+  yes, so in practice a linked browser stayed empty. That rule is removed: approving the browser
+  on your phone is the only approval, and the "Web browsers" switches are gone from circle and
+  conversation settings. The cost: a page whose code was tampered with could read all of your
+  circles, not only ones that had agreed, until you remove that browser. Posts sealed by an app
+  from before this change still follow the old rule.
 - **A fix to the browser client alone no longer needs a full release.** A `web-vX.Y.Z-N` tag builds
   and browser-tests the client and publishes it by itself; the project site serves the newest of
   the full and web-only releases. Installers, store apps and the "latest" release are untouched.

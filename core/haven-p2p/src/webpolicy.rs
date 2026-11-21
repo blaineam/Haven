@@ -1,5 +1,10 @@
 //! Per-circle consent to **web devices** (docs/WEB-PARITY.md, D21).
 //!
+//! **Withdrawn (docs/DECISIONS.md, D22 withdrawn):** the engine no longer consults these
+//! positions; a linked browser is a device like any other. The records and the rule below are
+//! kept so the wire is unchanged and an older app's records still parse. The web MARK (point 1)
+//! is still in force: it is how a browser is shown as one.
+//!
 //! A browser linked to an account is a device like any other in the roster — but the code it runs
 //! was delivered by a relay, so a circle's members get a say in whether their posts are shown in
 //! one. Two things make that enforceable by every member's device, not just promised:

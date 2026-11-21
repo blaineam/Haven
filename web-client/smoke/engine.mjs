@@ -166,31 +166,22 @@ await run(
 
     const feed = () => invoke(page, "feed", { circleId: "" });
 
-    // ── Per-circle consent ──────────────────────────────────────────────────────────────────
-    // Linked is not the same as let in: until the circle allows web devices, the browser is given
-    // none of its keys, and says so instead of showing an empty circle.
+    // ── A linked browser is a device like any other ───────────────────────────────────────────
+    // Linking is the only approval: nobody has said anything about this circle, and the browser
+    // reads it, including what was posted before it was linked. It still holds no account key.
     const access = () => invoke(page, "circle_web_access", { circleId: "" });
     const first = await access();
     if (!first.this_is_web) throw new Error("the browser's credential is not marked as a web device");
-    if (first.allowed || first.can_sign) throw new Error(`a freshly linked browser must be shut out and unable to sign: ${JSON.stringify(first)}`);
-    if (await invoke(page, "set_circle_web_access", { circleId: "", allow: true })) throw new Error("a browser changed a circle's web access");
-    peer.write("sealed before the circle agreed\n");
-    await until("the primary to have posted", async () => peer.lines.includes("FEED me sealed before the circle agreed"));
+    if (first.can_sign) throw new Error("a browser can sign for the account");
+    if (await invoke(page, "set_circle_web_access", { circleId: "", allow: false })) throw new Error("a browser signed a position for the account");
+    peer.write("posted with nobody asked\n");
+    await until("the primary to have posted", async () => peer.lines.includes("FEED me posted with nobody asked"));
     await page.locator('.tab[data-view="circle"]').click();
-    await page.locator("#cwa-blocked").waitFor({ timeout: 30000 });
-    await page.waitForTimeout(6000);   // several mailbox polls
-    if ((await feed()).some((p) => p.body === "sealed before the circle agreed")) throw new Error("the browser read a circle that has not allowed web devices");
-    await shots(page, "1-blocked");
-    step("a linked browser gets nothing from a circle that has not allowed web devices, and says why");
-
-    // The account's primary allows it (it is the only member, so its word is everyone's).
-    peer.write("!web on\n");
-    const set = await peer.line("WEB on ");
-    if (!set.includes("allowed=true")) throw new Error(`the primary could not allow web devices: ${set}`);
-    await until("the browser to learn the circle allows it", async () => (await access()).allowed, 120000);
-    await until("the earlier post in the browser", async () => (await feed()).some((p) => p.body === "sealed before the circle agreed"), 120000);
+    await until("that post in the browser", async () => (await feed()).some((p) => p.body === "posted with nobody asked"), 120000);
+    if (await page.locator("#cwa-blocked").count()) throw new Error("the page still says the circle is not shown in browsers");
+    await shots(page, "1-reads");
     await page.locator('.tab[data-view="you"]').click();
-    step("once the circle allows web devices the browser is keyed in and reads what came before");
+    step("a linked browser reads its account's circle with nobody asked, and still cannot sign for the account");
 
     // Tab → primary.
     await invoke(page, "post", { circleId: "", body: "hello from the browser", media: [] });

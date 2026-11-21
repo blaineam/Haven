@@ -793,48 +793,12 @@ test('circles: per-circle relays can be toggled from the manage sheet', async ()
   assert.deepEqual(J(lastCall(app, 'set_circle_relay').args), { nodeHex: HEX('e'), circleId: 'default', on: true });
 });
 
-test('circles: the web-browser switch says where the circle stands, and only an engine that knows it shows it', async () => {
-  // An engine that predates per-circle consent: no section at all.
-  const old = await boot();
-  await click(old.app, '#tb-right button.icon-btn');
-  assert.equal(old.app.q('#cwa'), null);
-
-  // A circle nobody owns, nobody has agreed yet: off, waiting on me and one person I cannot name.
-  const waiting = { allowed: false, mine: false, can_sign: true, decided_by_admins: false, i_decide: true, waiting_on: [ME, HEX('7')], this_is_web: false };
-  const { app } = await boot({ be: { circle_web_access: waiting, set_circle_web_access: true } });
+test('circles: there is no web-browser switch; a linked browser is a device like any other', async () => {
+  const { app } = await boot({ be: { circle_web_access: { allowed: true, mine: true, can_sign: true, decided_by_admins: false, i_decide: false, waiting_on: [] } } });
   await click(app, '#tb-right button.icon-btn');
-  const text = app.q('#cwa').textContent;
-  assert.match(text, /Off: browsers get nothing/);
-  assert.match(text, /Everyone in this circle has to agree\. Still waiting on: you, 1 more\./);
-  assert.match(text, /not taken back/, 'what turning it off cannot undo is said on the switch');
-  const box = app.q('#cwa-switch');
-  assert.ok(!box.checked && !box.disabled);
-  box.checked = true;
-  box.dispatchEvent(new app.ctx.Event('change', { bubbles: true }));
-  await app.settle();
-  assert.deepEqual(J(lastCall(app, 'set_circle_web_access').args), { circleId: 'default', allow: true });
-});
-
-test('circles: the web-browser switch is locked on a device that cannot sign, and a refusal is not shown as done', async () => {
-  // A linked device (no account key): the switch shows the account's position but cannot move it.
-  const linked = { allowed: true, mine: true, can_sign: false, decided_by_admins: true, i_decide: false, waiting_on: [], this_is_web: false };
-  const a = await boot({ be: { circle_web_access: linked } });
-  await click(a.app, '#tb-right button.icon-btn');
-  assert.ok(a.app.q('#cwa-switch').checked && a.app.q('#cwa-switch').disabled);
-  assert.match(a.app.q('#cwa').textContent, /On: browsers that members have linked/);
-  assert.match(a.app.q('#cwa').textContent, /admins decide/);
-  assert.match(a.app.q('#cwa').textContent, /primary device/);
-
-  // The engine says no (it could not sign): the switch goes back and says so.
-  const mine = { allowed: false, mine: false, can_sign: true, decided_by_admins: true, i_decide: true, waiting_on: [], this_is_web: false };
-  const b = await boot({ be: { circle_web_access: mine, set_circle_web_access: false } });
-  await click(b.app, '#tb-right button.icon-btn');
-  const box = b.app.q('#cwa-switch');
-  box.checked = true;
-  box.dispatchEvent(new b.app.ctx.Event('change', { bubbles: true }));
-  await b.app.settle();
-  assert.equal(box.checked, false);
-  assert.match(b.app.q('#toast').textContent, /can't change that/);
+  assert.equal(app.q('#cwa'), null);
+  assert.equal(app.q('#cwa-switch'), null);
+  assert.equal(app.q('#cwa-blocked'), null);
 });
 
 // ── people: connect sheet, requests, contacts ──────────────────────────────────────────────────

@@ -21,7 +21,7 @@ use haven_p2p::device::{
     mint_owned_circle_id, recipients_with_devices_gated_where, recipients_with_devices_where, AdminGrant,
     CircleUpgrade, ContactDevices, DeviceCredential, DeviceList, SeedDropCapability,
 };
-use haven_p2p::webpolicy::{current_positions, web_allowed, CircleWebPolicy};
+use haven_p2p::webpolicy::CircleWebPolicy;
 // Only the golden reference bundle builder (`bundle_reference.rs`, tests) still calls the unfiltered form.
 #[cfg(test)]
 use haven_p2p::device::recipients_with_devices_gated;
@@ -3633,41 +3633,17 @@ fn receive_circle_upgrade(st: &mut NetState, idx: usize, body: &[u8]) -> Result<
 
 // ── Per-circle consent to web devices (docs/WEB-PARITY.md; `haven_p2p::webpolicy`) ─────────────
 
-/// Does this circle allow web devices? Recomputed from verified state every time it is asked:
-/// the stored positions, the circle's admins (a creator-bound circle) or its whole membership (a
-/// circle nobody provably owns). Nothing stored, or anything short of the rule, is NO.
-fn circle_allows_web(st: &NetState, idx: usize) -> bool {
-    let c = &st.circles[idx];
-    if c.web_policies.is_empty() {
-        return false;
-    }
-    let gid = c.id.as_bytes();
-    let records: Vec<CircleWebPolicy> = c
-        .web_policies
-        .iter()
-        .filter_map(|w| CircleWebPolicy::from_bytes(w).ok())
-        .filter(|p| p.circle_id == gid)
-        .collect();
-    let admins = web_deciders(st, idx);
-    let members: Vec<[u8; 32]> = circle_mls_accounts(st, idx).iter().map(|a| a.node_id_bytes()).collect();
-    web_allowed(admins.as_ref(), &members, &records)
-}
-
-/// Who decides whether this circle allows web devices (`None` = every member has to agree).
+/// Does this circle allow web devices? **Always.** (docs/DECISIONS.md, D22 withdrawn.)
 ///
-/// * **My Circle** (`default`): this account, alone. It is not a shared circle with one
-///   membership: every account has its own, made of its own contacts, and what is posted there
-///   is this account's own. So its owner is not in doubt, and asking every contact to sign off
-///   meant in practice that a person could never read their own posts in their own browser. Each
-///   device asks this of ITS OWN account, so a contact's posts to their My Circle still reach a
-///   browser of mine only if THEY allowed browsers there: the author decides, never the reader.
-/// * A creator-bound circle: its admins ([`circle_admin_set`]).
-/// * Anything else (an older shared circle, a direct message): nobody can speak for it.
-fn web_deciders(st: &NetState, idx: usize) -> Option<std::collections::HashSet<[u8; 32]>> {
-    if st.circles[idx].id == DEFAULT_CIRCLE {
-        return Some(std::iter::once(st.me().node_id_bytes()).collect());
-    }
-    circle_admin_set(st, idx)
+/// A circle used to have to say yes first (its admins, every member of an unowned circle, the
+/// account for its own My Circle). In practice that left a linked browser empty: every contact
+/// and every conversation partner had to update and opt in before anything of theirs appeared,
+/// and the person who linked the browser had already made the only decision that is theirs to
+/// make: which of their own devices they trust. A browser is now a device like any other in the
+/// roster. The signed positions are still stored and exchanged, so nothing on the wire changed
+/// and an older app goes on applying its own rule; this build just no longer consults them.
+fn circle_allows_web(_st: &NetState, _idx: usize) -> bool {
+    true
 }
 
 /// Is `device_hex` a web device of any account whose roster I hold (mine included)?
@@ -7562,32 +7538,16 @@ impl HavenSocial {
             waiting_on: vec![],
         };
         let Some(idx) = st.circles.iter().position(|c| c.id == circle_id) else { return none };
-        let gid = circle_id.as_bytes();
-        let records: Vec<CircleWebPolicy> = st.circles[idx]
-            .web_policies
-            .iter()
-            .filter_map(|w| CircleWebPolicy::from_bytes(w).ok())
-            .filter(|p| p.circle_id == gid)
-            .collect();
-        let positions = current_positions(&records);
-        let me = st.me().node_id_bytes();
-        let admins = web_deciders(&st, idx);
-        let members: Vec<[u8; 32]> = circle_mls_accounts(&st, idx).iter().map(|a| a.node_id_bytes()).collect();
-        let waiting_on = match &admins {
-            Some(_) => vec![],
-            None => members
-                .iter()
-                .filter(|m| !positions.get(*m).copied().unwrap_or(false))
-                .map(|m| hex(m))
-                .collect(),
-        };
+        // Every circle allows linked browsers (`circle_allows_web`). The record stays, with the
+        // answer every caller should now read, so the generated bindings do not change.
+        let _ = idx;
         CircleWebAccessFfi {
-            allowed: web_allowed(admins.as_ref(), &members, &records),
-            mine: positions.get(&me).copied().unwrap_or(false),
+            allowed: true,
+            mine: true,
             can_sign: st.me_secret.is_some(),
-            decided_by_admins: admins.is_some(),
-            i_decide: admins.as_ref().is_none_or(|a| a.contains(&me)),
-            waiting_on,
+            decided_by_admins: false,
+            i_decide: false,
+            waiting_on: vec![],
         }
     }
 
@@ -15172,13 +15132,10 @@ mod net_tests {
         assert!(!c.feed(cid.clone(), 4_000, None).iter().any(|m| m.body == "post-revoke"), "the revoked device is cut off");
     }
 
-    /// Per-circle consent on a TREE-keyed circle (docs/WEB-PARITY.md): a member's browser is a leaf
-    /// only while the circle allows web devices. The creator's word adds it (a chained Add at the
-    /// live epoch), taking it back Removes it (a re-key it cannot follow), and saying yes again
-    /// re-admits it — the one case where a Removed device comes back without anyone re-adding it by
-    /// hand, because the signed policy IS the explicit act.
+    /// A member's browser on a TREE-keyed circle: a leaf like any other device, with nobody having
+    /// stated anything (D22 withdrawn), and a stored "no" does not take it out again.
     #[test]
-    fn mls_a_web_device_is_a_leaf_only_while_the_circle_allows_web_devices() {
+    fn mls_a_web_device_is_a_leaf_like_any_other_device() {
         let _clk = clock_guard();
         let (base, cid) = mls_capable_fleet(&[[1u8; 32], [2u8; 32]], &[[11u8; 32], [12u8; 32]], 0);
         let (a, b) = (base[0].clone(), base[1].clone());
@@ -15218,45 +15175,20 @@ mod net_tests {
         }
         sync_all(&all, &cid, 8);
 
-        // Not allowed: the tree is A's and B's phone. The browser is not waited for, and not let in.
-        assert_eq!(a.mls_keying_status(cid.clone()).state, "live", "the circle keys from the tree without the browser");
+        assert_eq!(a.mls_keying_status(cid.clone()).state, "live");
         assert_eq!(b.mls_keying_status(cid.clone()).state, "live");
-        assert_ne!(w.mls_keying_status(cid.clone()).state, "live");
-        let genesis = a.mls_keying_status(cid.clone()).epoch;
-        a.post(cid.clone(), "tree-before".into(), vec![], None, None, false, false, 1_000).unwrap();
-        sync_all(&all, &cid, 4);
-        assert!(reads(&b, "tree-before"));
-        assert!(!reads(&w, "tree-before"), "a browser reads nothing from a circle that has not allowed web devices");
-
-        // The creator allows web devices: the browser is Added at the live epoch and reads history.
-        assert!(a.set_circle_web_access(cid.clone(), true));
-        sync_all(&all, &cid, 12);
-        assert!(b.circle_web_access(cid.clone()).allowed && w.circle_web_access(cid.clone()).allowed);
-        assert!(a.mls_keying_status(cid.clone()).epoch > genesis, "the Add advanced the tree");
-        assert_eq!(w.mls_keying_status(cid.clone()).state, "live", "the browser joined the live tree");
-        a.post(cid.clone(), "tree-allowed".into(), vec![], None, None, false, false, 2_000).unwrap();
+        assert_eq!(w.mls_keying_status(cid.clone()).state, "live", "the browser is in the tree with nobody asked");
+        a.post(cid.clone(), "tree-post".into(), vec![], None, None, false, false, 1_000).unwrap();
         sync_all(&all, &cid, 6);
-        assert!(reads(&w, "tree-allowed") && reads(&b, "tree-allowed"));
-        assert!(reads(&w, "tree-before"), "and it reads what came before, via the re-seal");
+        assert!(reads(&b, "tree-post") && reads(&w, "tree-post"));
 
-        // The creator takes it back: the browser's leaf is Removed and it cannot follow the re-key.
-        let allowed_epoch = a.mls_keying_status(cid.clone()).epoch;
+        // A position left over from the old rule changes nothing.
         assert!(a.set_circle_web_access(cid.clone(), false));
         sync_all(&all, &cid, 12);
-        assert!(a.mls_keying_status(cid.clone()).epoch > allowed_epoch, "the Remove re-keyed the tree");
-        assert_ne!(w.mls_keying_status(cid.clone()).state, "live");
-        a.post(cid.clone(), "tree-closed".into(), vec![], None, None, false, false, 3_000).unwrap();
+        assert_eq!(w.mls_keying_status(cid.clone()).state, "live", "a stored no does not remove the browser");
+        a.post(cid.clone(), "tree-after-no".into(), vec![], None, None, false, false, 2_000).unwrap();
         sync_all(&all, &cid, 6);
-        assert!(reads(&b, "tree-closed"), "B's phone is untouched by all of this");
-        assert!(!reads(&w, "tree-closed"), "the browser is cut off from the next key on");
-
-        // …and yes again brings it back, although its leaf was Removed.
-        assert!(a.set_circle_web_access(cid.clone(), true));
-        sync_all(&all, &cid, 14);
-        assert_eq!(w.mls_keying_status(cid.clone()).state, "live", "a signed yes re-admits the browser");
-        a.post(cid.clone(), "tree-reopened".into(), vec![], None, None, false, false, 4_000).unwrap();
-        sync_all(&all, &cid, 6);
-        assert!(reads(&w, "tree-reopened") && reads(&b, "tree-reopened"));
+        assert!(reads(&w, "tree-after-no") && reads(&b, "tree-after-no"));
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════════════

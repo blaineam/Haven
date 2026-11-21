@@ -55,7 +55,6 @@ const invoke = async (name, args = {}) => {
 let site = null;
 try {
   const mark = `from the phone ${Date.now()}`;
-  await qa({ op: "web_access", circle_id: "default", allow: false });
   await qa({ op: "post", body: mark });
 
   site = process.env.PHONE_SITE === "1" ? await serveSite("", ORIGIN) : null;
@@ -80,19 +79,10 @@ try {
   if ((await invoke("my_node_hex")) !== (await dump()).account_hex) throw new Error("the browser linked to a different account");
   step("the browser is a linked device of the app's account");
 
-  const before = await until("the circle's standing in the browser", () => invoke("circle_web_access", { circleId: "" }), 60000);
-  if (before.allowed || !before.this_is_web) throw new Error(`expected a shut-out web device: ${JSON.stringify(before)}`);
-  await sleep(8000);
-  if (((await invoke("feed", { circleId: "" })) || []).some((p) => p.body === mark)) {
-    throw new Error("the browser read a circle that has not allowed web devices");
-  }
-  step("the browser gets nothing from the circle before the app allows it");
-
-  await qa({ op: "web_access", circle_id: "default", allow: true });
-  await until("the app to report the circle allows browsers", async () => (await dump()).web_access?.allowed === true, 60000);
-  await until("the browser to learn it", async () => (await invoke("circle_web_access", { circleId: "" }))?.allowed, 180000);
+  const standing = await until("the circle's standing in the browser", () => invoke("circle_web_access", { circleId: "" }), 60000);
+  if (!standing.this_is_web || standing.can_sign) throw new Error(`expected a marked web device that cannot sign: ${JSON.stringify(standing)}`);
   await until("the app's post in the browser", async () => ((await invoke("feed", { circleId: "" })) || []).some((p) => p.body === mark), 180000);
-  step("once the app allows browsers, the browser reads the app's post");
+  step("the browser reads the app's post with nobody asked: linking was the only approval");
 
   const reply = `from the browser ${Date.now()}`;
   await invoke("post", { circleId: "", body: reply, media: [] });

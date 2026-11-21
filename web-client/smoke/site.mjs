@@ -45,6 +45,7 @@ const invoke = (page, name, args = {}) =>
 
 const peer = startPeer(bin, [join(root, "dist")]);
 const cleanup = [() => peer.kill()];
+const diagnose = [];
 let failed = false;
 try {
   const relay = await peer.line("ORIGIN=", 180000);
@@ -71,6 +72,16 @@ try {
     },
   });
   cleanup.push(() => browser.close());
+  const pageLog = [];
+  page.on("console", (m) => { pageLog.push(`[${m.type()}] ${m.text()}`.slice(0, 300)); });
+  diagnose.push(async () => `page: ${JSON.stringify({
+    url: page.url(),
+    onboarding: await page.evaluate(() => window.__HAVEN_WEB__?.app()?.needsOnboarding?.()).catch(() => "?"),
+    status: await invoke(page, "seedless_status"),
+    me: await invoke(page, "my_node_hex"),
+    calls: calls.slice(-10),
+    crashes,
+  })}\npage console (last 40):\n  ${pageLog.slice(-40).join("\n  ")}`);
   const crashes = [];
   page.on("pageerror", (e) => crashes.push(e.message));
   page.on("console", (m) => { if (m.type() === "error" && m.text().includes("[haven panic]")) crashes.push(m.text()); });
@@ -89,12 +100,19 @@ try {
   step(`a page that no relay served still shows a code (${PUBLIC ? "reachable through a public rendezvous relay" : "reachable through the relay its site names"})`);
 
   await page.locator('input[type="checkbox"]').first().check();
-  peer.write(`!pair ${code}\n`);
-  await until("the primary to answer the code", async () => {
-    const fail = peer.lines.find((l) => l.startsWith("PAIRFAIL"));
-    if (fail) throw new Error(`the primary could not answer the code: ${fail}`);
-    return peer.lines.includes("PAIRED");
-  }, 90000);
+  // The page can have its code up before the primary's own node has finished starting; a
+  // primary that is still offline says so, and is asked again. Any other refusal is a failure.
+  let refusal = null;
+  for (let asked = 0, seen = 0; !peer.lines.includes("PAIRED"); ) {
+    const fails = peer.lines.filter((l) => l.startsWith("PAIRFAIL"));
+    if (fails.length > seen) {
+      seen = fails.length;
+      if (!/offline/.test(fails[seen - 1]) || seen > 20) { refusal = fails[seen - 1]; break; }
+    }
+    if (asked === seen) { peer.write(`!pair ${code}\n`); asked++; }
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  if (refusal) throw new Error(`the primary could not answer the code: ${refusal}`);
   await until("the browser to be linked", async () => {
     const s = await invoke(page, "seedless_status");
     return s && s.linked && (await invoke(page, "my_node_hex")) === account;
@@ -143,7 +161,9 @@ try {
 } catch (e) {
   failed = true;
   console.error(`FAIL ${e.message}`);
-  if (process.env.SMOKE_DEBUG) console.error(peer.lines.filter((l) => !l.startsWith("TICKET")).join("\n"));
+  // What each side last knew, so a failure on a machine nobody is watching can be read.
+  console.error("primary said:\n  " + peer.lines.filter((l) => !l.startsWith("TICKET")).slice(-25).join("\n  "));
+  for (const f of diagnose) { try { console.error(await f()); } catch (err) { console.error(`(diagnosis failed: ${err.message})`); } }
 } finally {
   for (const f of cleanup.reverse()) { try { await f(); } catch {} }
   process.exit(failed ? 1 : 0);

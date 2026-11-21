@@ -130,4 +130,7 @@ jobs:
       - name: Browser smoke, served by a web site
         env:
           NODE_PATH: ${{ runner.temp }}/pw/node_modules
+          # Both engines' own logs: the page's are kept and printed only if the run fails.
+          SMOKE_LOG: info
+          HAVEN_SMOKE_LOG: info
         run: node web-client/smoke/site.mjs core/target/debug/examples/web_primary_engine

@@ -119,8 +119,9 @@ device only while that circle allows web devices, and who decides depends on the
 
 | Circle | Who decides |
 |---|---|
+| **My Circle** | The account it belongs to, alone. Everyone has their own My Circle, so this decides for that account's own posts: a contact's My Circle posts reach your browser only if *they* allowed browsers in theirs |
 | Has a creator (its id is bound to them) | Its admins — the newest signed word among them |
-| Has no provable owner: older circles, and every direct message | **Every member** has to say yes; one person withdrawing closes it |
+| Has no provable owner: older shared circles, and every direct message | **Every member** has to say yes; one person withdrawing closes it |
 
 Each position is signed with the account's key, so a linked device — and therefore every browser
 — cannot state one: a browser cannot vote itself in. No answer, a tie, or anything unverifiable

@@ -45,6 +45,11 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   from the next full release on.
 
 ### Changed
+- **My Circle: you decide whether your browser can read it.** It used to need a yes from every
+  contact in it, so in practice a browser never showed your own posts. Your own answer now
+  decides for your posts. A contact's My Circle posts still reach your browser only if they
+  allowed browsers in theirs. Older shared circles and direct messages still need everyone.
+  Takes effect on each device when its app updates.
 - **A fix to the browser client alone no longer needs a full release.** A `web-vX.Y.Z-N` tag builds
   and browser-tests the client and publishes it by itself; the project site serves the newest of
   the full and web-only releases. Installers, store apps and the "latest" release are untouched.

@@ -486,6 +486,28 @@ the browser linked by showing a code, by the browser itself otherwise. Circle na
 lists still reach a browser through the account's own device sync.
 
 
+### D22 amended — My Circle is decided by its own account (2026-11-21)
+
+**Decision:** My Circle (`default`) no longer needs every member's yes. The account it belongs to
+decides, alone, with the same signed position.
+
+**Why:** My Circle was filed under "no provable owner" because its id binds to no creator. But it
+is not one shared circle: every account has its own, made of its own contacts, and what an
+account posts there is its own. Treating it as ownerless meant a person had to collect a yes
+from every contact before their own browser could show their own posts, which in practice was
+never. Its owner was never in doubt.
+
+**What is kept:** each device asks the question of its own account. So an account's yes covers
+the posts that account makes, and a contact's My Circle posts still reach a browser only if that
+contact allowed browsers in theirs. The author decides; the reader never does. Older shared
+circles and direct messages still need every member. Silence is still no, and a browser still
+cannot sign a position.
+
+**Cost, said plainly:** a member of an older app sees no change until it updates, because the
+rule is evaluated by the device that seals each post. The Tamarin model covers the two
+mechanisms (deciders, unanimity); My Circle now uses the first with a set of one, and was not
+given a model of its own.
+
 ## D23 — A browser is rung with a content-free doorbell, filed by its own device key (2026-11-20)
 
 **Decision.** A linked browser can be notified while its tab is closed (Web Push). The push worker

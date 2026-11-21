@@ -67,8 +67,8 @@ struct Fleet {
 }
 
 /// Alice (a primary) with a linked BROWSER, and her contact Bob, sharing circle `cid`.
-/// `owned = true` makes it a creator-bound circle Alice created; otherwise it is the legacy
-/// default circle, which nobody provably owns.
+/// `owned = true` makes it a creator-bound circle Alice created; otherwise it is an older
+/// shared circle, which nobody provably owns.
 fn fleet(owned: bool) -> Fleet {
     let alice = HavenSocial::new(ALICE.to_vec()).unwrap();
     let bob = HavenSocial::new(BOB.to_vec()).unwrap();
@@ -84,7 +84,13 @@ fn fleet(owned: bool) -> Fleet {
         }
         id
     } else {
-        DEFAULT_CIRCLE.to_string()
+        // An older shared circle: a plain id that binds to no creator. (Not My Circle, which each
+        // account decides for itself: see the tests at the end of this file.)
+        let id = "legacy-family".to_string();
+        for e in [&alice, &bob, &web] {
+            e.create_circle(id.clone(), "Family".into());
+        }
+        id
     };
     alice.add_contact_bundle(cid.clone(), bob.my_bundle()).unwrap();
     web.add_contact_bundle(cid.clone(), bob.my_bundle()).unwrap();
@@ -346,3 +352,88 @@ fn the_circles_answer_survives_a_restart() {
     assert!(again.set_circle_web_access(cid.clone(), true));
     assert_eq!(again.export_state(), before);
 }
+
+// ── My Circle: each account decides for its own ─────────────────────────────────────────────
+
+/// Alice with a linked browser and her contact Bob, in everyone's own My Circle (`default`).
+fn my_circle_fleet() -> Fleet {
+    let alice = HavenSocial::new(ALICE.to_vec()).unwrap();
+    let bob = HavenSocial::new(BOB.to_vec()).unwrap();
+    let web_name = haven_p2p::webpolicy::mark_web_device_name("Chrome");
+    let (web, alice_roster) = link(&alice, ALICE, WEB, &web_name);
+    let cid = DEFAULT_CIRCLE.to_string();
+    alice.add_contact_bundle(cid.clone(), bob.my_bundle()).unwrap();
+    web.add_contact_bundle(cid.clone(), bob.my_bundle()).unwrap();
+    bob.add_contact_bundle(cid.clone(), alice.my_bundle()).unwrap();
+    assert!(bob.use_device_identity(BOB_DEVICE.to_vec()));
+    let bob_roster = bob.register_device(bob.my_device_bundle(), "Bob's phone".into(), 0);
+    assert!(alice.ingest_roster_wire(bob_roster.clone()));
+    assert!(web.ingest_roster_wire(bob_roster));
+    assert!(bob.ingest_roster_wire(alice_roster));
+    Fleet { alice, bob, web, cid }
+}
+
+#[test]
+fn my_circle_opens_to_my_browser_on_my_word_alone() {
+    let f = my_circle_fleet();
+    let Fleet { alice, bob, web, cid } = &f;
+    post(alice, cid, "mine, before I agreed", 2_000);
+    settle(&f);
+    assert!(!reads(web, cid, "mine, before I agreed"), "silence is still no");
+    let s = alice.circle_web_access(cid.clone());
+    assert!(!s.allowed && s.decided_by_admins && s.i_decide && s.waiting_on.is_empty(), "it is hers to decide, and she waits on nobody");
+
+    // Alice says yes. Bob has said nothing and is never asked.
+    assert!(alice.set_circle_web_access(cid.clone(), true));
+    settle(&f);
+    assert!(alice.circle_web_access(cid.clone()).allowed);
+    assert!(web.circle_web_access(cid.clone()).allowed, "her browser learns her answer");
+    post(alice, cid, "mine, after I agreed", 3_000);
+    settle(&f);
+    assert!(reads(web, cid, "mine, after I agreed"), "her own posts reach her own browser");
+    assert!(reads(bob, cid, "mine, after I agreed"));
+
+    // And she can take it back.
+    assert!(alice.set_circle_web_access(cid.clone(), false));
+    settle(&f);
+    post(alice, cid, "mine, after I withdrew", 4_000);
+    settle(&f);
+    assert!(!reads(web, cid, "mine, after I withdrew"));
+    assert!(reads(bob, cid, "mine, after I withdrew"));
+}
+
+#[test]
+fn a_contacts_my_circle_posts_reach_my_browser_only_if_they_allowed_browsers() {
+    let f = my_circle_fleet();
+    let Fleet { alice, bob, web, cid } = &f;
+    // Alice allows browsers in HER My Circle. That speaks for her posts, not for Bob's.
+    assert!(alice.set_circle_web_access(cid.clone(), true));
+    settle(&f);
+    assert!(!bob.circle_web_access(cid.clone()).allowed, "Alice's yes is not Bob's");
+    post(bob, cid, "bob's, he never agreed", 3_000);
+    settle(&f);
+    assert!(reads(alice, cid, "bob's, he never agreed"), "her app reads it");
+    assert!(!reads(web, cid, "bob's, he never agreed"), "her browser does not: the author decides");
+
+    // Bob allows browsers in his own My Circle: from then on his posts reach it too.
+    assert!(bob.set_circle_web_access(cid.clone(), true));
+    settle(&f);
+    post(bob, cid, "bob's, after he agreed", 4_000);
+    settle(&f);
+    assert!(reads(web, cid, "bob's, after he agreed"));
+}
+
+#[test]
+fn nobody_else_can_open_my_circle_for_me() {
+    let f = my_circle_fleet();
+    let Fleet { alice, bob, web, cid } = &f;
+    // Bob says yes; a browser cannot sign a position at all.
+    assert!(bob.set_circle_web_access(cid.clone(), true));
+    assert!(!web.set_circle_web_access(cid.clone(), true));
+    settle(&f);
+    assert!(!alice.circle_web_access(cid.clone()).allowed, "Bob's yes does not open Alice's circle");
+    post(alice, cid, "mine, I never agreed", 3_000);
+    settle(&f);
+    assert!(!reads(web, cid, "mine, I never agreed"));
+}
+

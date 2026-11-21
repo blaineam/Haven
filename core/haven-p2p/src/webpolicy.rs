@@ -15,8 +15,10 @@
 //!   2. **Whether a circle allows web devices** is a set of account-signed [`CircleWebPolicy`]
 //!      records, one per signer, highest version wins. Who has to say yes depends on whether the
 //!      circle has a provable owner ([`web_allowed`]):
+//!        * My Circle: the account it belongs to decides, alone (each device asks this of its
+//!          own account, so it speaks for that account's posts only; `haven-ffi` `web_deciders`);
 //!        * a creator-bound circle: its admins decide — the newest record among them;
-//!        * a circle with no provable owner (a legacy circle, a direct message): EVERY member has
+//!        * a circle with no provable owner (an older shared circle, a direct message): EVERY member has
 //!          to have said yes. Nobody can speak for it, so nobody is spoken for.
 //!      No record, an unverifiable record, a tie — all mean NO. Absence is never consent.
 //!

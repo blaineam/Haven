@@ -3648,9 +3648,26 @@ fn circle_allows_web(st: &NetState, idx: usize) -> bool {
         .filter_map(|w| CircleWebPolicy::from_bytes(w).ok())
         .filter(|p| p.circle_id == gid)
         .collect();
-    let admins = circle_admin_set(st, idx);
+    let admins = web_deciders(st, idx);
     let members: Vec<[u8; 32]> = circle_mls_accounts(st, idx).iter().map(|a| a.node_id_bytes()).collect();
     web_allowed(admins.as_ref(), &members, &records)
+}
+
+/// Who decides whether this circle allows web devices (`None` = every member has to agree).
+///
+/// * **My Circle** (`default`): this account, alone. It is not a shared circle with one
+///   membership: every account has its own, made of its own contacts, and what is posted there
+///   is this account's own. So its owner is not in doubt, and asking every contact to sign off
+///   meant in practice that a person could never read their own posts in their own browser. Each
+///   device asks this of ITS OWN account, so a contact's posts to their My Circle still reach a
+///   browser of mine only if THEY allowed browsers there: the author decides, never the reader.
+/// * A creator-bound circle: its admins ([`circle_admin_set`]).
+/// * Anything else (an older shared circle, a direct message): nobody can speak for it.
+fn web_deciders(st: &NetState, idx: usize) -> Option<std::collections::HashSet<[u8; 32]>> {
+    if st.circles[idx].id == DEFAULT_CIRCLE {
+        return Some(std::iter::once(st.me().node_id_bytes()).collect());
+    }
+    circle_admin_set(st, idx)
 }
 
 /// Is `device_hex` a web device of any account whose roster I hold (mine included)?
@@ -7554,7 +7571,7 @@ impl HavenSocial {
             .collect();
         let positions = current_positions(&records);
         let me = st.me().node_id_bytes();
-        let admins = circle_admin_set(&st, idx);
+        let admins = web_deciders(&st, idx);
         let members: Vec<[u8; 32]> = circle_mls_accounts(&st, idx).iter().map(|a| a.node_id_bytes()).collect();
         let waiting_on = match &admins {
             Some(_) => vec![],

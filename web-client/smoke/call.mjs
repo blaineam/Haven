@@ -6,12 +6,16 @@
 //
 //   node web-client/smoke/call.mjs <web_primary_engine binary>
 //
+// CALL_SITE=1 serves every browser's page from a plain web site (web-client/dist-site) instead
+// of from the relay, so the whole call — signalling, the relay's hairpin, media — runs from a
+// page on another origin than the relay.
+//
 // NOT hermetic: the two native accounts find each other the way real ones do (public discovery),
 // so this needs the internet and is not in CI. Chromium runs with fake camera and microphone.
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { startPeer } from "./harness.mjs";
+import { serveSite, startPeer } from "./harness.mjs";
 
 const { chromium } = createRequire(import.meta.url)("playwright");
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -42,6 +46,8 @@ const browser = await chromium.launch({
     "--auto-select-desktop-capture-source=Entire screen"],
 });
 let failed = false;
+/** Set when the pages are served by a web site rather than by the relay (CALL_SITE=1). */
+let site = null, sitePage = "";
 
 /** One browser: linked to `peer`'s account by its own code. */
 async function linkedBrowser(origin, peer, label) {
@@ -65,7 +71,7 @@ async function linkedBrowser(origin, peer, label) {
       return await page.evaluate(async ([n, a]) => window.__TAURI__.core.invoke("engine_invoke", { name: n, args: a }), [name, args]);
     } catch { return null; }
   };
-  await page.goto(`${origin}/app/`);
+  await page.goto(sitePage || `${origin}/app/`);
   await page.waitForFunction(() => !!window.__HAVEN_WEB__, null, { timeout: 30000 });
   await page.evaluate(() => window.__HAVEN_WEB__.ready);
   const code = await until(`${label}'s code`, () => page.evaluate(() => document.querySelector("#pair-copy")?.dataset.code || null), 60000);
@@ -78,6 +84,11 @@ async function linkedBrowser(origin, peer, label) {
 
 try {
   const origin = await host.line("ORIGIN=", 60000);
+  if (process.env.CALL_SITE === "1") {
+    site = await serveSite(origin, origin);
+    sitePage = `${site.url}/`;
+    step(`the pages are served by a plain web site at ${site.url}, not by the relay (${origin})`);
+  }
   const hostAccount = await host.line("ACCOUNT=");
   const guestAccount = await guest.line("ACCOUNT=");
   const thirdAccount = await third.line("ACCOUNT=");
@@ -260,6 +271,7 @@ try {
     console.error("guest:", guest.lines.filter((l) => !/^(TICKET|INVITE)/.test(l)).slice(-25).join(" | "));
   }
 } finally {
+  if (site) site.close();
   await browser.close();
   host.kill();
   guest.kill();

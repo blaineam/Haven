@@ -560,6 +560,12 @@ other device and loses new content when it is. The apps are not affected at all.
 - Publishing on the project's site is a switch the owner holds, off until set: the repository
   variable `SITE_WEB_CLIENT`. Without it the site has no `/app/`, and nothing else changes.
 - Anyone can host the archive themselves, which keeps the maker out of it for their circle.
+- **Its own origin.** A browser keeps a site's stored data per origin, so the client must not
+  share one with anything else: any other page or script served from the same origin could reach
+  what it stores. The project serves it from Haven's own address, which serves nothing else. The
+  portfolio, one origin shared by many pages and tools, only redirects there; the 2026-06
+  prototype that used to sit at that path (and kept an account seed in `localStorage`) was
+  removed, and the redirect clears what it left behind.
 
 **Proof and tests:** `web-client/smoke/site.mjs` (hermetic in CI; `SMOKE_RENDEZVOUS=public` over
 the public rendezvous relays); `a_page_from_another_origin_may_ask_but_still_needs_a_members_signature`

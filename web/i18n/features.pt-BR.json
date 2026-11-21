@@ -109,5 +109,6 @@
   "why-it-matters-the.95cea0": "<b>Por que isso importa:</b> o celular no seu bolso não deveria trabalhar como um servidor. O relay foi feito para ficar ligado, e o seu celular pode ser só um celular.",
   "why-it-matters-your.c22aeb": "<b>Por que isso importa:</b> sua vida não cabe em uma tela só. O Haven acompanha você em todos os seus dispositivos — sua identidade é transferida por um código local ou QR, nunca por um servidor que poderia guardá-la.",
   "windows.26d9c2": "Windows",
-  "your-relay-does-the.6610c9": "Seu relay faz o trabalho pesado <span class=\"badge ok\">Novo no 2.0</span>"
+  "your-relay-does-the.6610c9": "Seu relay faz o trabalho pesado <span class=\"badge ok\">Novo no 2.0</span>",
+  "open-haven-in-your.b1f525": "Abrir o Haven no navegador"
 }

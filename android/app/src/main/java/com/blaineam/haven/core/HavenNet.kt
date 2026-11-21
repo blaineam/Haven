@@ -3076,14 +3076,32 @@ object HavenNet : InboundListener {
         val ticket = runCatching { uniffi.haven_ffi.enrollTicketParse(text.trim()) }.getOrNull() ?: return false
         pendingLinkTicket = ticket
         scope.launch(Dispatchers.Main) { seedlessLinkError.value = null; seedlessLinking.value = true }
+        if (!sendSeedlessLinkRequest(ticket)) {
+            scope.launch(Dispatchers.Main) { seedlessLinking.value = false; seedlessLinkError.value = "Couldn't build the link request." }
+            return false
+        }
+        // One send is not enough: the request (or the grant that answers it) can be lost, and this
+        // device then waited on "Linking…" until the person scanned again. Keep asking, as the
+        // desktop engine and iOS do, for as long as the ticket could still be honoured. The primary
+        // ignores a repeat while its prompt is up and repeats its grant once it has approved.
+        scope.launch {
+            for (wait in LinkRequestRetry.waitsMs(ticket.issuedAt.toLong(), System.currentTimeMillis() / 1000)) {
+                kotlinx.coroutines.delay(wait)
+                if (pendingLinkTicket !== ticket) return@launch   // linked, cancelled, or a new ticket
+                sendSeedlessLinkRequest(ticket)
+            }
+        }
+        return true
+    }
+
+    /** NEW DEVICE: send (or re-send) the frame-28 request for [ticket] on both rails. A fresh
+     *  timestamp each time, so a repeat is never refused as stale. False if it could not be built. */
+    private fun sendSeedlessLinkRequest(ticket: uniffi.haven_ffi.EnrollTicketFfi): Boolean {
         val now = (System.currentTimeMillis() / 1000).toULong()
         val req = runCatching {
             uniffi.haven_ffi.enrollBuildRequest(ticket.secret, DeviceKeyStore.deviceBundle(),
                 DeviceKeyStore.deviceName, now)
-        }.getOrNull() ?: run {
-            scope.launch(Dispatchers.Main) { seedlessLinking.value = false; seedlessLinkError.value = "Couldn't build the link request." }
-            return false
-        }
+        }.getOrNull() ?: return false
         NearbyTransport.broadcast(Wire.frame(Wire.SEEDLESS_ENROLL_REQ, req))
         val primaryHex = bytesToHex(ticket.primaryDevice)
         scope.launch { runCatching { sendFrame(Wire.SEEDLESS_ENROLL_REQ, req, primaryHex) } }

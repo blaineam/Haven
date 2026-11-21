@@ -109,5 +109,6 @@
   "why-it-matters-the.95cea0": "<b>Por qué importa:</b> el móvil que llevas en el bolsillo no debería trabajar como un servidor. El relay está pensado para estar siempre encendido, así tu móvil puede ser simplemente un móvil.",
   "why-it-matters-your.c22aeb": "<b>Por qué importa:</b> tu vida no cabe en una sola pantalla. Haven te acompaña en todos tus dispositivos: tu identidad se transfiere con un código local o un QR, nunca a través de un servidor que pudiera guardarla.",
   "windows.26d9c2": "Windows",
-  "your-relay-does-the.6610c9": "Tu relay hace el trabajo pesado <span class=\"badge ok\">Nuevo en 2.0</span>"
+  "your-relay-does-the.6610c9": "Tu relay hace el trabajo pesado <span class=\"badge ok\">Nuevo en 2.0</span>",
+  "open-haven-in-your.b1f525": "Abrir Haven en el navegador"
 }

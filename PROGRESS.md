@@ -6,6 +6,16 @@ Updated continuously. (Times in your local day.)
 ---
 
 ## 🆕 Latest waves (newest first)
+- **2.2.1 — Haven in a browser from one address; linking that recovers (cut 2026-11-20)** — the web
+  client can be served by an ordinary web site as well as by a relay: a page with no relay of its
+  own shows a code, the phone answers it through a rendezvous relay, and the browser then learns
+  the circle's relays from the account (`docs/DECISIONS.md` D24, `docs/WEB-PARITY.md` § "From a
+  web site"). The project's site serves the released build at `/app/` on its own address. Relay
+  mailbox answers are readable across origins (every request still needs a member's signature).
+  Linking: a lost grant no longer strands the new device (the primary repeats it to the device it
+  approved), and an Android phone being linked keeps asking. Tested: site-hosted page against the
+  desktop engine (CI), the iPhone app and the Android app; a three-person call from site-hosted
+  pages.
 - **2.2.0 — Haven in a web browser (cut 2026-11-20)** — a browser can be linked as one more device
   of an account: the page is served by a relay the circle's members run and talks only to that
   relay, it never holds the account key, it links by showing a code that an app scans, and each

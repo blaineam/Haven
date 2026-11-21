@@ -1,5 +1,3 @@
-2.2.0 – Haven im Webbrowser nutzen.
-• Füge einen Webbrowser als eines deiner Geräte hinzu: Scanne den angezeigten Code (Einstellungen → Geräte). Jeder Kreis entscheidet, ob Browser ihn lesen dürfen.
-• Datenschutz-Fix: Nach einem Videoanruf konnte der nächste Anruf mit eingeschalteter Kamera beginnen. Jeder Anruf beginnt jetzt mit Kamera aus.
-• Ein Anruf legt nicht mehr kurz nach einer Verbindungsstörung auf.
-• Kamerawechsel kommen in der richtigen Reihenfolge an.
+2.2.1 – Haven im Browser, unter einer festen Adresse.
+• Öffne haven.wemiller.com/app im Webbrowser, scanne den angezeigten Code (Einstellungen → Geräte), und er arbeitet mit dem Relay deines Kreises weiter. Jeder Kreis entscheidet, ob Browser ihn lesen dürfen.
+• Behoben: Das Verknüpfen eines neuen Geräts konnte dauerhaft bei „Verknüpfen…“ hängen bleiben, wenn eine Nachricht verloren ging. Es erholt sich jetzt von selbst.

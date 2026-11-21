@@ -109,5 +109,6 @@
   "why-it-matters-the.95cea0": "<b>これが大切な理由：</b>ポケットの中のスマホが、サーバーのように働く必要はありません。常時稼働するのはリレーの役目。スマホはスマホらしくいられます。",
   "why-it-matters-your.c22aeb": "<b>これが大切な理由：</b>あなたの生活は、ひとつの画面だけでは完結しません。Haven はデバイスをまたいであなたについてきます——アイデンティティの移行はローカルの転送コードか QR で。それを保持しうるサーバーを通ることはありません。",
   "windows.26d9c2": "Windows",
-  "your-relay-does-the.6610c9": "重い処理はリレーにおまかせ <span class=\"badge ok\">2.0 の新機能</span>"
+  "your-relay-does-the.6610c9": "重い処理はリレーにおまかせ <span class=\"badge ok\">2.0 の新機能</span>",
+  "open-haven-in-your.b1f525": "ブラウザで Haven を開く"
 }

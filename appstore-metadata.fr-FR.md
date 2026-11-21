@@ -35,21 +35,19 @@ privé,chiffré,famille,amis,cercle,sécurisé,messagerie,hors ligne,stories,app
 Nouveau en 2.0 : votre relay prend en charge photos et vidéos pour que votre téléphone reste frais, et vous voyez toujours qui atteint chaque publication. Gratuit.
 
 ## whats_new
-2.2.0 — Utilisez Haven dans un navigateur web.
-• Nouveau : ajoutez un navigateur web comme l'un de vos propres appareils. Ouvrez l'adresse du relais de votre cercle dans le navigateur et scannez le code affiché (Réglages → Appareils). Les publications d'un cercle n'arrivent dans un navigateur que lorsque ce cercle l'autorise ; c'est désactivé tant que ses membres n'ont pas dit oui.
-• Un ami ajouté en scannant son invitation se connecte désormais en quelques secondes.
-• Appels : un écran partagé n'est plus masqué par un avatar, et les changements de caméra arrivent dans le bon ordre.
+2.2.1 — Haven dans le navigateur, depuis une seule adresse.
+• Nouveau : ouvrez haven.wemiller.com/app dans un navigateur web, scannez le code affiché (Réglages → Appareils), et le navigateur continue tout seul avec le relay de votre cercle. Le relay doit avoir cette version et une adresse https. Les publications d'un cercle n'atteignent un navigateur qu'une fois que ce cercle l'autorise.
+• Corrigé : l'association d'un nouvel appareil pouvait rester bloquée sur « Association… » si un message était perdu. Elle se rétablit désormais d'elle-même.
 
 ## whats_new_macos
-2.2.0 — Utilisez Haven dans un navigateur web.
-• Nouveau : ajoutez un navigateur web comme l'un de vos propres appareils. Ouvrez l'adresse du relais de votre cercle dans le navigateur et scannez le code affiché (Réglages → Appareils). Les publications d'un cercle n'arrivent dans un navigateur que lorsque ce cercle l'autorise ; c'est désactivé tant que ses membres n'ont pas dit oui.
-• Un ami ajouté en scannant son invitation se connecte désormais en quelques secondes.
-• Appels : un écran partagé n'est plus masqué par un avatar, et les changements de caméra arrivent dans le bon ordre.
+2.2.1 — Haven dans le navigateur, depuis une seule adresse.
+• Nouveau : ouvrez haven.wemiller.com/app dans un navigateur web, scannez le code affiché (Réglages → Appareils), et le navigateur continue tout seul avec le relay de votre cercle. Le relay doit avoir cette version et une adresse https. Les publications d'un cercle n'atteignent un navigateur qu'une fois que ce cercle l'autorise.
+• Corrigé : l'association d'un nouvel appareil pouvait rester bloquée sur « Association… » si un message était perdu. Elle se rétablit désormais d'elle-même.
 
 ## whats_new_windows
-2.2.0 — Utilisez Haven dans un navigateur web.
-• Nouveau : un relais que vous hébergez depuis cette app peut proposer Haven dans un navigateur web. Activez l'accès web dans les réglages du relais, ouvrez l'adresse dans un navigateur et associez-le en scannant ou en collant le code affiché. Les publications d'un cercle n'arrivent dans un navigateur que lorsque ce cercle l'autorise.
-• Appels depuis cette app : activer la caméra, partager l'écran et raccrocher parviennent maintenant de façon fiable aux téléphones, et un écran partagé n'est plus masqué par un avatar.
+2.2.1 — Haven dans le navigateur, depuis une seule adresse.
+• Un relay hébergé depuis cette app fonctionne aussi avec Haven ouvert depuis haven.wemiller.com/app : scannez le code de la page et elle trouve votre relay. Le relay doit avoir une adresse https.
+• Corrigé : l'association d'un nouvel appareil pouvait rester bloquée sur « Association… » si un message était perdu. Elle se rétablit désormais d'elle-même.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

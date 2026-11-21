@@ -35,21 +35,19 @@ privado,cifrado,familia,amigos,mensajería,seguro,sin conexión,llamadas,sin anu
 Novedad en 2.0: tu relay hace el trabajo pesado con fotos y vídeos para que tu móvil no se caliente, y siempre ves a quién llega cada publicación. Sigue siendo gratis.
 
 ## whats_new
-2.2.0 — Usa Haven en un navegador web.
-• Novedad: añade un navegador web como uno de tus propios dispositivos. Abre la dirección del relay de tu círculo en el navegador y escanea el código que muestra (Ajustes → Dispositivos). Las publicaciones de un círculo solo llegan a un navegador cuando ese círculo lo permite; está desactivado hasta que sus miembros digan que sí.
-• Un amigo que añades escaneando su invitación ahora se conecta en segundos.
-• Llamadas: una pantalla compartida ya no queda tapada por un avatar, y los cambios de cámara llegan en el orden correcto.
+2.2.1 — Haven en el navegador, desde una sola dirección.
+• Nuevo: abre haven.wemiller.com/app en un navegador web, escanea el código que muestra (Ajustes → Dispositivos) y el navegador sigue por sí solo con el relay de tu círculo. El relay necesita esta versión y una dirección https. Las publicaciones de un círculo llegan a un navegador solo cuando ese círculo lo permite.
+• Corregido: vincular un dispositivo nuevo podía quedarse en «Vinculando…» para siempre si se perdía un mensaje. Ahora se recupera solo.
 
 ## whats_new_macos
-2.2.0 — Usa Haven en un navegador web.
-• Novedad: añade un navegador web como uno de tus propios dispositivos. Abre la dirección del relay de tu círculo en el navegador y escanea el código que muestra (Ajustes → Dispositivos). Las publicaciones de un círculo solo llegan a un navegador cuando ese círculo lo permite; está desactivado hasta que sus miembros digan que sí.
-• Un amigo que añades escaneando su invitación ahora se conecta en segundos.
-• Llamadas: una pantalla compartida ya no queda tapada por un avatar, y los cambios de cámara llegan en el orden correcto.
+2.2.1 — Haven en el navegador, desde una sola dirección.
+• Nuevo: abre haven.wemiller.com/app en un navegador web, escanea el código que muestra (Ajustes → Dispositivos) y el navegador sigue por sí solo con el relay de tu círculo. El relay necesita esta versión y una dirección https. Las publicaciones de un círculo llegan a un navegador solo cuando ese círculo lo permite.
+• Corregido: vincular un dispositivo nuevo podía quedarse en «Vinculando…» para siempre si se perdía un mensaje. Ahora se recupera solo.
 
 ## whats_new_windows
-2.2.0 — Usa Haven en un navegador web.
-• Novedad: un relay que alojas desde esta app puede ofrecer Haven en un navegador web. Activa el acceso web en los ajustes del relay, abre la dirección en un navegador y vincúlalo escaneando o pegando el código que muestra. Las publicaciones de un círculo solo llegan a un navegador cuando ese círculo lo permite.
-• Llamadas desde esta app: encender la cámara, compartir la pantalla y colgar ahora llegan a los teléfonos de forma fiable, y una pantalla compartida ya no queda tapada por un avatar.
+2.2.1 — Haven en el navegador, desde una sola dirección.
+• Un relay que alojas desde esta app ahora también funciona con Haven abierto desde haven.wemiller.com/app: escanea el código de la página y ella encuentra tu relay. El relay necesita una dirección https.
+• Corregido: vincular un dispositivo nuevo podía quedarse en «Vinculando…» para siempre si se perdía un mensaje. Ahora se recupera solo.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

@@ -35,21 +35,19 @@ privat,verschlüsselt,Familie,Freunde,sicher,Messenger,offline,Anrufe,ohne Werbu
 Neu in 2.0: Dein Relay übernimmt die schwere Arbeit bei Fotos und Videos, damit dein Handy kühl bleibt – und du siehst immer genau, wen ein Beitrag erreicht. Kostenlos.
 
 ## whats_new
-2.2.0 – Haven im Webbrowser nutzen.
-• Neu: Füge einen Webbrowser als eines deiner eigenen Geräte hinzu. Öffne die Relay-Adresse deines Kreises im Browser und scanne den angezeigten Code (Einstellungen → Geräte). Die Beiträge eines Kreises erreichen einen Browser erst, wenn der Kreis es erlaubt; bis seine Mitglieder zustimmen, bleibt es aus.
-• Eine Person, die du über ihre Einladung hinzufügst, ist jetzt in Sekunden verbunden.
-• Anrufe: Ein geteilter Bildschirm wird nicht mehr von einem Avatar verdeckt, und Kamerawechsel kommen in der richtigen Reihenfolge an.
+2.2.1 – Haven im Browser, unter einer festen Adresse.
+• Neu: Öffne haven.wemiller.com/app im Webbrowser, scanne den angezeigten Code (Einstellungen → Geräte), und der Browser arbeitet danach selbst mit dem Relay deines Kreises weiter. Das Relay braucht diese Version und eine https-Adresse. Beiträge eines Kreises erreichen einen Browser erst, wenn der Kreis es erlaubt.
+• Behoben: Das Verknüpfen eines neuen Geräts konnte dauerhaft bei „Verknüpfen…“ hängen bleiben, wenn eine Nachricht verloren ging. Es erholt sich jetzt von selbst.
 
 ## whats_new_macos
-2.2.0 – Haven im Webbrowser nutzen.
-• Neu: Füge einen Webbrowser als eines deiner eigenen Geräte hinzu. Öffne die Relay-Adresse deines Kreises im Browser und scanne den angezeigten Code (Einstellungen → Geräte). Die Beiträge eines Kreises erreichen einen Browser erst, wenn der Kreis es erlaubt; bis seine Mitglieder zustimmen, bleibt es aus.
-• Eine Person, die du über ihre Einladung hinzufügst, ist jetzt in Sekunden verbunden.
-• Anrufe: Ein geteilter Bildschirm wird nicht mehr von einem Avatar verdeckt, und Kamerawechsel kommen in der richtigen Reihenfolge an.
+2.2.1 – Haven im Browser, unter einer festen Adresse.
+• Neu: Öffne haven.wemiller.com/app im Webbrowser, scanne den angezeigten Code (Einstellungen → Geräte), und der Browser arbeitet danach selbst mit dem Relay deines Kreises weiter. Das Relay braucht diese Version und eine https-Adresse. Beiträge eines Kreises erreichen einen Browser erst, wenn der Kreis es erlaubt.
+• Behoben: Das Verknüpfen eines neuen Geräts konnte dauerhaft bei „Verknüpfen…“ hängen bleiben, wenn eine Nachricht verloren ging. Es erholt sich jetzt von selbst.
 
 ## whats_new_windows
-2.2.0 – Haven im Webbrowser nutzen.
-• Neu: Ein Relay, das du in dieser App hostest, kann Haven im Webbrowser anbieten. Schalte in den Relay-Einstellungen den Webzugriff ein, öffne die Adresse im Browser und verknüpfe ihn, indem du den angezeigten Code scannst oder einfügst. Die Beiträge eines Kreises erreichen einen Browser erst, wenn der Kreis es erlaubt.
-• Anrufe aus dieser App: Kamera einschalten, Bildschirm teilen und Auflegen kommen jetzt zuverlässig bei Telefonen an, und ein geteilter Bildschirm wird nicht mehr von einem Avatar verdeckt.
+2.2.1 – Haven im Browser, unter einer festen Adresse.
+• Ein Relay, das du mit dieser App hostest, funktioniert jetzt auch mit Haven unter haven.wemiller.com/app: Scanne den Code der Seite, und sie findet dein Relay selbst. Das Relay braucht eine https-Adresse.
+• Behoben: Das Verknüpfen eines neuen Geräts konnte dauerhaft bei „Verknüpfen…“ hängen bleiben, wenn eine Nachricht verloren ging. Es erholt sich jetzt von selbst.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

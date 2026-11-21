@@ -82,6 +82,11 @@ What is different about such a page:
   and which circles it serves from the account itself (frame 37) and reads and writes those
   mailboxes directly, as a relay-served page does.
 
+If you host it yourself: give it an origin of its own (a host name that serves nothing else). A
+browser keeps what a page stores per origin, so any other page or script on the same origin could
+reach what the client stores there. That is why the project serves it from Haven's own address
+and the portfolio, which shares one origin among many pages, only redirects to it.
+
 What has to be true for it to work, said plainly:
 
 - **The relay must run 2.2.1 or later.** A page may read another origin's answers only if that

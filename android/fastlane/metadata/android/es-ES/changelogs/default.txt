@@ -1,5 +1,3 @@
-2.2.0 — Usa Haven en un navegador web.
-• Añade un navegador web como uno de tus dispositivos: escanea el código que muestra (Ajustes → Dispositivos). Cada círculo decide si los navegadores pueden leerlo.
-• Corrección de privacidad: tras una videollamada, la siguiente llamada podía empezar con la cámara ya encendida. Ahora todas empiezan con la cámara apagada.
-• Una llamada ya no se cuelga poco después de un breve corte de conexión.
-• Los cambios de cámara llegan en el orden correcto.
+2.2.1 — Haven en el navegador, desde una sola dirección.
+• Abre haven.wemiller.com/app en un navegador web, escanea el código que muestra (Ajustes → Dispositivos) y sigue con el relay de tu círculo. Cada círculo decide si los navegadores pueden leerlo.
+• Corregido: vincular un dispositivo nuevo podía quedarse en «Vinculando…» para siempre si se perdía un mensaje. Ahora se recupera solo.

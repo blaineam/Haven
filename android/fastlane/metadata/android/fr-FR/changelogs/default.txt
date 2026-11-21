@@ -1,5 +1,3 @@
-2.2.0 — Utilisez Haven dans un navigateur web.
-• Ajoutez un navigateur web comme l'un de vos appareils : scannez le code affiché (Réglages → Appareils). Chaque cercle décide si les navigateurs peuvent le lire.
-• Correctif de confidentialité : après un appel vidéo, l'appel suivant pouvait commencer caméra allumée. Chaque appel commence désormais caméra éteinte.
-• Un appel ne raccroche plus juste après une brève coupure de connexion.
-• Les changements de caméra arrivent dans le bon ordre.
+2.2.1 — Haven dans le navigateur, depuis une seule adresse.
+• Ouvrez haven.wemiller.com/app dans un navigateur web, scannez le code affiché (Réglages → Appareils), et il continue avec le relay de votre cercle. Chaque cercle décide si les navigateurs peuvent le lire.
+• Corrigé : l'association d'un nouvel appareil pouvait rester bloquée sur « Association… » si un message était perdu. Elle se rétablit désormais d'elle-même.

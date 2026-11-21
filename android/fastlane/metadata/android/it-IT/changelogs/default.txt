@@ -1,5 +1,3 @@
-2.2.0 — Usa Haven in un browser web.
-• Aggiungi un browser web come uno dei tuoi dispositivi: scansiona il codice mostrato (Impostazioni → Dispositivi). Ogni cerchia decide se i browser possono leggerla.
-• Correzione per la privacy: dopo una videochiamata, la chiamata successiva poteva iniziare con la fotocamera già accesa. Ora ogni chiamata inizia con la fotocamera spenta.
-• Una chiamata non si chiude più poco dopo una breve interruzione.
-• I cambi di fotocamera arrivano nell'ordine giusto.
+2.2.1 — Haven nel browser, da un unico indirizzo.
+• Apri haven.wemiller.com/app in un browser web, scansiona il codice mostrato (Impostazioni → Dispositivi) e prosegue con il relay della tua cerchia. Ogni cerchia decide se i browser possono leggerla.
+• Corretto: il collegamento di un nuovo dispositivo poteva restare fermo su “Collegamento…” per sempre se un messaggio andava perso. Ora si riprende da solo.

@@ -109,5 +109,6 @@
   "why-it-matters-the.95cea0": "<b>Pourquoi c'est important :</b> le téléphone dans votre poche ne devrait pas travailler comme un serveur. Le relay est fait pour rester allumé ; votre téléphone peut rester un téléphone.",
   "why-it-matters-your.c22aeb": "<b>Pourquoi c'est important :</b> votre vie ne tient pas sur un seul écran. Haven vous suit d'un appareil à l'autre — votre identité se transfère par un code local ou un QR code, jamais via un serveur qui pourrait la conserver.",
   "windows.26d9c2": "Windows",
-  "your-relay-does-the.6610c9": "Votre relay fait le gros du travail <span class=\"badge ok\">Nouveau en 2.0</span>"
+  "your-relay-does-the.6610c9": "Votre relay fait le gros du travail <span class=\"badge ok\">Nouveau en 2.0</span>",
+  "open-haven-in-your.b1f525": "Ouvrir Haven dans votre navigateur"
 }

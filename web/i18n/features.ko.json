@@ -109,5 +109,6 @@
   "why-it-matters-the.95cea0": "<b>중요한 이유:</b> 주머니 속 휴대폰이 서버처럼 일할 필요는 없습니다. 항상 켜져 있는 건 릴레이의 몫이니, 휴대폰은 휴대폰답게 쓰면 됩니다.",
   "why-it-matters-your.c22aeb": "<b>중요한 이유:</b> 당신의 삶은 화면 하나에 담기지 않습니다. Haven은 모든 기기에서 당신을 따라다닙니다 — 신원은 로컬 전송 코드나 QR로 옮겨질 뿐, 이를 보관할 수 있는 서버를 거치지 않습니다.",
   "windows.26d9c2": "Windows",
-  "your-relay-does-the.6610c9": "무거운 일은 릴레이가 맡습니다 <span class=\"badge ok\">2.0 신규</span>"
+  "your-relay-does-the.6610c9": "무거운 일은 릴레이가 맡습니다 <span class=\"badge ok\">2.0 신규</span>",
+  "open-haven-in-your.b1f525": "브라우저에서 Haven 열기"
 }

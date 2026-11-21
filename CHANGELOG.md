@@ -9,14 +9,17 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+## 2.2.1 (2026-11-20)
+
 ### Added
-- **Haven in a browser, from a web site.** The web client can now be served by an ordinary web site as well as by a circle's relay. Open the page, scan the code it shows with Haven on your phone, approve the browser there, and it carries on with your circle's relay by itself. The project's site can serve it at `/app/` (a switch its owner holds, off until set); anyone can host the same files (`haven-web-site.tar.gz` on each Release), and `Scripts/verify-web-site.mjs` checks a site against a Release.
+- **Haven in a browser, from a web site.** The web client can now be served by an ordinary web site as well as by a circle's relay. Open the page, scan the code it shows with Haven on your phone, approve the browser there, and it carries on with your circle's relay by itself. The project's site serves it at `/app/` on its own address, which serves nothing else (a switch its owner holds; on as of this release); anyone can host the same files (`haven-web-site.tar.gz` on each Release), and `Scripts/verify-web-site.mjs` checks a site against a Release.
   - The page starts out knowing no relay, so it meets your phone on a rendezvous relay (the public ones the apps already fall back to, or ones the site names), then learns your relays from your account.
   - It says on the link screen that it comes from a web site and that you are trusting that site. The circle's "Web browsers" switch, off by default, still decides whether any browser can read a circle.
   - It needs the circle's relay to be on `https` and on this version or later.
 - **Relay: answers can be read by a page from another origin.** This is what lets a page from a web site, or from another relay, use a relay's mailbox. It grants nothing: every request is still authorized by a member's signature, and there is no cookie or session for a browser to lend a page. Regression test added.
 
 ### Fixed
+- **An Android phone being linked asked only once.** Its request to join went out a single time, so a lost request left it waiting until the person scanned again. It now keeps asking every 20 seconds for as long as the link code is valid, as the other apps do.
 - **Linking a device could hang on "Linking…" for good (all platforms).** When you approve a new device, your device sends it one message that completes the link. If that one message was lost (the new device reloading, either side changing network at that moment), the new device kept asking and was never answered, because the link code had already been used. Your device now sends the same answer again when the device you approved asks again, for the ten minutes the code would have lasted. Only that device gets it, and nothing new is signed. Found by the web client's CI run, where it stalled two runs in five; regression tests on the engine, iPhone/Mac and Android.
 - **Relay: a good update could be marked bad for ever.** Before installing a signed update, the relay runs the new binary once to check it starts. A file that was only just written can be refused by the system for a moment as "busy", and the relay read that as "does not run on this machine" and never tried that version again. It now waits out a busy file within the same time limit. Found as an intermittent CI failure of the in-place update test; regression test added.
 

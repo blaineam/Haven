@@ -109,5 +109,6 @@
   "why-it-matters-the.95cea0": "<b>为什么重要：</b>口袋里的手机不该像服务器一样干活。一直在线是 Relay 的事，手机只需做好手机。",
   "why-it-matters-your.c22aeb": "<b>为什么重要：</b>你的生活不只在一块屏幕上。Haven 会随你在各台设备之间流转——你的身份通过本地转移码或 QR 码迁移，绝不经过任何可能留存它的服务器。",
   "windows.26d9c2": "Windows",
-  "your-relay-does-the.6610c9": "重活交给 Relay <span class=\"badge ok\">2.0 新增</span>"
+  "your-relay-does-the.6610c9": "重活交给 Relay <span class=\"badge ok\">2.0 新增</span>",
+  "open-haven-in-your.b1f525": "在浏览器中打开 Haven"
 }

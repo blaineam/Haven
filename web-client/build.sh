@@ -80,3 +80,29 @@ awk '
 grep -q 'web-host.js' "$dist/index.html" || { echo "index.html: host shim not injected" >&2; exit 1; }
 grep -q 'responsive.css' "$dist/index.html" || { echo "index.html: responsive layer not injected" >&2; exit 1; }
 echo "built $dist ($(find "$dist" -type f | wc -l | tr -d ' ') files)"
+
+# ── dist-site/: the same files, for an ordinary web site ─────────────────────────────────────
+# A static host (a project page, any file server) can serve the client too. Such a page is not a
+# relay's: web-host.js reads the marker below, starts with no relay, and links through a
+# rendezvous relay. A static host usually cannot set response headers, so the content policy the
+# relay sends as a header (core/haven-net/src/webbundle.rs) rides in the page instead; the one
+# directive a page cannot carry, frame-ancestors, is the host's to send if it can.
+#   HAVEN_SITE_RENDEZVOUS="https://relay.example"   optional, comma-separated: relays the site
+#       names as the meeting point for linking, instead of the public ones the apps fall back to.
+site="$here/dist-site"
+rm -rf "$site"
+cp -R "$dist" "$site"
+csp="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; media-src 'self' blob:; font-src 'self'; connect-src 'self' https: wss:; worker-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'"
+HAVEN_CSP="$csp" HAVEN_RDV="${HAVEN_SITE_RENDEZVOUS:-}" awk '
+  /<meta name="viewport"/ && !done {
+    print
+    print "    <meta http-equiv=\"Content-Security-Policy\" content=\"" ENVIRON["HAVEN_CSP"] "\" />"
+    print "    <meta name=\"referrer\" content=\"no-referrer\" />"
+    print "    <meta name=\"haven-host\" content=\"site\" />"
+    if (ENVIRON["HAVEN_RDV"] != "") print "    <meta name=\"haven-rendezvous\" content=\"" ENVIRON["HAVEN_RDV"] "\" />"
+    done = 1; next
+  }
+  { print }
+' "$dist/index.html" > "$site/index.html"
+grep -q 'name="haven-host" content="site"' "$site/index.html" || { echo "dist-site/index.html: site marker not injected" >&2; exit 1; }
+echo "built $site"

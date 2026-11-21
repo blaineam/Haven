@@ -54,6 +54,28 @@ jobs:
           cp -R web _site
           node .github/legacy-site.mjs _site web https://wemiller.com/apps/haven/ \
             --keep open/index.html --keep _preview.html
+      # The web client, served from this site at /app/ (docs/WEB-PARITY.md § "From a web site").
+      # It is the build of the latest stable Release, never of this commit: the page a person
+      # links must be the one that was tested and tagged. A Release from before the site archive
+      # existed has none; the site then simply has no /app/ yet. release.yml re-runs this workflow
+      # after publishing, so the page follows each release.
+      # OFF unless the owner sets the repository variable SITE_WEB_CLIENT=true: serving this page
+      # makes the site a place the client's code can be changed from (docs/DECISIONS.md D24).
+      - name: Add the web client of the latest release
+        if: vars.SITE_WEB_CLIENT == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release download --repo "$GITHUB_REPOSITORY" --pattern haven-web-site.tar.gz --dir "$RUNNER_TEMP/webapp" 2>/dev/null; then
+            mkdir -p _site/app
+            tar -C _site/app -xzf "$RUNNER_TEMP/webapp/haven-web-site.tar.gz"
+            test -f _site/app/index.html
+            grep -q 'name="haven-host" content="site"' _site/app/index.html
+            echo "- web client: $(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName) at /app/" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::notice title=no web client::the latest release carries no haven-web-site.tar.gz — /app/ is not published"
+          fi
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:

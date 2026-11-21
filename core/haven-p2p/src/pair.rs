@@ -68,7 +68,8 @@ pub struct PairCode {
     /// Unix seconds the code was made.
     pub issued_at: u64,
     /// The relay (an `https://…` front door) the device is listening on. One, not a list: a
-    /// browser is reachable only through the relay that served it.
+    /// browser is reachable only through the relay that served it, or, for a page served by an
+    /// ordinary web site, through the rendezvous relay it came up on.
     pub relay: String,
 }
 

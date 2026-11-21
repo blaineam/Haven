@@ -68,7 +68,7 @@ https://wemiller.com/privacy/
 ## review_notes
 WHAT IS NEW IN 2.2.0
 One feature and several fixes. No new permissions or entitlements, and still no data collection.
-- A member can link a WEB BROWSER as one more device of their own account. The web page is served by a relay the circle's own members run (never by the developer); this app's part is the approval. To see it: Settings → Devices → link a device → "Scan its code", which scans (or accepts as pasted text) the code a browser shows, then asks the user to confirm the device by name. A browser is marked as such in the device list, and each circle has a switch (circle settings → "Web browsers"), off by default, deciding whether browsers may read that circle. The app loads no web content and works as before if this is never used.
+- A member can link a WEB BROWSER as one more device of their own account. The web page is served by a relay the circle's own members run, or by a web site (ours offers it); this app's part is the approval. To see it: Settings → Devices → link a device → "Scan its code", which scans (or accepts as pasted text) the code a browser shows, then asks the user to confirm the device by name. A browser is marked as such in the device list, and each circle has a switch (circle settings → "Web browsers"), off by default, deciding whether browsers may read that circle. The app loads no web content and works as before if this is never used.
 - Fixes: a friend added by scanning THEIR invite now exchanges posts in seconds, not minutes; in a call, a shared screen could show as an avatar or not appear when shared a second time.
 - A linked browser can optionally be notified through our push worker with an empty Web Push message (no content); see NOTIFICATIONS.
 

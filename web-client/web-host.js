@@ -27,6 +27,41 @@
    *  be trusted. */
   window.__HAVEN_HOST__ = { web: true, site: SITE_HOSTED ? location.host : "" };
 
+  // Safari refuses a secure connection to a host written as a fully qualified name with its
+  // trailing dot ("relay.example.com."): "The server did not accept the certificate". The public
+  // relays are named that way, and the engine learns such names from more places than its own
+  // list (another device's published address, for one), so a page in Safari showed a code and
+  // then could not reach the phone that answered it. Chromium and Firefox do not mind. Every
+  // connection the page opens goes through WebSocket or fetch, so the dot is dropped here, in
+  // the one place none can get past. The dotless name is the same server.
+  const undot = (url) => {
+    try {
+      const u = new URL(url, location.href);
+      if (!u.hostname.endsWith(".") || u.hostname.length < 2) return url;
+      u.hostname = u.hostname.slice(0, -1);
+      return u.href;
+    } catch (_) { return url; }
+  };
+  window.__HAVEN_UNDOT__ = undot;   // for the tests
+  const NativeWebSocket = window.WebSocket;
+  if (NativeWebSocket) {
+    const Patched = function WebSocket(url, protocols) {
+      return protocols === undefined ? new NativeWebSocket(undot(String(url))) : new NativeWebSocket(undot(String(url)), protocols);
+    };
+    Patched.prototype = NativeWebSocket.prototype;
+    for (const k of ["CONNECTING", "OPEN", "CLOSING", "CLOSED"]) Patched[k] = NativeWebSocket[k];
+    window.WebSocket = Patched;
+  }
+  const nativeFetch = window.fetch.bind(window);
+  window.fetch = (input, init) => {
+    if (typeof input === "string" || input instanceof URL) return nativeFetch(undot(String(input)), init);
+    if (input instanceof Request) {
+      const fixed = undot(input.url);
+      if (fixed !== input.url) return nativeFetch(new Request(fixed, input), init);
+    }
+    return nativeFetch(input, init);
+  };
+
   const listeners = new Map(); // event name → Set<fn>
   function emit(name, payload) {
     const set = listeners.get(name);

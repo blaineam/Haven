@@ -143,3 +143,13 @@ jobs:
           SMOKE_LOG: info
           HAVEN_SMOKE_LOG: info
         run: node web-client/smoke/site.mjs core/target/debug/examples/web_primary_engine
+      # And in WebKit through the PUBLIC rendezvous relays, as a page on a real web site meets a
+      # phone: the names Safari refuses come from there, not from a relay on this machine.
+      - name: Browser smoke, served by a web site, in WebKit, public rendezvous
+        env:
+          NODE_PATH: ${{ runner.temp }}/pw/node_modules
+          SMOKE_BROWSER: webkit
+          SMOKE_RENDEZVOUS: public
+          SMOKE_LOG: info
+          HAVEN_SMOKE_LOG: info
+        run: node web-client/smoke/site.mjs core/target/debug/examples/web_primary_engine

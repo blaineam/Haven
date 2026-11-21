@@ -71,6 +71,9 @@ try {
       page.on("request", (r) => {
         try { if (new URL(r.url()).hostname.endsWith(".")) dotted.add(new URL(r.url()).hostname); } catch {}
       });
+      page.on("websocket", (ws) => {
+        try { if (new URL(ws.url()).hostname.endsWith(".")) dotted.add(new URL(ws.url()).hostname); } catch {}
+      });
       page.on("response", (r) => {
         const u = new URL(r.url());
         if (/^\/(k|l|t)\//.test(u.pathname)) calls.push({ origin: u.origin, method: r.request().method(), status: r.status() });
@@ -89,7 +92,11 @@ try {
     crashes,
   })}\npage console (last 40):\n  ${pageLog.slice(-40).join("\n  ")}`);
   const crashes = [];
-  page.on("pageerror", (e) => crashes.push(e.message));
+  // While the page is being torn down (a reload, or erasing itself), WebKit reports each fetch it
+  // cancels as an uncaught "…due to access control checks". Those are not crashes of a running
+  // page, so errors are not counted between `leaving = true` and the next page being ready.
+  let leaving = false;
+  page.on("pageerror", (e) => { if (!leaving) crashes.push(e.message); });
   page.on("console", (m) => { if (m.type() === "error" && m.text().includes("[haven panic]")) crashes.push(m.text()); });
   await page.evaluate(() => window.__HAVEN_WEB__.ready);
   step(`a plain web site serves the client at ${site.url}/ (the relay is ${relay})`);
@@ -175,9 +182,11 @@ try {
 
   // Coming back to the site: still linked ("this is my computer"), still no relay of its own.
   await page.evaluate(() => window.__HAVEN_WEB__.flush());
+  leaving = true;
   await page.goto(`${site.url}/`);
   await page.waitForFunction(() => !!window.__HAVEN_WEB__, null, { timeout: 30000 });
   await page.evaluate(() => window.__HAVEN_WEB__.ready);
+  leaving = false;
   if (await page.evaluate(() => window.__HAVEN_WEB__.app().needsOnboarding())) throw new Error("the link did not survive leaving the page");
   peer.write("after coming back\n");
   await until("a post made after the page came back", async () => (await feed()).some((p) => p.body === "after coming back"), 180000);
@@ -185,6 +194,7 @@ try {
 
   // Removed from the account on another device: the page must not sit on what it had. It
   // forgets everything, says why, and is back on its link screen with a fresh code.
+  leaving = true;
   peer.write("!revoke web\n");
   if ((await peer.line("REVOKED ")) !== "1") throw new Error("the primary did not find exactly one browser to remove");
   await until("the removed page to return to its link screen", () => page.evaluate(() => !!document.querySelector("#web-removed-note") && !!document.querySelector("#pair-copy")?.dataset.code), 120000);
@@ -193,6 +203,7 @@ try {
   await page.waitForFunction(() => !!window.__HAVEN_WEB__, null, { timeout: 30000 });
   await page.evaluate(() => window.__HAVEN_WEB__.ready);
   if (!(await page.evaluate(() => window.__HAVEN_WEB__.app().needsOnboarding()))) throw new Error("a removed browser was linked again after a reload");
+  leaving = false;
   step("a browser removed from the account erases itself, says why, and offers to link again");
 
   if (dotted.size) throw new Error(`the page asked for hosts Safari will not connect to: ${[...dotted].join(", ")}`);

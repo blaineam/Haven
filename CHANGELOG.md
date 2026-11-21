@@ -27,6 +27,11 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   refuses a secure connection to such a name, so the page reached no relay and stayed on
   "could not reach the relay". The page now uses the same servers by their plain names. The
   site smoke now also runs in WebKit and fails if the page asks for a dotted host.
+- **In Safari, scanning the browser's code never raised the approval on the phone.** The page
+  showed its code, the phone answered it, and the page then had to reach the phone through the
+  phone's own relay address, which it learns from the network and which also ends in a dot. Every
+  connection the page opens now has the dot removed, wherever the address came from. CI runs the
+  whole link in WebKit through the public relays.
 - **Receiving a picture or video crashed the browser client.** Storing received media asked for a
   process id, which a browser does not have; the request stops the page's whole engine, so no
   media appeared and nothing else loaded afterwards either. The browser now names those files

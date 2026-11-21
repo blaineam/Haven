@@ -61,10 +61,16 @@ try {
 
   // Every mailbox call the page makes, and where it went.
   const calls = [];
+  const dotted = new Set();
   const { browser, page } = await openPage(`${site.url}/`, {
     ready: () => !!window.__HAVEN_WEB__,
     before: async (page) => {
       await page.addInitScript((log) => { window.__HAVEN_HARNESS__ = { pushOff: true, log }; }, process.env.SMOKE_LOG || "");
+      // Safari refuses TLS to a host written with a trailing dot ("relay.example.com."), which
+      // is how the public relays are named. Chromium does not mind, so check the names here.
+      page.on("request", (r) => {
+        try { if (new URL(r.url()).hostname.endsWith(".")) dotted.add(new URL(r.url()).hostname); } catch {}
+      });
       page.on("response", (r) => {
         const u = new URL(r.url());
         if (/^\/(k|l|t)\//.test(u.pathname)) calls.push({ origin: u.origin, method: r.request().method(), status: r.status() });
@@ -103,6 +109,9 @@ try {
   step(`a page that no relay served still shows a code (${PUBLIC ? "reachable through a public rendezvous relay" : "reachable through the relay its site names"})`);
 
   await page.locator('input[type="checkbox"]').first().check();
+  // A person does not scan the instant the code appears. SMOKE_PAIR_DELAY_MS leaves the page
+  // showing its code for that long first, as it sits while someone finds their phone.
+  if (process.env.SMOKE_PAIR_DELAY_MS) await new Promise((r) => setTimeout(r, Number(process.env.SMOKE_PAIR_DELAY_MS)));
   // The page can have its code up before the primary's own node has finished starting; a
   // primary that is still offline says so, and is asked again. So is one that dialed and did not
   // get through: the person would scan again. A dial that was REFUSED without being tried
@@ -161,6 +170,7 @@ try {
   await until("a post made after the page came back", async () => (await feed()).some((p) => p.body === "after coming back"), 180000);
   step("the link survives leaving and coming back, and the circle keeps arriving");
 
+  if (dotted.size) throw new Error(`the page asked for hosts Safari will not connect to: ${[...dotted].join(", ")}`);
   if (crashes.length) throw new Error(`the page crashed: ${crashes.join(" | ")}`);
   console.log("PASS");
 } catch (e) {

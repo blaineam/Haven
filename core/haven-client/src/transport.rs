@@ -11,6 +11,54 @@ pub use haven_ffi::{HavenNode, InboundListener, RelayClient, RelayServerHandle};
 #[cfg(target_arch = "wasm32")]
 pub use web::*;
 
+/// A relay address as a browser must be given it: without the trailing dot of a fully qualified
+/// name (`relay.example.com.`). iroh's public relays are named with one, and native code is right
+/// to keep it, but Safari refuses the TLS handshake to such a name ("The server did not accept the
+/// certificate"), so a page in Safari could reach no public relay and never showed a code.
+/// The dotless name is the same server. Anything that is not `scheme://host…` is returned as is.
+pub fn browser_relay_url(url: &str) -> String {
+    let Some(scheme_end) = url.find("://") else { return url.to_string() };
+    let rest = &url[scheme_end + 3..];
+    let host_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..host_end];
+    // `host` or `host:port`; an IPv6 literal (`[::1]`) has no name to trim.
+    let (host, port) = match authority.rfind(':') {
+        Some(i) if !authority.ends_with(']') && authority[i + 1..].bytes().all(|b| b.is_ascii_digit()) => {
+            (&authority[..i], &authority[i..])
+        }
+        _ => (authority, ""),
+    };
+    let Some(trimmed) = host.strip_suffix('.') else { return url.to_string() };
+    if trimmed.is_empty() || trimmed.ends_with('.') {
+        return url.to_string();
+    }
+    format!("{}{}{}{}", &url[..scheme_end + 3], trimmed, port, &rest[host_end..])
+}
+
+#[cfg(test)]
+mod browser_relay_url_tests {
+    use super::browser_relay_url;
+
+    #[test]
+    fn a_fully_qualified_relay_name_loses_its_trailing_dot_and_nothing_else() {
+        assert_eq!(browser_relay_url("https://usw1-1.relay.n0.iroh.link./"), "https://usw1-1.relay.n0.iroh.link/");
+        assert_eq!(browser_relay_url("https://relay.example.com."), "https://relay.example.com");
+        assert_eq!(browser_relay_url("https://relay.example.com.:8443/x?y#z"), "https://relay.example.com:8443/x?y#z");
+        // Already fine, or not ours to touch.
+        for same in [
+            "https://relay.example.com/",
+            "http://127.0.0.1:8674",
+            "http://[::1]:8674/",
+            "https://a.b/path.with.dot./",
+            "https://./",
+            "https://double../",
+            "not a url.",
+        ] {
+            assert_eq!(browser_relay_url(same), same);
+        }
+    }
+}
+
 /// The browser's transport. A tab cannot bind UDP, accept inbound connections or hole-punch, so
 /// its node reaches peers only through relays (a circle's own DERP when one is known, n0's
 /// otherwise) — the same `haven/social/0` wire, one uni stream per frame.
@@ -22,7 +70,7 @@ pub mod web {
     use haven_ffi::{HavenError, HavenSocial};
     use haven_p2p::identity::Identity;
     use iroh::endpoint::{presets, Connection, Endpoint, QuicTransportConfig};
-    use iroh::{EndpointAddr, EndpointId, RelayConfig, RelayMode, RelayUrl, SecretKey};
+    use iroh::{EndpointAddr, EndpointId, RelayConfig, RelayMap, RelayMode, RelayUrl, SecretKey};
 
     /// Same ALPN as `haven_net` — a browser node is a peer on the same protocol.
     const ALPN: &[u8] = b"haven/social/0";
@@ -73,9 +121,18 @@ pub mod web {
         pub async fn start(seed: Vec<u8>, listener: Arc<dyn InboundListener>) -> Result<Arc<Self>, HavenError> {
             let seed: [u8; 32] = seed.try_into().map_err(|_| invalid("seed must be 32 bytes"))?;
             let secret = Identity::from_seed(&seed).node_secret_bytes();
-            let customs: Vec<RelayUrl> =
-                crate::net::active_derp_urls().iter().filter_map(|u| u.parse::<RelayUrl>().ok()).collect();
-            let map = RelayMode::Default.relay_map();
+            let customs: Vec<RelayUrl> = crate::net::active_derp_urls()
+                .iter()
+                .filter_map(|u| super::browser_relay_url(u).parse::<RelayUrl>().ok())
+                .collect();
+            // n0's relays are named with a trailing dot, which Safari will not connect to
+            // (`browser_relay_url`): the map is rebuilt from the same names without it.
+            let map = RelayMap::empty();
+            for url in RelayMode::Default.relay_map().urls::<Vec<RelayUrl>>() {
+                if let Ok(url) = super::browser_relay_url(url.as_str()).parse::<RelayUrl>() {
+                    map.insert(url.clone(), Arc::new(RelayConfig::new(url, None)));
+                }
+            }
             for url in &customs {
                 map.insert(url.clone(), Arc::new(RelayConfig::new(url.clone(), None)));
             }
@@ -168,7 +225,7 @@ pub mod web {
             relay_url: String,
             payload: Vec<u8>,
         ) -> Result<(), HavenError> {
-            let url = relay_url.trim().parse::<RelayUrl>().map_err(invalid)?;
+            let url = super::browser_relay_url(relay_url.trim()).parse::<RelayUrl>().map_err(invalid)?;
             self.send_inner(node_id_hex, Some(url), payload).await
         }
 

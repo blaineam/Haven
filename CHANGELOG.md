@@ -22,6 +22,11 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   phone). A scanned code now always gets a real attempt. Found when the same race failed a
   browser test in CI. The fix is in the shared core; installed apps get it with the next full
   release.
+- **The browser client never showed its code in Safari.** A page served by a web site meets the
+  account on public rendezvous relays, whose addresses are written with a trailing dot. Safari
+  refuses a secure connection to such a name, so the page reached no relay and stayed on
+  "could not reach the relay". The page now uses the same servers by their plain names. The
+  site smoke now also runs in WebKit and fails if the page asks for a dotted host.
 
 ### Changed
 - **A fix to the browser client alone no longer needs a full release.** A `web-vX.Y.Z-N` tag builds

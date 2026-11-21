@@ -10,11 +10,14 @@ import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
 // Playwright is a dev tool, not a dependency of this repo: resolve it from NODE_PATH or a global
 // install (`playwright`, or `playwright-core` with its browser already downloaded).
+// SMOKE_BROWSER=webkit runs the same smoke in Playwright's WebKit build (Safari's engine), which
+// refuses things Chromium lets through. Default: chromium.
+const BROWSER = process.env.SMOKE_BROWSER || "chromium";
 let chromium;
 for (const name of ["playwright", "playwright-core"]) {
   try {
-    ({ chromium } = require(name));
-    break;
+    chromium = require(name)[BROWSER];
+    if (chromium) break;
   } catch {}
 }
 if (!chromium) {

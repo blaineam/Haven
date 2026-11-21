@@ -118,7 +118,7 @@ jobs:
       - name: Install Chromium
         run: |
           npm install --no-save --prefix "$RUNNER_TEMP/pw" playwright
-          "$RUNNER_TEMP/pw/node_modules/.bin/playwright" install --with-deps chromium
+          "$RUNNER_TEMP/pw/node_modules/.bin/playwright" install --with-deps chromium webkit
       - name: Service worker and push worker tests
         run: node --test web-client/sw.test.mjs push/worker.test.mjs
       - name: Browser smoke
@@ -131,6 +131,15 @@ jobs:
         env:
           NODE_PATH: ${{ runner.temp }}/pw/node_modules
           # Both engines' own logs: the page's are kept and printed only if the run fails.
+          SMOKE_LOG: info
+          HAVEN_SMOKE_LOG: info
+        run: node web-client/smoke/site.mjs core/target/debug/examples/web_primary_engine
+      # Again in WebKit, Safari's engine: it refuses things Chromium lets through (2.2.1's page
+      # never showed a code in Safari).
+      - name: Browser smoke, served by a web site, in WebKit
+        env:
+          NODE_PATH: ${{ runner.temp }}/pw/node_modules
+          SMOKE_BROWSER: webkit
           SMOKE_LOG: info
           HAVEN_SMOKE_LOG: info
         run: node web-client/smoke/site.mjs core/target/debug/examples/web_primary_engine

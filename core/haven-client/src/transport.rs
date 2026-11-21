@@ -110,6 +110,16 @@ pub mod web {
             self.endpoint.online().await;
         }
 
+        /// The relay this node can be reached through right now: the circle relay it was bound
+        /// with when there is one, otherwise whichever public rendezvous relay it settled on.
+        /// `None` until [`online`](Self::online) has resolved.
+        pub fn reachable_relay(&self) -> Option<String> {
+            if let Some(home) = &self.home {
+                return Some(home.to_string());
+            }
+            self.endpoint.addr().relay_urls().next().map(|u| u.to_string())
+        }
+
         pub async fn shutdown(&self) {
             lock(&self.conns).clear();
             self.endpoint.close().await;

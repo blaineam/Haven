@@ -101,6 +101,26 @@ use haven_p2p::httpauth::{body_digest, transcript};
 /// LIST delta header (request AND response): a hex digest of a prefix's sorted key set. Echoing
 /// the last-seen value turns an unchanged LIST into a bodiless `204` (the radio saver).
 pub const LIST_DIGEST_HEADER: &str = "X-Haven-List-Digest";
+
+/// Sent with every answer, so a web page from another origin may read it. This is what lets the
+/// web client run from an ordinary web site, or from one relay while it talks to another.
+///
+/// It grants nothing. Every request here is authorized by a signature over the request itself
+/// ([`verify_header`]); there is no cookie, no session and no ambient credential a browser could
+/// attach on a page's behalf, so a page from anywhere can do exactly what any other program on
+/// the internet can: ask, and be refused unless it holds a member's key. The wildcard also means
+/// the relay never has to look at, compare or remember which site asked.
+const CORS_ANSWER: &str = "Access-Control-Allow-Origin: *\r\nAccess-Control-Expose-Headers: X-Haven-List-Digest\r\n";
+
+/// The answer to a browser's preflight (`OPTIONS`): which methods and request headers a page may
+/// use. The headers are the two the client sends (the signature and the list digest) plus the
+/// content type; the private-network line lets a page from a public site reach a relay on the
+/// home network over TLS. Cached for a day so the preflight is paid once per page, not per call.
+const CORS_PREFLIGHT: &str = "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\n\
+Access-Control-Allow-Methods: GET, HEAD, PUT, POST\r\n\
+Access-Control-Allow-Headers: authorization, content-type, x-haven-list-digest\r\n\
+Access-Control-Allow-Private-Network: true\r\nAccess-Control-Max-Age: 86400\r\n\
+Content-Length: 0\r\n";
 /// Accepted clock skew, and therefore how long a nonce must be remembered to make a signed
 /// request one-shot. Wide enough for a phone with a lazy clock, short enough to bound the cache.
 const SKEW: u64 = 300;
@@ -370,6 +390,20 @@ async fn handle_conn(
         let keep_alive = header(&headers, "connection")
             .map(|v| !v.eq_ignore_ascii_case("close"))
             .unwrap_or(true);
+
+        // A browser asking permission before a cross-origin request. Answered without a
+        // signature (a preflight cannot carry one) and without touching the store: it says only
+        // what the rules above already say to everyone.
+        if method == "OPTIONS" {
+            discard(&mut r, clen.min(MAX_TOUCH_BODY)).await?;
+            let conn = if keep_alive { "keep-alive" } else { "close" };
+            w.write_all(format!("{CORS_PREFLIGHT}Connection: {conn}\r\n\r\n").as_bytes()).await?;
+            w.flush().await?;
+            if !keep_alive {
+                return Ok(());
+            }
+            continue;
+        }
 
         let route = route(&method, &path);
         // Browser/probes hitting the media port root (or free-CF mis-routed to :8674) used to get
@@ -709,7 +743,7 @@ fn body_permits(len: u64) -> u32 {
 async fn respond<W: tokio::io::AsyncWrite + Unpin>(w: &mut W, code: u16, reason: &str, keep_alive: bool, body: &[u8]) -> Result<()> {
     let conn = if keep_alive { "keep-alive" } else { "close" };
     let head = format!(
-        "HTTP/1.1 {code} {reason}\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\nConnection: {conn}\r\n\r\n",
+        "HTTP/1.1 {code} {reason}\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\n{CORS_ANSWER}Connection: {conn}\r\n\r\n",
         body.len()
     );
     w.write_all(head.as_bytes()).await?;
@@ -729,7 +763,7 @@ async fn digest_respond<W: tokio::io::AsyncWrite + Unpin>(
 ) -> Result<()> {
     let conn = if keep_alive { "keep-alive" } else { "close" };
     let head = format!(
-        "HTTP/1.1 {code} {reason}\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\n{LIST_DIGEST_HEADER}: {digest}\r\nConnection: {conn}\r\n\r\n",
+        "HTTP/1.1 {code} {reason}\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\n{LIST_DIGEST_HEADER}: {digest}\r\n{CORS_ANSWER}Connection: {conn}\r\n\r\n",
         body.len()
     );
     w.write_all(head.as_bytes()).await?;
@@ -740,7 +774,7 @@ async fn digest_respond<W: tokio::io::AsyncWrite + Unpin>(
 
 async fn head_respond<W: tokio::io::AsyncWrite + Unpin>(w: &mut W, code: u16, keep_alive: bool) -> Result<()> {
     let conn = if keep_alive { "keep-alive" } else { "close" };
-    let head = format!("HTTP/1.1 {code} X\r\nContent-Length: 0\r\nConnection: {conn}\r\n\r\n");
+    let head = format!("HTTP/1.1 {code} X\r\nContent-Length: 0\r\n{CORS_ANSWER}Connection: {conn}\r\n\r\n");
     w.write_all(head.as_bytes()).await?;
     w.flush().await?;
     Ok(())
@@ -989,6 +1023,82 @@ mod tests {
             // Legacy bare self/ refused outright — only the canonical haven/self/… namespace is
             // served over HTTP (owner-gated; see self_sync_owner_fleet_over_http).
             assert!(req("GET", "/k/self/a/state/b", &signed(m, "GET", "/k/self/a/state/b", b""), b"").starts_with("HTTP/1.1 403"));
+        });
+        blocking.await.unwrap();
+        srv.stop();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A web page from another origin (the client hosted on an ordinary site, or served by a
+    /// different relay) may ask and may read the answer — and is held to exactly the same
+    /// signature as everyone else. Being readable cross-origin must never become being allowed.
+    #[tokio::test]
+    async fn a_page_from_another_origin_may_ask_but_still_needs_a_members_signature() {
+        use ed25519_dalek::SigningKey;
+
+        let dir = std::env::temp_dir().join(format!("httprelay-cors-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let member_sk = [7u8; 32];
+        let member_hex = hex(SigningKey::from_bytes(&member_sk).verifying_key().as_bytes());
+        let auth = Arc::new(Mutex::new(RelayAuth::default()));
+        auth.lock().unwrap().authorize("fam", vec![member_hex], vec![]);
+        let srv = serve(dir.clone(), "127.0.0.1:0", "tok".into(), auth).await.unwrap();
+        let base = format!("127.0.0.1:{}", srv.port());
+
+        let blocking = tokio::task::spawn_blocking(move || {
+            let req = |verb: &str, path: &str, hdr: &str, body: &[u8]| {
+                use std::io::{Read, Write};
+                let mut s = std::net::TcpStream::connect(&base).unwrap();
+                let head = format!(
+                    "{verb} {path} HTTP/1.1\r\nHost: x\r\nOrigin: https://site.example\r\n{hdr}Content-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                s.write_all(head.as_bytes()).unwrap();
+                s.write_all(body).unwrap();
+                let mut resp = Vec::new();
+                s.read_to_end(&mut resp).unwrap();
+                String::from_utf8_lossy(&resp).into_owned()
+            };
+            let signed = |verb: &str, path: &str, body: &[u8]| {
+                let key = path.splitn(3, '/').nth(2).unwrap_or("");
+                format!("Authorization: {}\r\n", auth_header(&member_sk, "tok", verb, key, body))
+            };
+            let allowed = |r: &str| r.to_lowercase().contains("access-control-allow-origin: *");
+
+            // The preflight: unsigned by nature, answered, and it names what a page may send.
+            let pre = req(
+                "OPTIONS",
+                "/k/haven/mailbox/fam/aa",
+                "Access-Control-Request-Method: PUT\r\nAccess-Control-Request-Headers: authorization,content-type\r\n",
+                b"",
+            );
+            let low = pre.to_lowercase();
+            assert!(pre.starts_with("HTTP/1.1 204"), "{pre}");
+            assert!(allowed(&pre), "{pre}");
+            assert!(low.contains("access-control-allow-methods: get, head, put, post"), "{pre}");
+            assert!(low.contains("authorization") && low.contains("x-haven-list-digest"), "{pre}");
+
+            // The real requests are readable by the page…
+            let p = "/k/haven/mailbox/fam/aa";
+            let put = req("PUT", p, &signed("PUT", p, b"sealed"), b"sealed");
+            assert!(put.starts_with("HTTP/1.1 200") && allowed(&put), "{put}");
+            let got = req("GET", p, &signed("GET", p, b""), b"");
+            assert!(got.starts_with("HTTP/1.1 200") && got.ends_with("sealed") && allowed(&got), "{got}");
+            let list = req("GET", "/l/haven/mailbox/fam/", &signed("GET", "/l/haven/mailbox/fam/", b""), b"");
+            assert!(list.starts_with("HTTP/1.1 200") && allowed(&list), "{list}");
+            assert!(list.to_lowercase().contains("access-control-expose-headers: x-haven-list-digest"), "{list}");
+            let head = req("HEAD", p, &signed("HEAD", p, b""), b"");
+            assert!(head.starts_with("HTTP/1.1 200") && allowed(&head), "{head}");
+
+            // …and none of that is permission: no signature, no answer.
+            let anon = req("GET", p, "", b"");
+            assert!(anon.starts_with("HTTP/1.1 401") && !anon.ends_with("sealed"), "{anon}");
+            let anon_put = req("PUT", "/k/haven/mailbox/fam/bb", "", b"x");
+            assert!(anon_put.starts_with("HTTP/1.1 401"), "{anon_put}");
+            // A preflight is not a way to write or probe: the store is untouched by it.
+            let after = req("GET", "/k/haven/mailbox/fam/bb", &signed("GET", "/k/haven/mailbox/fam/bb", b""), b"");
+            assert!(after.starts_with("HTTP/1.1 404"), "{after}");
         });
         blocking.await.unwrap();
         srv.stop();

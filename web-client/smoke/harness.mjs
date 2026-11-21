@@ -43,6 +43,41 @@ export async function serve() {
   return { url: `http://127.0.0.1:${server.address().port}/`, close: () => server.close() };
 }
 
+/** A plain file server for dist-site/. It is not a relay: no mailbox, no DERP, nothing but files.
+ *  `rendezvous` is what the site's operator would have built in with HAVEN_SITE_RENDEZVOUS (empty:
+ *  none, so the page meets its primary on the public rendezvous relays); `relay` is the relay the
+ *  linked page will go on to use. */
+export async function serveSite(rendezvous, relay) {
+  const dir = join(root, "dist-site");
+  const TYPES = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".wasm": "application/wasm", ".svg": "image/svg+xml", ".png": "image/png", ".json": "application/json" };
+  const server = createServer(async (req, res) => {
+    let path = normalize(decodeURIComponent(new URL(req.url, "http://x").pathname));
+    if (path.endsWith("/")) path += "index.html";
+    try {
+      let body = await readFile(join(dir, path));
+      if (path === "/index.html") {
+        let html = body.toString("utf8");
+        if (rendezvous) {
+          html = html.replace('<meta name="haven-host" content="site" />',
+            `<meta name="haven-host" content="site" />\n    <meta name="haven-rendezvous" content="${rendezvous}" />`);
+        }
+        // The page's content policy lets it connect out over TLS only. A loopback relay is plain
+        // http, so the harness (and only the harness) names it; a real page is never widened.
+        if (relay.startsWith("http://")) {
+          html = html.replace("connect-src 'self' https: wss:", `connect-src 'self' https: wss: ${relay} ${relay.replace(/^http/, "ws")}`);
+        }
+        body = Buffer.from(html);
+      }
+      res.writeHead(200, { "content-type": TYPES[path.slice(path.lastIndexOf("."))] ?? "application/octet-stream" });
+      res.end(body);
+    } catch {
+      res.writeHead(404).end();
+    }
+  });
+  await new Promise((ok) => server.listen(0, "127.0.0.1", ok));
+  return { url: `http://127.0.0.1:${server.address().port}`, close: () => server.close() };
+}
+
 /** Start a native peer binary. `line(prefix)` resolves with the rest of the first stdout line that
  *  starts with `prefix` (already printed or yet to come); `lines` is everything printed so far. */
 export function startPeer(bin, args = ["127.0.0.1:0"], env = {}) {

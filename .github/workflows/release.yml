@@ -669,6 +669,9 @@ jobs:
     # The `aur` job stays stable-only (it publishes to Arch) — see its own guard.
     if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write            # the last step asks static.yml to redeploy the site
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -794,6 +797,16 @@ jobs:
           # everyone who clicks Download.
           prerelease: ${{ needs.meta.outputs.is_rc == 'true' }}
           make_latest: ${{ needs.meta.outputs.is_rc != 'true' }}
+
+      # The project site serves the web client of the latest stable Release at /app/ (static.yml
+      # fetches `haven-web-site.tar.gz` from it). A Release published with the workflow token
+      # starts no other workflow, so ask for the redeploy here. Never fails a release.
+      - name: Refresh the site's web client
+        if: needs.meta.outputs.is_rc != 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run static.yml --repo "$GITHUB_REPOSITORY" --ref main
 
   # ── AUR: push the PKGBUILDs to aur.archlinux.org (tags · only when AUR_SSH_PRIVATE_KEY is
   #    set). Inert otherwise — exactly like the Play/Microsoft Store steps — so a release

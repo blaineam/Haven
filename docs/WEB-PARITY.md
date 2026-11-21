@@ -1,6 +1,7 @@
-# Web client — in development (reopened 2026-11-19)
+# Web client
 
-**Status: being built on `feat/web-client`. Not shipped. See D21 in [`DECISIONS.md`](DECISIONS.md).**
+**Status: shipped in 2.2.0, served by a circle's relay. Served by a web site as well from the
+release after it. See D21 in [`DECISIONS.md`](DECISIONS.md).**
 
 The web client was abandoned on 2026-06-22 (history at the bottom). The reason then was
 structural: a browser cannot be a Haven peer, and the only workable shape needed a public server
@@ -40,13 +41,71 @@ session that is **the relay host, the tunnel provider in front of it (it termina
 any network that inspects TLS** — which includes exactly the locked-down networks a web client is
 for. Sealed data survives all three; code does not. Nothing in a browser fully closes this.
 
+**From a web site** (next section) the list changes rather than grows: the code then comes from
+that site, its host and whatever sits in front of it, instead of from the relay host and the
+tunnel. The relay still carries the sealed data and still cannot read it. The difference is who
+could swap the code: one site for everyone who uses it, where a relay-served page puts each
+circle in the hands of its own host. The page says which of the two it is on the link screen.
+
 So the design bounds the damage instead of pretending it away: a compromised web session can read
 and post **as that one device until it is revoked**. It never holds the master seed, cannot
 authorize other devices, and loses access to new content when revoked (the epoch rotates). Native
-apps remain the stronger client, and the UI says so. Two switches stand between a browser and a
-circle's posts, both off by default: the relay's host has to offer the web client at all, and
-**the circle has to allow web devices** (next section) — because it is the other members' posts
-that become readable in that browser.
+apps remain the stronger client, and the UI says so. Two switches stand between a relay-served
+browser and a circle's posts, both off by default: the relay's host has to offer the web client
+at all, and **the circle has to allow web devices** — because it is the other members' posts
+that become readable in that browser. A page served by a web site does not need the first: the
+relay's host is not handing out any code, so there is nothing for that switch to withhold. The
+second, the circle's, applies to every browser wherever its page came from, and it is the one
+that decides who can read.
+
+## From a web site
+
+The same client can be served by an ordinary static web site: `web-client/build.sh` also writes
+`web-client/dist-site/`, a Release carries it as `haven-web-site.tar.gz`, and the project's own
+site can serve the build of the latest stable Release at `/app/` (a switch its owner holds, off
+until set: [`DECISIONS.md`](DECISIONS.md) D24; `Scripts/verify-web-site.mjs` checks what a site
+serves against a Release). It is for the person who cannot
+reach, or does not know, their relay's address: one address that does not change, a code on the
+screen, a phone to scan it.
+
+What is different about such a page:
+
+- **It starts out knowing no relay.** A relay-served page can be reached through the relay that
+  served it. This one comes up on a rendezvous relay instead: the public ones every Haven app
+  already falls back to when a circle has no relay of its own, or the ones the site's operator
+  named when building it (`HAVEN_SITE_RENDEZVOUS`). Its code names whichever one it settled on.
+- **The phone's side does not change.** The app answers the code through the relay the code
+  names, as it always has, and the owner still has to approve the device by name.
+- **The rendezvous relay carries the linking frames and nothing else it can read.** It sees two
+  devices exchange a few sealed frames. It is not given the account, the circles or the posts.
+- **Then the phone is not needed.** Once linked, the browser learns each of the account's relays
+  and which circles it serves from the account itself (frame 37) and reads and writes those
+  mailboxes directly, as a relay-served page does.
+
+What has to be true for it to work, said plainly:
+
+- **The relay must run 2.2.1 or later.** A page may read another origin's answers only if that
+  origin says so, and older relays do not (`Access-Control-Allow-Origin`, and an answer to the
+  browser's preflight). Against an older relay the browser links and then sits empty.
+- **The relay must be on `https`.** A page on an `https` site cannot call a plain `http` relay;
+  browsers block it. A relay behind a tunnel or its own domain is fine; one that is only an
+  `http://` address on the home network is not reachable from a web site at all (it still is
+  from the page that relay serves itself).
+- **Letting pages read the relay's answers grants nothing.** Every mailbox request is authorized
+  by a signature over the request, made with a member's device key. There is no cookie or session
+  a browser could attach on a page's behalf, so a page from anywhere can do what any program on
+  the internet can: ask, and be refused. The relay answers every origin the same way and never
+  looks at which site asked (regression test:
+  `a_page_from_another_origin_may_ask_but_still_needs_a_members_signature`).
+- **A relay-served page gains from this too**: it can now read an account's *other* relays, which
+  it could not while only its own origin was readable.
+
+Proven by `web-client/smoke/site.mjs` (run in CI by the `web-client` workflow): a plain file
+server on another origin than the relay serves the page; it shows a code though no relay served
+it; the primary's answer links it; nothing arrives before the circle allows browsers; posts then
+travel each way with every mailbox call crossing origins; the link survives leaving and coming
+back. `SMOKE_RENDEZVOUS=public` runs the same with no relay named, over the public rendezvous
+relays. `PHONE_SITE=1 … phone.mjs` does it against a real app.
 
 ## Which circles a browser can read
 
@@ -82,6 +141,7 @@ What this does **not** do, said plainly:
 | Limit | Effect |
 |---|---|
 | No direct peer connections | Everything rides the circle relay: slower media, and the web client works only while that relay is online |
+| Served by a web site | Needs the circle's relay on `https` and on 2.2.1 or later |
 | No background life | Notifications with the tab closed come by Web Push (a content-free doorbell); nothing else runs |
 | No Bluetooth / nearby mesh | Nearby delivery is unavailable |
 | Cannot host a relay | Hosting stays on the native apps and `haven-relay` |
@@ -93,7 +153,8 @@ What this does **not** do, said plainly:
 |---|---|
 | Client layer shared by desktop and browser (engine, stores, wire) | `core/haven-client` |
 | Browser core: engine + relay-only transport (wasm32 only) | `core/haven-web` |
-| Build → `web-client/pkg` | `web-client/build.sh` |
+| Build → `web-client/pkg`, `dist/` (for a relay), `dist-site/` (for a web site) | `web-client/build.sh` |
+| The page served by a web site, end to end | `web-client/smoke/site.mjs` |
 | Transport smoke (headless Chromium vs. the native wire) | `web-client/smoke/smoke.mjs`, `core/haven-net/examples/web_peer.rs` |
 | Engine smoke (the shared engine in a tab ↔ the same engine natively) | `web-client/smoke/engine.mjs`, `core/haven-client/examples/web_primary_engine.rs` |
 | Durable storage for a tab (IndexedDB write-behind) | `web-client/storage.js` |
@@ -170,7 +231,8 @@ Next, in order:
         the account's other devices the relay's address with frame 37 (`FeedStore.swift`,
         `HavenNet.kt`), exactly as the desktop does.
 - [x] **Release packaging** (`.github/workflows/web-client.yml`). One job builds the web client
-      into `haven-web-client.tar.gz`; run on its own it also drives the browser smoke.
+      into `haven-web-client.tar.gz` (for a relay) and `haven-web-site.tar.gz` (for a web site);
+      run on its own it also drives the browser smokes, relay-served and site-served.
       - Desktop installers (`desktop.yml`, `release.yml`) unpack it into the app's resources and
         bundle it (`cargo tauri build --config '{"bundle":{"resources":["web-client/**/*"]}}'`),
         so the Web access switch appears in shipped Windows and Linux builds. To do the same

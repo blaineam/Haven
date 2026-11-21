@@ -18,9 +18,15 @@
 // (`adb reverse tcp:<port> tcp:<port>` for each of the relay's ports first, so the address the
 // browser's code names is the same place inside the emulator. ANDROID_SERIAL picks the device.)
 //
+// PHONE_SITE=1 serves the page from a plain web site instead of from the relay
+// (web-client/dist-site), with no rendezvous relay named: the page and the app then meet on the
+// public rendezvous relays, and the page learns the relay from the account. That is the whole
+// "linked from a web site" path against the app's own code; it needs the internet.
+//
 // Needs Playwright (NODE_PATH may point at a node_modules that has it).
 import { createRequire } from "node:module";
 import { configured, dump, qa, until, usage } from "./qachannel.mjs";
+import { serveSite } from "./harness.mjs";
 
 const { chromium } = createRequire(import.meta.url)("playwright");
 const ORIGIN = (process.env.ORIGIN || "").replace(/\/$/, "");
@@ -46,12 +52,15 @@ const invoke = async (name, args = {}) => {
   }
 };
 
+let site = null;
 try {
   const mark = `from the phone ${Date.now()}`;
   await qa({ op: "web_access", circle_id: "default", allow: false });
   await qa({ op: "post", body: mark });
 
-  await page.goto(`${ORIGIN}/app/`);
+  site = process.env.PHONE_SITE === "1" ? await serveSite("", ORIGIN) : null;
+  await page.goto(site ? `${site.url}/` : `${ORIGIN}/app/`);
+  if (site) step(`the page is served by a plain web site at ${site.url}, not by the relay`);
   await page.waitForFunction(() => !!window.__HAVEN_WEB__, null, { timeout: 30000 });
   await page.evaluate(() => window.__HAVEN_WEB__.ready);
   const code = await until("the browser's code", () => page.evaluate(() => document.querySelector("#pair-copy")?.dataset.code || null), 60000);
@@ -60,7 +69,7 @@ try {
   await qa({ op: "pair_answer", code });
   const answered = await until("the app's answer", async () => (await dump()).pair_answer || null, 60000);
   if (answered !== "sent") throw new Error(`the app could not answer the code: ${answered}`);
-  step("the app answered the code (frame 38, through the relay the code names)");
+  step(`the app answered the code (frame 38, through ${site ? "a public rendezvous relay" : "the relay the code names"})`);
 
   const name = await until("the link request in the app", async () => (await dump()).enroll_pending || null, 90000);
   if (!name.startsWith("🌐 ")) throw new Error(`the request is not marked as a web device: ${name}`);
@@ -96,5 +105,6 @@ try {
   console.error(`FAIL ${e.message}`);
   process.exitCode = 1;
 } finally {
+  if (site) site.close();
   await browser.close();
 }

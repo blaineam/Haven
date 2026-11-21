@@ -12,8 +12,20 @@
 (function () {
   "use strict";
 
-  /** A browser is only ever a linked device; app.js reads this to offer nothing else. */
-  window.__HAVEN_HOST__ = { web: true };
+  // Who served this page. A circle's relay serves it under its own address, and then that relay
+  // is, by construction, one this browser can reach. An ordinary web site can serve the very same
+  // files (web-client/build.sh writes that variant to dist-site/, marked with the meta tag read
+  // here); such a page starts out knowing no relay at all. It is reached for linking through a
+  // rendezvous relay, the public ones the apps also fall back to unless the site names its own,
+  // and learns the circle's relays from the account once it is linked.
+  const meta = (name) => (document.querySelector(`meta[name="${name}"]`) || {}).content || "";
+  const SITE_HOSTED = meta("haven-host") === "site";
+  const RENDEZVOUS = meta("haven-rendezvous").split(",").map((u) => u.trim().replace(/\/+$/, "")).filter((u) => /^https?:\/\//.test(u));
+
+  /** A browser is only ever a linked device; app.js reads this to offer nothing else. `site` is
+   *  the host that served the page when that was not a relay — the page says so where it asks to
+   *  be trusted. */
+  window.__HAVEN_HOST__ = { web: true, site: SITE_HOSTED ? location.host : "" };
 
   const listeners = new Map(); // event name → Set<fn>
   function emit(name, payload) {
@@ -48,8 +60,9 @@
     const mode = await storageModule.resumeMode();
     if (mode) storage = await storageModule.attachStorage(haven, { mode });
     app = new haven.WebApp((name, json) => emit(name, JSON.parse(json)));
-    // The relay that served this page is, by construction, one this device can reach.
-    app.setRelays([location.origin]);
+    // The relay that served this page is, by construction, one this device can reach. A page
+    // from a web site has none of its own: only the rendezvous relays its host named, if any.
+    app.setRelays(SITE_HOSTED ? RENDEZVOUS : [location.origin]);
     // What the person approving this browser will read on their other device.
     app.setDeviceLabel(describeBrowser());
     if (!app.needsOnboarding()) {
@@ -161,7 +174,9 @@
     finish_enroll: () => relaunch(),
     // Scan-to-link: show a code for a device that already has the account to scan. Nothing is
     // stored while it shows; the device key lives in memory until a device answers.
-    pair_begin: () => app.pairBegin(location.origin),
+    // A page from a web site names its rendezvous relay instead (empty: whichever public one the
+    // node settles on).
+    pair_begin: () => app.pairBegin(SITE_HOSTED ? (RENDEZVOUS[0] || "") : location.origin),
     // A device answered (`haven:pair-offer`): NOW the person's "is this your computer?" answer
     // picks the storage, the linking state is written, and the page restarts into the linking
     // engine — the same end as pasting a ticket.

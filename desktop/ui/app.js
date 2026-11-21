@@ -6,6 +6,9 @@ const TAURI = window.__TAURI__ || {};
 // The browser build runs this same file with a host shim in place of Tauri (web-client/web-host.js).
 // A browser is only ever a LINKED device: no account is created or moved into one.
 const HOST_WEB = !!(window.__HAVEN_HOST__ && window.__HAVEN_HOST__.web);
+// Set when the page was served by an ordinary web site rather than by a circle's relay: the
+// site's host name, shown wherever the page says whom it trusts.
+const HOST_SITE = (window.__HAVEN_HOST__ && window.__HAVEN_HOST__.site) || "";
 const hostInvoke = TAURI.core ? TAURI.core.invoke : async () => { throw new Error("Tauri not ready"); };
 // Most commands need nothing but the engine and are shared with the browser build
 // (haven_client::commands); the host exposes them all through ONE entry point, `engine_invoke`.
@@ -8568,7 +8571,8 @@ function renderOnboarding() {
     setInterval(() => { if (pairBox.isConnected) show(); }, 8 * 60 * 1000);
   };
   const linkBox = () => el("div", { class: "col", style: "width:100%;gap:8px" },
-    HOST_WEB ? el("div", { class: "muted small", style: "white-space:normal" }, t("web_trust_note")) : null,
+    HOST_WEB ? el("div", { class: "muted small", id: "web-trust-note", style: "white-space:normal" },
+      HOST_SITE ? t("web_trust_note_site", HOST_SITE) : t("web_trust_note")) : null,
     HOST_WEB ? rememberRow() : null,
     HOST_WEB ? (startPair(), pairBox) : null,
     HOST_WEB ? null : el("div", { class: "muted small" }, linkMode === "move"

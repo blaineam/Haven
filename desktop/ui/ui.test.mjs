@@ -78,11 +78,6 @@ test('strings: translation tables carry no keys the English source lacks', () =>
   assert.deepEqual(orphans, []);
 });
 
-// Keys app.js uses that the string tables do not define (a real bug each — see the todo test below).
-// `friend`: the story viewer's reply placeholder for an author with no display name
-// (`t("friend")` in viewStories) renders the raw key and is never translated.
-const KNOWN_MISSING_KEYS = ['friend'];
-
 function usedKeys() {
   const used = new Set();
   for (const m of appSrc.matchAll(/\bt(?:En)?\(\s*"([a-z0-9_]+)"/g)) used.add(m[1]);
@@ -94,15 +89,9 @@ test('strings: every literal t("key") in app.js and data-i18n key in index.html 
   const EN = loadStrings().HAVEN_STRINGS_EN;
   const used = usedKeys();
   assert.ok(used.size > 100, `expected to find many keys, found ${used.size}`);
-  const missing = [...used].filter((k) => !(k in EN) && !KNOWN_MISSING_KEYS.includes(k)).sort();
+  const missing = [...used].filter((k) => !(k in EN)).sort();
   assert.deepEqual(missing, [], 'a missing key renders as its raw identifier in the UI');
 });
-
-test('strings: known-missing keys are defined (KNOWN BUG — expected to fail until strings.js gains them)',
-  { todo: 'add "friend" to strings.js EN + the six translations (Levi), then delete KNOWN_MISSING_KEYS' }, () => {
-    const EN = loadStrings().HAVEN_STRINGS_EN;
-    assert.deepEqual(KNOWN_MISSING_KEYS.filter((k) => usedKeys().has(k) && !(k in EN)), []);
-  });
 
 // ── app.js pure helpers ─────────────────────────────────────────────────────────────────────────
 

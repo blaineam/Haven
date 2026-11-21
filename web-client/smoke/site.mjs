@@ -1,0 +1,150 @@
+// The web client served by an ORDINARY WEB SITE, not by a relay.
+//
+// Same files, different host: web-client/dist-site (build.sh) on a plain static file server whose
+// origin is not the relay's. Such a page starts out knowing no relay. It shows its code, a device
+// that has the account answers it through a rendezvous relay, and from then on it talks to the
+// circle's relay across origins — which is only possible because the relay answers a browser's
+// preflight and marks its answers readable (core/haven-net/src/httprelay.rs).
+//
+//   web-client/build.sh
+//   cargo build -p haven-client --example web_primary_engine
+//   node web-client/smoke/site.mjs core/target/debug/examples/web_primary_engine
+//
+// By default the site names the primary's own relay as its rendezvous (a site may do that: the
+// `haven-rendezvous` meta tag), so the run is hermetic. SMOKE_RENDEZVOUS=public leaves the tag
+// out, and the page then meets the primary on the public rendezvous relays the apps also fall
+// back to. That is the path a real site-hosted page takes; it needs the internet, and for the
+// page to reach the relay afterwards the relay must be on https (HAVEN_SMOKE_TUNNEL=1 — see the
+// warning in web_primary_engine.rs before using it on a machine that hosts a real relay).
+//
+// Proves: the page says which site it trusts; it shows a code that names a relay it can be
+// reached through although it was served by none; the primary's answer links it; nothing of a
+// circle reaches it before the circle allows browsers; then posts travel each way, with every
+// mailbox call crossing origins.
+import { join } from "node:path";
+import { openPage, root, serveSite, startPeer } from "./harness.mjs";
+
+const bin = process.argv[2];
+if (!bin) {
+  console.error("usage: site.mjs <web_primary_engine binary>");
+  process.exit(2);
+}
+const PUBLIC = process.env.SMOKE_RENDEZVOUS === "public";
+const step = (s) => console.log(`ok  ${s}`);
+const until = async (what, fn, ms = 90000) => {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    const v = await fn().catch(() => null);
+    if (v) return v;
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    await new Promise((r) => setTimeout(r, 200));
+  }
+};
+const invoke = (page, name, args = {}) =>
+  page.evaluate(([name, args]) => window.__TAURI__.core.invoke("engine_invoke", { name, args }), [name, args]).catch(() => null);
+
+const peer = startPeer(bin, [join(root, "dist")]);
+const cleanup = [() => peer.kill()];
+let failed = false;
+try {
+  const relay = await peer.line("ORIGIN=", 180000);
+  const account = await peer.line("ACCOUNT=");
+  if (relay.startsWith("https://")) {
+    await until("the tunnel's hostname to resolve and answer", async () => {
+      try { return (await fetch(`${relay}/_haven`)).ok; } catch { return false; }
+    }, 180000);
+  }
+  const site = await serveSite(PUBLIC ? "" : relay, relay);
+  cleanup.push(() => site.close());
+  if (new URL(site.url).origin === new URL(relay).origin) throw new Error("the site and the relay share an origin");
+
+  // Every mailbox call the page makes, and where it went.
+  const calls = [];
+  const { browser, page } = await openPage(`${site.url}/`, {
+    ready: () => !!window.__HAVEN_WEB__,
+    before: async (page) => {
+      await page.addInitScript((log) => { window.__HAVEN_HARNESS__ = { pushOff: true, log }; }, process.env.SMOKE_LOG || "");
+      page.on("response", (r) => {
+        const u = new URL(r.url());
+        if (/^\/(k|l|t)\//.test(u.pathname)) calls.push({ origin: u.origin, method: r.request().method(), status: r.status() });
+      });
+    },
+  });
+  cleanup.push(() => browser.close());
+  const crashes = [];
+  page.on("pageerror", (e) => crashes.push(e.message));
+  page.on("console", (m) => { if (m.type() === "error" && m.text().includes("[haven panic]")) crashes.push(m.text()); });
+  await page.evaluate(() => window.__HAVEN_WEB__.ready);
+  step(`a plain web site serves the client at ${site.url}/ (the relay is ${relay})`);
+
+  const host = new URL(site.url).host;
+  const note = await until("the trust note", () => page.evaluate(() => document.querySelector("#web-trust-note")?.textContent || null), 30000);
+  if (!note.includes(host)) throw new Error(`the page does not say which site it trusts: ${note}`);
+  if (/new to haven/i.test(await page.evaluate(() => document.body.innerText))) throw new Error("a browser was offered account creation");
+  step("the link screen names the site it was served by as something the person is trusting");
+
+  const code = await until("the page's own code", () => page.evaluate(() => document.querySelector("#pair-copy")?.dataset.code || null), 90000);
+  if (!code.startsWith("haven-pair:")) throw new Error(`not a device code: ${code.slice(0, 40)}`);
+  if (!(await page.evaluate(() => !!document.querySelector("#pair-qr svg")))) throw new Error("the code is not shown as a QR");
+  step(`a page that no relay served still shows a code (${PUBLIC ? "reachable through a public rendezvous relay" : "reachable through the relay its site names"})`);
+
+  await page.locator('input[type="checkbox"]').first().check();
+  peer.write(`!pair ${code}\n`);
+  await until("the primary to answer the code", async () => {
+    const fail = peer.lines.find((l) => l.startsWith("PAIRFAIL"));
+    if (fail) throw new Error(`the primary could not answer the code: ${fail}`);
+    return peer.lines.includes("PAIRED");
+  }, 90000);
+  await until("the browser to be linked", async () => {
+    const s = await invoke(page, "seedless_status");
+    return s && s.linked && (await invoke(page, "my_node_hex")) === account;
+  }, 180000);
+  step("the primary answered the code and the browser is a linked device of its account");
+
+  const access = () => invoke(page, "circle_web_access", { circleId: "" });
+  const feed = async () => (await invoke(page, "feed", { circleId: "" })) || [];
+  const first = await until("the circle's standing", access, 60000);
+  if (!first.this_is_web || first.allowed) throw new Error(`a freshly linked browser must be a shut-out web device: ${JSON.stringify(first)}`);
+  peer.write("sealed before the circle agreed\n");
+  await until("the primary to have posted", async () => peer.lines.includes("FEED me sealed before the circle agreed"));
+  await page.waitForTimeout(6000);
+  if ((await feed()).some((p) => p.body === "sealed before the circle agreed")) throw new Error("the browser read a circle that has not allowed web devices");
+  step("it gets nothing from a circle that has not allowed browsers");
+
+  peer.write("!web on\n");
+  if (!(await peer.line("WEB on ")).includes("allowed=true")) throw new Error("the primary could not allow web devices");
+  await until("the browser to learn the circle allows it", async () => (await access())?.allowed, 180000);
+  await until("the earlier post in the browser", async () => (await feed()).some((p) => p.body === "sealed before the circle agreed"), 180000);
+  step("once the circle allows browsers, the page reads the circle from its relay");
+
+  await invoke(page, "post", { circleId: "", body: "hello from a page on a web site", media: [] });
+  await until("the page's post on the primary", async () => peer.lines.includes("FEED me hello from a page on a web site"), 180000);
+  step("the primary shows the page's post");
+
+  // The mailbox is the relay's, never the site's, and the browser was allowed to read it.
+  const relayOrigin = new URL(relay).origin;
+  const toRelay = calls.filter((c) => c.origin === relayOrigin);
+  if (!toRelay.some((c) => c.status === 200)) throw new Error(`no mailbox call to the relay succeeded: ${JSON.stringify(calls.slice(-12))}`);
+  if (calls.some((c) => c.origin === new URL(site.url).origin)) throw new Error("the page used the web site as a mailbox");
+  step(`${toRelay.length} mailbox calls crossed from the site's origin to the relay's`);
+
+  // Coming back to the site: still linked ("this is my computer"), still no relay of its own.
+  await page.evaluate(() => window.__HAVEN_WEB__.flush());
+  await page.goto(`${site.url}/`);
+  await page.waitForFunction(() => !!window.__HAVEN_WEB__, null, { timeout: 30000 });
+  await page.evaluate(() => window.__HAVEN_WEB__.ready);
+  if (await page.evaluate(() => window.__HAVEN_WEB__.app().needsOnboarding())) throw new Error("the link did not survive leaving the page");
+  peer.write("after coming back\n");
+  await until("a post made after the page came back", async () => (await feed()).some((p) => p.body === "after coming back"), 180000);
+  step("the link survives leaving and coming back, and the circle keeps arriving");
+
+  if (crashes.length) throw new Error(`the page crashed: ${crashes.join(" | ")}`);
+  console.log("PASS");
+} catch (e) {
+  failed = true;
+  console.error(`FAIL ${e.message}`);
+  if (process.env.SMOKE_DEBUG) console.error(peer.lines.filter((l) => !l.startsWith("TICKET")).join("\n"));
+} finally {
+  for (const f of cleanup.reverse()) { try { await f(); } catch {} }
+  process.exit(failed ? 1 : 0);
+}

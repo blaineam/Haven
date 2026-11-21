@@ -522,3 +522,46 @@ else. A registration also lapses after 30 days unless that browser renews it.
 **Proof and tests.** `docs/formal/haven_web_push.spthy` (R1–R4, the window as a trace, and the
 looser rule falsified); a real push through Chrome and its push service (`web-client/smoke/push.mjs`); `push/worker.test.mjs`; a registration vector shared between the Rust core
 and the worker (`push/webpush-vector.json`).
+
+## D24 — The web client may also be served by a web site, the maker's included (2026-11-20)
+
+**Decision:** The same web client (D21) can be served by an ordinary static web site, and the
+project's own site may serve the build of the latest stable Release at `/app/`. This **amends
+D21**, which said the maker hosts nothing and the bundle is served only by the circle's relay.
+It was the owner's call, made knowing the cost below. The relay-served page stays, and stays the
+one to prefer.
+
+**Why:** a person on a borrowed or locked-down computer often cannot find or type their relay's
+address (a tunnel's hostname is long and can change). One fixed address, a code on the screen
+and a phone to scan it is the difference between using it and not.
+
+**How it works without a new server:** such a page knows no relay. It comes up on a rendezvous
+relay (the public ones every app already falls back to, or ones the site names), shows a code
+naming it, and the phone answers through it exactly as it answers any code. Once linked, the
+account tells the browser its relays (frame 37) and the phone is no longer needed. The relay's
+mailbox answers pages from other origins; that grants nothing, because every request is
+authorized by a member's signature and there is no cookie or session to lend.
+
+**The cost, said plainly:** whoever serves the page can change its code. For a relay-served page
+that is the circle's own host. For the project's site it is **the maker**, for every person who
+links through it: a compromise of the site, or pressure on its owner, becomes a way to ship a
+page that leaks what those browsers can read. That is the bypass the security mandate exists to
+rule out, and this decision accepts a bounded piece of it. What bounds it is unchanged from D21
+and D22: a browser is one seedless device, never the account; it reads only circles that allowed
+browsers (off by default, and the members' decision, not the browser's); it is revoked from any
+other device and loses new content when it is. The apps are not affected at all.
+
+**What is done about it:**
+- The page says on the link screen that it comes from a web site, names the site, and says the
+  person is trusting it.
+- The site serves a tagged Release's archive, not a build of its own. `Scripts/verify-web-site.mjs`
+  lets anyone compare what the site serves with that Release, byte for byte. It cannot detect a
+  page served differently to one chosen visitor, and says so.
+- Publishing on the project's site is a switch the owner holds, off until set: the repository
+  variable `SITE_WEB_CLIENT`. Without it the site has no `/app/`, and nothing else changes.
+- Anyone can host the archive themselves, which keeps the maker out of it for their circle.
+
+**Proof and tests:** `web-client/smoke/site.mjs` (hermetic in CI; `SMOKE_RENDEZVOUS=public` over
+the public rendezvous relays); `a_page_from_another_origin_may_ask_but_still_needs_a_members_signature`
+on the relay. The linking protocol is unchanged, so `docs/formal/haven_pair.spthy` still covers
+it: the relay named in a code is a locator, not a party to the proof.

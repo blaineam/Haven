@@ -1,7 +1,8 @@
 name: web-client
 
 # Build the Haven web client (core/haven-web compiled to WebAssembly + the desktop UI with a
-# browser host shim) into one archive, `haven-web-client.tar.gz`, and — when run on its own —
+# browser host shim) into `haven-web-client.tar.gz` (for a relay to serve) and
+# `haven-web-site.tar.gz` (the same client for an ordinary web site), and — when run on its own —
 # drive it end to end in headless Chromium against a native engine hosting a real relay.
 #
 # The archive is what a relay serves under /app/ when its host turns Web access on:
@@ -64,17 +65,23 @@ jobs:
           ls -l web-client/dist/pkg/haven_web_bg.wasm
           gzip -9 -c web-client/dist/pkg/haven_web_bg.wasm | wc -c
           tar -C web-client/dist -czf haven-web-client.tar.gz .
-          sha256sum haven-web-client.tar.gz
+          # The same client for an ordinary web site (build.sh's dist-site/): what the project's
+          # own site serves, and what anyone can put on a static host of theirs.
+          tar -C web-client/dist-site -czf haven-web-site.tar.gz .
+          sha256sum haven-web-client.tar.gz haven-web-site.tar.gz
           ls -la web-client/dist web-client/dist/pkg
 
-      # ONE file, on purpose: release.yml's publish job merges every artifact of the run into the
-      # Release's assets, so a directory here would spill index.html and friends into the Release.
+      # Two archives and nothing else, on purpose: release.yml's publish job merges every
+      # artifact of the run into the Release's assets, so a directory here would spill index.html
+      # and friends into the Release.
       - name: Upload the archive
         if: steps.build.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: web-client
-          path: haven-web-client.tar.gz
+          path: |
+            haven-web-client.tar.gz
+            haven-web-site.tar.gz
           if-no-files-found: error
 
   # The browser end to end: link by ticket and by code, per-circle consent, posts and pictures
@@ -99,8 +106,9 @@ jobs:
           name: web-client
       - name: Unpack the web client
         run: |
-          mkdir -p web-client/dist
+          mkdir -p web-client/dist web-client/dist-site
           tar -C web-client/dist -xzf haven-web-client.tar.gz
+          tar -C web-client/dist-site -xzf haven-web-site.tar.gz
       - name: Build the native primary
         working-directory: core
         run: cargo build -p haven-client --features test-util --example web_primary_engine --locked
@@ -117,3 +125,9 @@ jobs:
         env:
           NODE_PATH: ${{ runner.temp }}/pw/node_modules
         run: node web-client/smoke/engine.mjs core/target/debug/examples/web_primary_engine
+      # The same client served by a plain web site on another origin than the relay: links by its
+      # own code and uses the relay's mailbox across origins (web-client/smoke/site.mjs).
+      - name: Browser smoke, served by a web site
+        env:
+          NODE_PATH: ${{ runner.temp }}/pw/node_modules
+        run: node web-client/smoke/site.mjs core/target/debug/examples/web_primary_engine

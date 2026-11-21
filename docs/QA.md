@@ -649,6 +649,12 @@ is run by hand, because it needs a simulator or emulator:
 4. `PHONE_QA_DIR="<container>/Library/Application Support" ORIGIN=http://127.0.0.1:18675
    node web-client/smoke/phone.mjs`
 
+**Served by a web site.** Add `PHONE_SITE=1` to step 4: the page then comes from a plain file
+server (`web-client/dist-site`), not from the relay, with no rendezvous relay named. The page and
+the app meet on the public rendezvous relays (so both need the internet), and the page learns the
+relay from the account. `web-client/smoke/site.mjs <web_primary_engine binary>` is the same path
+with the desktop engine as the primary, hermetic by default; CI runs it.
+
 **Android.** The same test drives the Android app over adb — its QA channel is `files/qa/`,
 reached with `run-as` — when `PHONE_ADB_PKG=com.blaineam.haven` is set instead of `PHONE_QA_DIR`:
 

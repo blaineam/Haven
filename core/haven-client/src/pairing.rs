@@ -32,7 +32,9 @@ fn now_secs() -> u64 {
 pub struct Pairing {
     device_seed: Vec<u8>,
     device_bundle: Vec<u8>,
-    relay: String,
+    /// Where an answering device can reach this one. Empty until the node is up when the page
+    /// was not served by a relay (see [`begin`](Self::begin)).
+    relay: Mutex<String>,
     host: AppHandle,
     node: Mutex<Option<Arc<HavenNode>>>,
     /// The code on screen. Replaced by [`refresh`](Self::refresh); an offer for an older code no
@@ -54,6 +56,12 @@ impl InboundListener for Listener {
 impl Pairing {
     /// Make this device's transport key, bring a node up on the relay map already configured
     /// (`crate::net`), and issue the first code naming `relay` as the place to reach it.
+    ///
+    /// An empty `relay` means the page was not served by a relay (it is hosted on an ordinary web
+    /// site), so it has no relay of its own to name. The node then comes up on a public rendezvous
+    /// relay, exactly as an app with no circle relay does, and the code names whichever one it
+    /// settled on. That relay carries one sealed frame to this device and learns nothing else; the
+    /// circle's own relays arrive from the account once the device is linked.
     pub async fn begin(relay: String, host: AppHandle) -> Result<Arc<Self>, String> {
         let account = haven_ffi::Account::generate();
         let device_seed = account.secret_seed();
@@ -61,7 +69,7 @@ impl Pairing {
         let me = Arc::new(Self {
             device_seed: device_seed.clone(),
             device_bundle,
-            relay: relay.trim().trim_end_matches('/').to_string(),
+            relay: Mutex::new(relay.trim().trim_end_matches('/').to_string()),
             host,
             node: Mutex::new(None),
             code: Mutex::new(String::new()),
@@ -74,6 +82,18 @@ impl Pairing {
         if crate::rt::timeout(std::time::Duration::from_secs(20), node.online()).await.is_err() {
             node.shutdown().await;
             return Err("could not reach the relay".into());
+        }
+        #[cfg(target_arch = "wasm32")]
+        if me.relay.lock().is_empty() {
+            let Some(found) = node.reachable_relay() else {
+                node.shutdown().await;
+                return Err("could not reach a rendezvous relay".into());
+            };
+            *me.relay.lock() = found.trim_end_matches('/').to_string();
+        }
+        if me.relay.lock().is_empty() {
+            node.shutdown().await;
+            return Err("no relay to be reached through".into());
         }
         *me.node.lock() = Some(node);
         me.refresh()?;
@@ -88,7 +108,7 @@ impl Pairing {
     /// Replace the code with a fresh one (new secret, new timestamp) — codes last ten minutes, and
     /// a page left open must not keep an old one alive.
     pub fn refresh(&self) -> Result<String, String> {
-        let code = haven_ffi::enroll::pair_code_issue(self.device_bundle.clone(), now_secs(), self.relay.clone())
+        let code = haven_ffi::enroll::pair_code_issue(self.device_bundle.clone(), now_secs(), self.relay.lock().clone())
             .map_err(|e| e.to_string())?;
         *self.code.lock() = code.clone();
         Ok(code)
@@ -161,7 +181,7 @@ mod tests {
         let p = Arc::new(Pairing {
             device_seed: account.secret_seed(),
             device_bundle: account.public_bundle(),
-            relay: "https://relay.example.test".into(),
+            relay: Mutex::new("https://relay.example.test".into()),
             host: AppHandle::new(events.clone()),
             node: Mutex::new(None),
             code: Mutex::new(String::new()),

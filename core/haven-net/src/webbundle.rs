@@ -6,9 +6,10 @@
 //! `haven-relay` shipped with — and a request can never be turned into a path on the host's disk.
 //! There is nothing to traverse: a lookup is an exact match against names fixed at start-up.
 //!
-//! Serving the page is how a browser can use a circle's relay at all (a page may only talk to a
-//! relay's mailbox same-origin), and it is also the web client's trust boundary: whoever serves
-//! these bytes can change them. See `docs/WEB-PARITY.md` § "What the web client trusts".
+//! Serving the page is one of the two ways a browser comes to use a circle's relay (the other is
+//! a page from an ordinary web site, which the mailbox answers across origins — see
+//! `httprelay::CORS_ANSWER`), and it is the web client's trust boundary: whoever serves these
+//! bytes can change them. See `docs/WEB-PARITY.md` § "What the web client trusts".
 
 use std::collections::HashMap;
 

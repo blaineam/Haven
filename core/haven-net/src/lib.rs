@@ -623,6 +623,11 @@ impl Node {
         let bytes = decode_hex32(node_id_hex)?;
         let id = EndpointId::from_bytes(&bytes).map_err(|e| anyhow!("{e:?}"))?;
         let url: iroh::RelayUrl = relay_url.trim().parse().map_err(|e| anyhow!("bad relay url: {e}"))?;
+        // Someone has just scanned this device's code: that is fresh evidence it is there, and the
+        // person is waiting. A first dial that lost the race with the device's relay registration
+        // armed the per-peer backoff, and every retry (and every re-scan, for minutes) was then
+        // refused without being tried.
+        lock(&self.dial_gate).remove(&id);
         self.send(EndpointAddr::new(id).with_relay_url(url), payload).await
     }
 
@@ -1206,6 +1211,37 @@ mod forgive_dial_tests {
         assert_eq!(gb.fails, 2, "strike count kept so a dead peer returns to its long cooldown");
         assert!(std::time::Instant::now() >= gb.until);
         drop(g);
+        node.shutdown().await;
+    }
+
+    /// Scan-to-link: the first dial of a freshly scanned device can fail (its relay registration is
+    /// a moment behind its code). The retries, and a second scan, must be real dials: before this
+    /// they were all refused by the backoff the first failure armed.
+    #[tokio::test]
+    async fn a_scanned_device_is_dialed_again_after_a_failed_dial() {
+        let me = haven_p2p::identity::Identity::generate();
+        let node = Node::spawn(me.node_secret_bytes(), Arc::new(|_: [u8; 32], _: Vec<u8>| {})).await.unwrap();
+        let a = haven_p2p::identity::Identity::generate().public().node_id_bytes();
+        let hex = a.iter().map(|v| format!("{v:02x}")).collect::<String>();
+        let ia = EndpointId::from_bytes(&a).unwrap();
+        strike_dial_gate(&mut lock(&node.dial_gate), ia);
+        let before = node.dial_attempts.load(std::sync::atomic::Ordering::Relaxed);
+        // Nothing listens there: the dial fails or is still trying when we stop waiting. Either
+        // way it must have been attempted, not refused.
+        let sent = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            node.send_to_node_via(&hex, "http://127.0.0.1:9", b"offer"),
+        )
+        .await;
+        if let Ok(Err(e)) = &sent {
+            assert!(!e.to_string().contains("dial backoff"), "refused without dialing: {e}");
+        }
+        assert!(!matches!(sent, Ok(Ok(()))), "nothing can have been delivered");
+        assert_eq!(node.dial_attempts.load(std::sync::atomic::Ordering::Relaxed), before + 1, "a real dial was made");
+        // An ordinary send to a struck peer is still held back.
+        strike_dial_gate(&mut lock(&node.dial_gate), ia);
+        let held = node.send_to_node(&hex, b"x").await.unwrap_err().to_string();
+        assert!(held.contains("dial backoff"), "{held}");
         node.shutdown().await;
     }
 }

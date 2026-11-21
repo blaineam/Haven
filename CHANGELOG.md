@@ -16,6 +16,12 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   1.5.0, applied to them as well. They are now drawn 288 pixels wide, or 72% of a narrow screen.
   A unit test and the web smokes now fail on a code smaller than a camera can read. The iPhone,
   iPad, Mac and Android apps draw their codes differently and were not affected.
+- **Scanning a device's code could fail, and then keep failing for minutes.** If the first attempt
+  to reach the new device lost a race with it coming online, the app marked it unreachable and
+  refused every retry and every re-scan without trying, for one to two minutes (longer on a
+  phone). A scanned code now always gets a real attempt. Found when the same race failed a
+  browser test in CI. The fix is in the shared core; installed apps get it with the next full
+  release.
 
 ### Changed
 - **A fix to the browser client alone no longer needs a full release.** A `web-vX.Y.Z-N` tag builds

@@ -104,13 +104,15 @@ try {
 
   await page.locator('input[type="checkbox"]').first().check();
   // The page can have its code up before the primary's own node has finished starting; a
-  // primary that is still offline says so, and is asked again. Any other refusal is a failure.
+  // primary that is still offline says so, and is asked again. So is one that dialed and did not
+  // get through: the person would scan again. A dial that was REFUSED without being tried
+  // ("dial backoff") is the bug this guards against, and any other refusal is a failure.
   let refusal = null;
   for (let asked = 0, seen = 0; !peer.lines.includes("PAIRED"); ) {
     const fails = peer.lines.filter((l) => l.startsWith("PAIRFAIL"));
     if (fails.length > seen) {
       seen = fails.length;
-      if (!/offline/.test(fails[seen - 1]) || seen > 20) { refusal = fails[seen - 1]; break; }
+      if (!/offline|could not reach/.test(fails[seen - 1]) || /dial backoff/.test(fails[seen - 1]) || seen > 20) { refusal = fails[seen - 1]; break; }
     }
     if (asked === seen) { peer.write(`!pair ${code}\n`); asked++; }
     await new Promise((r) => setTimeout(r, 1000));

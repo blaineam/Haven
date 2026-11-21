@@ -401,6 +401,24 @@ struct PendingEnrollTicket {
     /// be enough to get a device of one's own onto the account. `None` for a ticket the primary
     /// showed (whoever holds that ticket may ask, as before).
     bound_to: Option<String>,
+    /// Once the owner approved a device under this ticket: that device, and the grant it was
+    /// sent. The grant goes out once, over whatever connection exists at that instant, and a
+    /// grant that is lost (the device reloading, either side re-binding its node, a dropped
+    /// network) used to leave the new device asking for ever, since a used ticket answered
+    /// nothing. The device it was approved for may be sent the SAME grant again; nobody else can
+    /// be, and nothing new is signed.
+    granted: Option<(String, Vec<u8>)>,
+}
+
+/// What the primary does with one frame-28 request.
+#[derive(Debug, PartialEq)]
+enum EnrollAnswer {
+    /// Not for us, not valid, a repeat of one already waiting, or under a ticket used by another device.
+    Nothing,
+    /// New and valid: waiting for the owner's confirmation.
+    Queued { device_hex: String, name: String },
+    /// From the device already approved under this ticket: send it the grant it was issued.
+    GrantAgain { device_hex: String, grant: Vec<u8> },
 }
 
 /// PRIMARY side: a frame-28 request that passed MAC + freshness, waiting on the user's confirm sheet.
@@ -2709,8 +2727,10 @@ impl Engine {
         let secret: [u8; 32] = ticket.secret.clone().try_into().map_err(|_| anyhow::anyhow!("bad secret"))?;
         {
             let mut t = self.enroll_tickets.lock();
-            t.retain(|p| now.saturating_sub(p.issued_at) < 600 && !p.consumed); // prune stale/used
-            t.push(PendingEnrollTicket { secret, issued_at: now, consumed: false, bound_to });
+            // Prune stale tickets. A used one is kept for its remaining life so its grant can be
+            // repeated to the device it was approved for (`handle_seedless_enroll_request`).
+            t.retain(|p| now.saturating_sub(p.issued_at) < 600);
+            t.push(PendingEnrollTicket { secret, issued_at: now, consumed: false, bound_to, granted: None });
         }
         haven_ffi::enroll::enroll_ticket_encode(ticket).map_err(|e| anyhow::anyhow!("encode ticket: {e}"))
     }
@@ -2775,19 +2795,47 @@ impl Engine {
     /// success stash it as a pending request and surface a confirm sheet to the UI (only the user's
     /// explicit approval issues the grant). `sender_device` is the authenticated transport id.
     fn handle_seedless_enroll_request(self: &Arc<Self>, sender_device: Option<&str>, wire: &[u8]) {
+        match self.answer_enroll_request(sender_device, wire) {
+            EnrollAnswer::Nothing => {}
+            EnrollAnswer::Queued { device_hex, name } => {
+                if let Some(app) = self.app.lock().clone() {
+                    let _ = app.emit("haven:enroll-request", serde_json::json!({ "deviceHex": device_hex, "name": name }));
+                }
+                self.emit_changed();
+            }
+            EnrollAnswer::GrantAgain { device_hex, grant } => {
+                log::info!("enroll: the approved device asked again — its grant is sent again");
+                self.send_frame(wire::SEEDLESS_ENROLL_GRANT, &grant, &device_hex);
+                self.teach_my_devices_relay_interfaces();
+            }
+        }
+    }
+
+    /// Decide what a frame-28 request gets, and queue it if it is a new, valid one. Sends nothing.
+    fn answer_enroll_request(self: &Arc<Self>, sender_device: Option<&str>, wire: &[u8]) -> EnrollAnswer {
         if self.seed.is_none() {
-            return; // only a seed-holding primary answers (a seedless device ignores 28)
+            return EnrollAnswer::Nothing; // only a seed-holding primary answers (a seedless device ignores 28)
         }
         let now = now_ms() / 1000;
-        let tickets: Vec<([u8; 32], Option<String>)> = {
+        let tickets: Vec<([u8; 32], Option<String>, Option<(String, Vec<u8>)>)> = {
             let mut t = self.enroll_tickets.lock();
-            t.retain(|p| now.saturating_sub(p.issued_at) < 600 && !p.consumed);
-            t.iter().map(|p| (p.secret, p.bound_to.clone())).collect()
+            t.retain(|p| now.saturating_sub(p.issued_at) < 600);
+            t.iter().filter(|p| !p.consumed || p.granted.is_some()).map(|p| (p.secret, p.bound_to.clone(), p.granted.clone())).collect()
         };
-        for (secret, bound_to) in tickets {
+        for (secret, bound_to, granted) in tickets {
             let Ok(req) = haven_ffi::enroll::enroll_verify_request(secret.to_vec(), wire.to_vec(), now, 600) else {
                 continue;
             };
+            // Already approved under this ticket: the device is asking again because the grant
+            // never reached it. Send the same grant to the same device; anyone else asking under
+            // a used ticket gets nothing, exactly as before.
+            if let Some((approved, grant)) = granted {
+                let asking = wire::node_hex(&req.device_bundle);
+                if asking.len() == 64 && asking.eq_ignore_ascii_case(&approved) {
+                    return EnrollAnswer::GrantAgain { device_hex: approved, grant };
+                }
+                return EnrollAnswer::Nothing;
+            }
             let scanned = bound_to.is_some();
             // A ticket minted for a scanned code enrolls the device that code names and no other.
             if let Some(code) = bound_to {
@@ -2806,7 +2854,7 @@ impl Engine {
             {
                 let mut reqs = self.enroll_requests.lock();
                 if reqs.iter().any(|r| r.device_hex == device_hex) {
-                    return; // already pending confirm — ignore the resend
+                    return EnrollAnswer::Nothing; // already pending confirm — ignore the resend
                 }
                 reqs.push(PendingEnrollRequest {
                     device_bundle: req.device_bundle.clone(),
@@ -2816,15 +2864,9 @@ impl Engine {
                     scanned,
                 });
             }
-            if let Some(app) = self.app.lock().clone() {
-                let _ = app.emit(
-                    "haven:enroll-request",
-                    serde_json::json!({ "deviceHex": device_hex, "name": req.name }),
-                );
-            }
-            self.emit_changed();
-            return; // matched one ticket; done
+            return EnrollAnswer::Queued { device_hex, name: req.name }; // matched one ticket; done
         }
+        EnrollAnswer::Nothing
     }
 
     /// PRIMARY-side UI query: the seedless-enroll requests awaiting the user's confirm.
@@ -2887,6 +2929,7 @@ impl Engine {
             for p in t.iter_mut() {
                 if p.secret == req.secret {
                     p.consumed = true;
+                    p.granted = Some((req.device_hex.clone(), grant.clone()));
                 }
             }
         }

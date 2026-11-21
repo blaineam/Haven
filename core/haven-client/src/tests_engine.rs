@@ -424,9 +424,26 @@ async fn enroll_ticket_lifecycle_for_a_new_seedless_device() {
     // A device that scanned the PRIMARY's ticket keeps the name it gave: nothing marks it as web.
     assert!(devices.iter().any(|d| d.name == "Laptop"));
 
-    // A consumed ticket can't be replayed.
-    primary.handle_seedless_enroll_request(None, &req);
+    // The approved device asking again (its grant was lost on the way) is sent the SAME grant
+    // again, and no second confirmation is raised. A lost grant used to strand it for good.
+    let again = primary.answer_enroll_request(None, &req);
+    let crate::engine::EnrollAnswer::GrantAgain { device_hex: to, grant } = again else {
+        panic!("the approved device must be sent its grant again, got {again:?}");
+    };
+    assert_eq!(to, dev_hex);
+    assert_eq!(Some((dev_hex.clone(), grant)), primary.enroll_tickets.lock()[0].granted, "the very grant that was issued");
     assert!(primary.enroll_pending().is_empty());
+
+    // A used ticket still enrolls nobody else: a different device holding the same ticket gets
+    // nothing, however often it asks.
+    let other = crate::roster::DeviceRoster::load(&tmp_paths());
+    let theirs = haven_ffi::enroll::enroll_build_request(parsed.secret.clone(), other.device_bundle(), "Someone else".into(), now_ms() / 1000)
+        .unwrap();
+    assert_eq!(primary.answer_enroll_request(None, &theirs), crate::engine::EnrollAnswer::Nothing);
+    assert_eq!(primary.answer_enroll_request(Some(&other.device_node_hex()), &theirs), crate::engine::EnrollAnswer::Nothing);
+    assert!(primary.enroll_pending().is_empty());
+    let (_, _, unchanged) = primary.device_roster_dto();
+    assert!(unchanged.iter().all(|d| d.node_hex != other.device_node_hex()));
 
     primary.revoke_device(dev_hex.clone());
     let (_, _, after) = primary.device_roster_dto();

@@ -17,6 +17,7 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - **Relay: answers can be read by a page from another origin.** This is what lets a page from a web site, or from another relay, use a relay's mailbox. It grants nothing: every request is still authorized by a member's signature, and there is no cookie or session for a browser to lend a page. Regression test added.
 
 ### Fixed
+- **Linking a device could hang on "Linking…" for good (all platforms).** When you approve a new device, your device sends it one message that completes the link. If that one message was lost (the new device reloading, either side changing network at that moment), the new device kept asking and was never answered, because the link code had already been used. Your device now sends the same answer again when the device you approved asks again, for the ten minutes the code would have lasted. Only that device gets it, and nothing new is signed. Found by the web client's CI run, where it stalled two runs in five; regression tests on the engine, iPhone/Mac and Android.
 - **Relay: a good update could be marked bad for ever.** Before installing a signed update, the relay runs the new binary once to check it starts. A file that was only just written can be refused by the system for a moment as "busy", and the relay read that as "does not run on this machine" and never tried that version again. It now waits out a busy file within the same time limit. Found as an intermittent CI failure of the in-place update test; regression test added.
 
 ## 2.2.0 (2026-11-20)

@@ -2869,6 +2869,8 @@ object HavenNet : InboundListener {
 
     /** Single-use enrollment tickets this primary is currently offering, keyed by secret hex. */
     private val pendingTickets = SharedCollections.map<uniffi.haven_ffi.EnrollTicketFfi>()
+    /** The grant last issued, repeatable to the device it was issued for ([IssuedEnrollGrant]). */
+    @Volatile private var issuedEnrollGrant: IssuedEnrollGrant? = null
     /** The ticket secret hex the pending (confirm-gated) request matched. */
     private var pendingRequestSecret: String? = null
     /** The ticket the new device is currently linking against (null = not linking). */
@@ -2979,6 +2981,23 @@ object HavenNet : InboundListener {
     private fun handleSeedlessEnrollRequest(body: ByteArray) {
         if (core.seedless) return   // only a seed-holding primary authorizes
         val now = (System.currentTimeMillis() / 1000).toULong()
+        // The device already approved is asking again: its grant never reached it. Send the same
+        // grant to the same device. No prompt, nothing new signed, and nobody else gets anything.
+        issuedEnrollGrant?.let { issued ->
+            val again = issued.repeatFor(body, now.toLong()) { secret, wire, at ->
+                runCatching { uniffi.haven_ffi.enrollVerifyRequest(secret, wire, at.toULong(), TICKET_TTL_SECS) }
+                    .getOrNull()?.let { nodeHex(it.deviceBundle) }
+            }
+            if (again != null) {
+                Log.i(TAG, "enroll: the approved device asked again — its grant is sent again")
+                NearbyTransport.broadcast(Wire.frame(Wire.SEEDLESS_ENROLL_GRANT, again))
+                scope.launch {
+                    runCatching { sendFrame(Wire.SEEDLESS_ENROLL_GRANT, again, issued.deviceHex) }
+                    runCatching { teachMyDevicesRelayInterfaces(only = issued.deviceHex) }
+                }
+                return
+            }
+        }
         for ((secretHex, ticket) in pendingTickets.toMap()) {
             if (runCatching { uniffi.haven_ffi.enrollTicketIsExpired(ticket, now, TICKET_TTL_SECS) }.getOrDefault(true)) {
                 pendingTickets.remove(secretHex); ticketBoundCode.remove(secretHex); continue
@@ -3028,6 +3047,9 @@ object HavenNet : InboundListener {
                 uniffi.haven_ffi.enrollAssembleGrant(core.seed, ticket.secret, prompt.deviceBundle,
                     prompt.name, now, rosterWire, relays)
             }.getOrNull() ?: return@launch
+            // Sent once, over whatever path exists right now. Keep it: a grant that is lost on the
+            // way must be repeatable, or the new device asks for ever (a used ticket answers nothing).
+            issuedEnrollGrant = IssuedEnrollGrant(ticket.secret, prompt.deviceHex, grant, ticket.issuedAt.toLong())
             NearbyTransport.broadcast(Wire.frame(Wire.SEEDLESS_ENROLL_GRANT, grant))
             runCatching { sendFrame(Wire.SEEDLESS_ENROLL_GRANT, grant, prompt.deviceHex) }
             // …and how to reach our relays, which a browser device cannot learn any other way.

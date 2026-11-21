@@ -194,6 +194,29 @@ final class FeedStoreAdminTests: XCTestCase {
         await Harness.until(store, "the device is in the roster") {
             DeviceRosterManager.shared.devices.contains { $0.nodeHex == phone.nodeIdHex() }
         }
+
+        // The grant is sent once. If it is lost, the device asks again with the same request and
+        // must be sent the SAME grant, with no second sheet. It used to be ignored for good.
+        await Harness.until(store, "the grant was issued") { store.issuedEnrollGrant != nil }
+        let issued = try XCTUnwrap(store.issuedEnrollGrant)
+        XCTAssertEqual(issued.deviceHex, phone.nodeIdHex())
+        let now = UInt64(Date().timeIntervalSince1970)
+        XCTAssertEqual(issued.repeatFor(request: wire, now: now), issued.grant)
+        store.deliverFrameForTesting(Data([28]) + wire)
+        await Harness.until(store, "the grant was sent again") { store.enrollGrantRepeats == 1 }
+        XCTAssertNil(store.pendingEnrollRequest, "a repeat must not raise a second confirmation")
+
+        // Nobody else: another device holding the same ticket, a forged request, or a request
+        // after the ticket's life is over gets nothing.
+        let other = Account.generate()
+        let theirs = try enrollBuildRequest(secret: ticket.secret, deviceBundle: other.publicBundle(), name: "Someone else", ts: now)
+        XCTAssertNil(issued.repeatFor(request: theirs, now: now))
+        XCTAssertNil(issued.repeatFor(request: forged, now: now))
+        XCTAssertNil(issued.repeatFor(request: wire, now: issued.issuedAt + 600))
+        store.deliverFrameForTesting(Data([28]) + theirs)
+        XCTAssertNil(store.pendingEnrollRequest)
+        XCTAssertEqual(store.enrollGrantRepeats, 1)
+        XCTAssertFalse(DeviceRosterManager.shared.devices.contains { $0.nodeHex == other.nodeIdHex() })
         // The ticket is single-use: the same request can't be confirmed twice.
         store.deliverFrameForTesting(Data([28]) + wire)
         XCTAssertNil(store.pendingEnrollRequest)

@@ -7972,6 +7972,11 @@ final class FeedStore: ObservableObject {
     /// PRIMARY side: the currently-advertised enrollment ticket (single-use, short-lived). The secret
     /// verifies the incoming request's MAC; `enrollTicket` is what the QR encodes.
     private var activeEnrollTicket: EnrollTicketFfi?
+    /// The grant last issued, kept for the ticket's remaining life so it can be repeated to the
+    /// device it was issued for (see `IssuedEnrollGrant`).
+    private(set) var issuedEnrollGrant: IssuedEnrollGrant?
+    /// How many times an issued grant was sent again (tests; nothing reads it otherwise).
+    private(set) var enrollGrantRepeats = 0
     /// NEW-DEVICE side: the ticket this device is enrolling with (kept to open the frame-29 grant).
     private var pendingEnrollTicket: EnrollTicketFfi?
     /// PRIMARY side, scan-to-link: the `haven-pair:` code the active ticket was minted for. A request
@@ -8060,6 +8065,17 @@ final class FeedStore: ObservableObject {
     /// success surface a confirmation sheet (only the user's confirm issues the grant). Never
     /// auto-grants — unlike the legacy type-24 path, S4 authorization is an explicit, MAC-gated step.
     private func handleSeedlessEnrollRequest(_ payload: Data) {
+        // The device already approved is asking again: its grant never reached it. Send the same
+        // grant to the same device. No sheet, nothing new signed, and nobody else gets anything.
+        if AccountStore.storedSeed() != nil, let issued = issuedEnrollGrant,
+           let again = issued.repeatFor(request: payload, now: UInt64(Date().timeIntervalSince1970)) {
+            HavenLog.net("enroll: the approved device asked again — its grant is sent again")
+            enrollGrantRepeats += 1
+            nearbyBroadcast(29, again)
+            sendToDeviceHex(29, again, issued.deviceHex)
+            teachMyDevicesRelayInterfaces(to: issued.deviceHex)
+            return
+        }
         guard AccountStore.storedSeed() != nil, let ticket = activeEnrollTicket else { return }   // only a primary with a live ticket
         guard let req = try? enrollVerifyRequest(secret: ticket.secret, wire: payload,
                                                  now: UInt64(Date().timeIntervalSince1970), maxAgeSecs: 600) else { return }
@@ -8114,6 +8130,10 @@ final class FeedStore: ObservableObject {
                 if self.activeEnrollTicket == nil { self.activeEnrollTicket = ticket }   // failed grant: stay re-scannable
                 return
             }
+            // Sent once, over whatever path exists right now. Keep it: a grant that is lost on the
+            // way must be repeatable, or the new device asks for ever (a used ticket answers nothing).
+            self.issuedEnrollGrant = IssuedEnrollGrant(secret: ticket.secret, deviceHex: request.deviceHex,
+                                                       grant: grant, issuedAt: ticket.issuedAt)
             self.nearbyBroadcast(29, grant)
             self.sendToDeviceHex(29, grant, request.deviceHex)   // directed to the requester
             // …and how to reach our relays, which a browser device cannot learn any other way.
@@ -11468,4 +11488,28 @@ extension FeedStore {
     }
 
     func relayHistoryMediaLanded(_ ref: String) { mediaArrived(ref) }
+}
+
+/// A link grant (frame 29) that was issued, kept so it can be sent again.
+///
+/// The grant goes out once, when the owner confirms. If it is lost on the way (the new device
+/// reloading, either side changing network, a dropped connection) the new device keeps asking with
+/// the same request, and a ticket that has been used answers nothing. So the primary remembers
+/// what it issued and, for the ticket's remaining life, repeats it — to the device it was issued
+/// for and to no other. Nothing new is signed and no confirmation is skipped: the owner already
+/// approved exactly this device, and these are the bytes they approved.
+struct IssuedEnrollGrant {
+    let secret: Data
+    let deviceHex: String
+    let grant: Data
+    let issuedAt: UInt64
+
+    /// The grant to send again, if `payload` is a genuine request under the same ticket, from the
+    /// same device, while the ticket would still have been live. `nil` for anything else.
+    func repeatFor(request payload: Data, now: UInt64) -> Data? {
+        guard now >= issuedAt, now - issuedAt < 600,
+              let req = try? enrollVerifyRequest(secret: secret, wire: payload, now: now, maxAgeSecs: 600) else { return nil }
+        let asking = req.deviceBundle.prefix(32).map { String(format: "%02x", $0) }.joined()
+        return asking == deviceHex.lowercased() ? grant : nil
+    }
 }

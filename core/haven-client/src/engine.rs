@@ -481,6 +481,9 @@ pub struct Engine {
     persist_pending: std::sync::atomic::AtomicBool,
     /// The host has been told this device was removed from its account (once is enough).
     revoked_told: std::sync::atomic::AtomicBool,
+    /// When every relay began refusing this device its OWN account's slots, with no relay
+    /// accepting since (ms; 0 = not refused), and how many refusals: see `note_self_refused`.
+    self_refused: StdMutex<(u64, u32)>,
     /// QA-visible call state pushed from the webview: bit0 = ringing, bit1 = in_call. See
     /// `set_qa_call_state` for why this exists.
     qa_call: std::sync::atomic::AtomicU8,
@@ -687,6 +690,13 @@ const MEDIA_MANIFEST_MAGIC: &[u8] = b"HVCHUNK1\n";
 /// mapped to `RelayErr::Unreachable` like any other transport failure, so the URL's bad-window and
 /// the iroh rung take over exactly as they do for a refused connection.
 const HTTP_LIST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+/// Refused its own account's slots since `since_ms`, `count` times, with nothing accepted in
+/// between: is that long and often enough to mean "removed" rather than "not authorized yet"?
+/// Three minutes and six refusals: the roster heal that authorizes a new device runs every 30 s.
+pub(crate) fn self_refusals_mean_removed(since_ms: u64, count: u32, now_ms: u64) -> bool {
+    since_ms != 0 && count >= 6 && now_ms.saturating_sub(since_ms) >= 180_000
+}
+
 /// Emitted once when a linked, seedless device finds its own account's roster no longer lists it.
 pub const EVENT_DEVICE_REVOKED: &str = "haven:device-revoked";
 
@@ -975,6 +985,7 @@ impl Engine {
         Ok(Arc::new(Self {
             persist_pending: std::sync::atomic::AtomicBool::new(false),
             revoked_told: std::sync::atomic::AtomicBool::new(false),
+            self_refused: StdMutex::new((0, 0)),
             qa_call: std::sync::atomic::AtomicU8::new(0),
             last_epoch_reseal: StdMutex::new(0),
             qa_last_call_event: StdMutex::new("none".into()),
@@ -1099,6 +1110,7 @@ impl Engine {
         Ok(Arc::new(Self {
             persist_pending: std::sync::atomic::AtomicBool::new(false),
             revoked_told: std::sync::atomic::AtomicBool::new(false),
+            self_refused: StdMutex::new((0, 0)),
             qa_call: std::sync::atomic::AtomicU8::new(0),
             last_epoch_reseal: StdMutex::new(0),
             qa_last_call_event: StdMutex::new("none".into()),
@@ -10523,6 +10535,39 @@ impl Engine {
     /// author was usually still online to answer peer-to-peer — looked fine.) Publishing the
     /// account-signed roster is precisely the remedy, so record the refusal and fix the CAUSE rather
     /// than backing off from a relay that is working perfectly.
+    /// A relay refused this device its OWN account's sync slots. Just after linking that is
+    /// ordinary (the relay has not seen the roster that lists this device yet) and heals in
+    /// seconds. A browser that is refused for minutes on end, with no relay accepting it in
+    /// between, has been removed from the account: the relay holds a newer roster without it,
+    /// and nothing else will ever tell it so if the removing device's notice was missed. Then the
+    /// host is told, exactly as when the roster itself arrives ([`EVENT_DEVICE_REVOKED`]).
+    ///
+    /// Web devices only: a browser keeps nothing that a re-link does not bring back, so being
+    /// wrong costs one scan. A phone or computer would lose more, and is left alone.
+    fn note_self_refused(self: &Arc<Self>) {
+        if !self.is_seedless() || !self.seedless.lock().linked || !self.is_web_device() {
+            return;
+        }
+        let now = now_ms();
+        let removed = {
+            let mut r = self.self_refused.lock();
+            if r.0 == 0 {
+                *r = (now, 0);
+            }
+            r.1 = r.1.saturating_add(1);
+            self_refusals_mean_removed(r.0, r.1, now)
+        };
+        if removed && !self.revoked_told.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            log::info!("this browser has been refused its own account for minutes: removed");
+            self.emit_event(EVENT_DEVICE_REVOKED, serde_json::Value::Null);
+        }
+    }
+
+    /// A relay accepted this device for its own account: it is not removed.
+    fn note_self_accepted(&self) {
+        *self.self_refused.lock() = (0, 0);
+    }
+
     fn note_refused(&self, node_hex: &str, what: &str) {
         self.roster_needed.lock().insert(node_hex.to_string());
         log::info!(
@@ -13358,6 +13403,7 @@ impl Engine {
                         match self.http_list_delta(base, &token, prefix, None).await {
                             Ok((keys, _)) => {
                                 self.mark_relay_ok(node_hex);
+                                self.note_self_accepted();
                                 return keys.unwrap_or_default();
                             }
                             Err(RelayErr::Forbidden) => {
@@ -13368,6 +13414,7 @@ impl Engine {
                                 // of the pass is the remedy; the NEXT pass converges. (Android's
                                 // selfSyncHttpList returns null on 403 for the same reason.)
                                 self.note_refused(node_hex, "selfsync list");
+                                self.note_self_refused();
                                 return vec![];
                             }
                             Err(RelayErr::Unreachable) => self.mark_http_url_bad(base),
@@ -13400,11 +13447,13 @@ impl Engine {
                             // store, so don't burn a dial re-asking it.
                             Ok(found) => {
                                 self.mark_relay_ok(node_hex);
+                                self.note_self_accepted();
                                 return found;
                             }
                             Err(RelayErr::Forbidden) => {
                                 // Same-gate refusal — the iroh path would 403 too; heal, next pass.
                                 self.note_refused(node_hex, "selfsync get");
+                                self.note_self_refused();
                                 return None;
                             }
                             Err(RelayErr::Unreachable) => self.mark_http_url_bad(base),
@@ -13433,11 +13482,13 @@ impl Engine {
                         match self.http_put(base, &token, key, data.to_vec()).await {
                             Ok(()) => {
                                 self.mark_relay_ok(node_hex);
+                                self.note_self_accepted();
                                 return;
                             }
                             Err(RelayErr::Forbidden) => {
                                 // Same-gate refusal — the iroh path would 403 too; heal, next pass.
                                 self.note_refused(node_hex, "selfsync put");
+                                self.note_self_refused();
                                 return;
                             }
                             Err(RelayErr::Unreachable) => self.mark_http_url_bad(base),

@@ -608,3 +608,15 @@ fn a_device_missing_from_its_accounts_roster_knows_it_was_removed() {
     assert!(gone(&[phone.clone(), acct.clone()], &acct, &me), "others listed, not this one");
     assert!(gone(&[phone], &acct, &me));
 }
+
+/// Refusals mean "removed" only when they have gone on for minutes with nothing accepted between.
+#[test]
+fn a_browser_refused_its_own_account_for_minutes_is_removed_not_merely_new() {
+    use crate::engine::self_refusals_mean_removed as removed;
+    assert!(!removed(0, 99, 10_000_000), "not refused at all");
+    assert!(!removed(1_000, 1, 1_000), "the first refusal after linking is ordinary");
+    assert!(!removed(1_000, 50, 1_000 + 179_999), "many refusals, but not for long enough");
+    assert!(!removed(1_000, 5, 1_000 + 600_000), "long, but too few to trust");
+    assert!(removed(1_000, 6, 1_000 + 180_000));
+}
+

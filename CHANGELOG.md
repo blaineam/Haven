@@ -43,6 +43,17 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   account's roster without itself erases everything, says it was removed, and shows its link
   screen again. The page half is live with the web client; a phone or computer sends the notice
   from the next full release on.
+- **Profile pictures set on a phone did not show on the desktop app or in a browser.** Phones
+  store a picture as bare base64 and the desktop interface used it as an image address, which a
+  browser reads as a path. The picture never appeared (nor the emoji behind it), and a page in a
+  browser asked its site for a 40,000-character address, once per picture per redraw. Pictures
+  are now shown as images whichever way they were stored.
+- **A linked browser flooded the network with failing requests.** The browser had no dial
+  backoff, so every sync pass re-dialed every unreachable device of every contact, each costing
+  an address lookup. One failed dial now holds that peer back for a minute, doubling to fifteen.
+- **A removed browser that missed the notice never found out.** A browser that every relay has
+  refused its own account for three minutes, with nothing accepted in between, now concludes
+  it was removed, erases itself and shows its link screen.
 
 ### Changed
 - **My Circle: you decide whether your browser can read it.** It used to need a yes from every

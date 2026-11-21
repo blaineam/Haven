@@ -267,3 +267,17 @@ test('a QR code is not sized as an icon', () => {
   const px = Number((rule[1].match(/width:\s*min\((\d+)px/) || rule[1].match(/width:\s*(\d+)px/) || [])[1]);
   assert.ok(px >= 240, `a QR ${px}px wide is too small to scan`);
 });
+
+// ── Avatars from a phone are bare base64, not a data: URL ────────────────────────────────────
+test('an avatar is always something an <img> can show, never a path', () => {
+  const { avatarSrc } = lift(['avatarSrc']);
+  assert.equal(avatarSrc('/9j/4AAQSkZJRg=='), 'data:image/jpeg;base64,/9j/4AAQSkZJRg==');
+  assert.equal(avatarSrc('iVBORw0KGgo='), 'data:image/png;base64,iVBORw0KGgo=');
+  assert.equal(avatarSrc('data:image/jpeg;base64,/9j/x'), 'data:image/jpeg;base64,/9j/x');
+  assert.equal(avatarSrc('blob:https://x/1'), 'blob:https://x/1');
+  assert.equal(avatarSrc(''), '');
+  assert.equal(avatarSrc(null), '');
+  // No <img> takes an avatar raw: every one goes through avatarSrc.
+  const raw = appSrc.match(/el\("img", \{ src: (?:\w+\.)?avatar\b[^)]/g) || [];
+  assert.deepEqual(raw, [], `an <img> uses an avatar without avatarSrc: ${raw.join(' ; ')}`);
+});

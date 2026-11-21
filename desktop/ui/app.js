@@ -1516,7 +1516,7 @@ async function storiesTray(prefetched) {
     if (seen.has(name)) continue;
     seen.add(name);
     const disc = el("div", {});
-    if (it.is_me && me && me.avatar) disc.append(el("img", { src: me.avatar }));
+    if (it.is_me && me && me.avatar) disc.append(el("img", { src: avatarSrc(me.avatar) }));
     else if (it.is_me && me && me.emoji) disc.textContent = me.emoji;
     else disc.textContent = initials(name);   // identity chip — matches the author's postCard avatar
     tray.append(el("button", { class: "story-ring cover", onclick: () => viewStories(flat, starts.get(name) || 0) },
@@ -5797,7 +5797,7 @@ async function renderYou() {
   state.profile = p;
 
   const avatar = el("button", { class: "profile-avatar", title: t("edit_profile"), onclick: () => editProfileSheet(p) },
-    el("div", { class: "disc" }, p.avatar ? el("img", { src: p.avatar }) : (p.emoji || initials(p.name))),
+    el("div", { class: "disc" }, p.avatar ? el("img", { src: avatarSrc(p.avatar) }) : (p.emoji || initials(p.name))),
     el("span", { class: "pencil" }, icon("pencil.circle.fill")),
   );
   const head = el("div", { class: "profile-head" },
@@ -5908,6 +5908,17 @@ async function renderYou() {
 /** The emoji palette, in macOS's order — `ProfileStore.avatarChoices` (Profile.swift:120). */
 const AVATAR_EMOJI = ["🌿", "🌸", "🔥", "⭐️", "🦊", "🐢", "🌊", "🍯", "🎈", "🪴", "🦋", "🌙"];
 
+/** An avatar as something an <img> can show. This app stores a picture as a `data:` URL, but the
+ *  phones store bare base64, and that is what arrives for a contact (or for my own profile, set on
+ *  a phone). Bare JPEG base64 begins "/9j/", which an <img> reads as a PATH: the picture never
+ *  showed, and a page in a browser asked its own site for a 40,000-character address (HTTP 414)
+ *  once per picture per redraw. PNG is told apart by its own first bytes. */
+function avatarSrc(a) {
+  const v = String(a || "").trim();
+  if (!v || /^(data|blob):/i.test(v)) return v;
+  return `data:image/${v.startsWith("iVBOR") ? "png" : "jpeg"};base64,${v}`;
+}
+
 /** Downscale a picked image to an avatar and return it as a `data:` URL.
  *
  *  The 192px cap and JPEG q0.7 are macOS's numbers (`ProfileStore.avatarBase64`), not invented ones —
@@ -5980,7 +5991,7 @@ function editProfileSheet(p) {
   }
 
   sheet(t("edit_profile"), el("div", { class: "edit-profile" },
-    el("div", { class: "ep-avatar" }, avatar ? el("img", { src: avatar }) : el("span", {}, emoji)),
+    el("div", { class: "ep-avatar" }, avatar ? el("img", { src: avatarSrc(avatar) }) : el("span", {}, emoji)),
     photoRow,
     name,
     el("div", { class: "col", style: "gap:10px" }, bio, link),
@@ -7961,7 +7972,7 @@ function displayNameFor(hex) {
 function avatarContent(isMe, name) {
   if (isMe) {
     const p = state.profile || {};
-    if (p.avatar) return el("img", { src: p.avatar, alt: "" });
+    if (p.avatar) return el("img", { src: avatarSrc(p.avatar), alt: "" });
     if (p.emoji) return p.emoji;
   }
   return initials(name);
@@ -8285,7 +8296,7 @@ function callAvatar(hex, size) {
   const c = me ? (state.profile || {}) : ((state.contacts || []).find((x) => x.id_hex === hex) || {});
   const disc = el("div", { class: "call-avatar",
     style: `width:${size}px;height:${size}px;font-size:${Math.round(size * 0.5)}px` });
-  if (c.avatar) disc.append(el("img", { src: c.avatar, alt: "" }));
+  if (c.avatar) disc.append(el("img", { src: avatarSrc(c.avatar), alt: "" }));
   else if (c.emoji) disc.textContent = c.emoji;
   // Self NEVER falls to initials: a profile that skipped onboarding (QA seeds, linked devices)
   // has no emoji yet — use the app's default sprout, the same one onboarding assigns.
@@ -8653,7 +8664,7 @@ function renderOnboarding() {
     return el("div", { class: "col", style: "align-items:center;gap:16px;text-align:center" },
       el("h2", { style: "font-size:26px;font-weight:800;margin:0;white-space:pre-line" }, t("what_call_you")),
       el("div", { class: "disc", style: "width:96px;height:96px;font-size:40px" },
-         avatar ? el("img", { src: avatar }) : emoji),
+         avatar ? el("img", { src: avatarSrc(avatar) }) : emoji),
       el("div", { class: "row", style: "justify-content:center;gap:8px" },
         el("button", { class: "btn small tint-pink", onclick: () => picker.click() }, avatar ? t("change_photo") : t("add_a_photo")),
         avatar ? el("button", { class: "btn small danger", onclick: () => { avatar = ""; draw(); } }, t("remove")) : null,

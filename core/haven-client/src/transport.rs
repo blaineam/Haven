@@ -59,6 +59,79 @@ mod browser_relay_url_tests {
     }
 }
 
+/// Per-peer dial backoff for the browser node. Without one the engine's sync loop re-dialed every
+/// unreachable device of every contact on every pass, and each dial costs an address lookup and a
+/// relay handshake: a linked browser sat issuing hundreds of failing requests a minute for as long
+/// as the tab was open. One failed dial closes the gate for a minute, doubling to fifteen; a
+/// success, or fresh evidence the peer is there ([`DialGate::forgive`]), opens it.
+#[derive(Default)]
+pub struct DialGate {
+    peers: std::collections::HashMap<[u8; 32], (u64, u32)>, // id → (closed until ms, failures)
+}
+
+impl DialGate {
+    const BASE_MS: u64 = 60_000;
+    const CAP_MS: u64 = 900_000;
+
+    /// May this peer be dialed at `now_ms`?
+    pub fn open(&self, id: &[u8; 32], now_ms: u64) -> bool {
+        self.peers.get(id).is_none_or(|(until, _)| now_ms >= *until)
+    }
+    /// A dial failed: close the gate, for longer each time.
+    pub fn strike(&mut self, id: [u8; 32], now_ms: u64) {
+        let fails = self.peers.get(&id).map_or(0, |(_, f)| *f).saturating_add(1);
+        let wait = (Self::BASE_MS << (fails.min(5) - 1)).min(Self::CAP_MS);
+        self.peers.insert(id, (now_ms + wait, fails));
+        if self.peers.len() > 4096 {
+            self.peers.retain(|_, (until, _)| *until > now_ms);
+        }
+    }
+    /// The peer answered, or there is fresh evidence it is there. Returns whether a gate was closed.
+    pub fn forgive(&mut self, id: &[u8; 32]) -> bool {
+        self.peers.remove(id).is_some()
+    }
+    /// The network changed: every closed gate opens once, keeping its count, so a peer that is
+    /// really gone fails once more and goes straight back to its long wait.
+    pub fn forgive_all(&mut self, now_ms: u64) -> u32 {
+        let mut n = 0;
+        for (until, _) in self.peers.values_mut() {
+            if *until > now_ms {
+                *until = now_ms;
+                n += 1;
+            }
+        }
+        n
+    }
+}
+
+#[cfg(test)]
+mod dial_gate_tests {
+    use super::DialGate;
+
+    #[test]
+    fn a_failed_dial_is_not_repeated_until_its_wait_is_over_and_the_wait_grows() {
+        let (a, b) = ([1u8; 32], [2u8; 32]);
+        let mut g = DialGate::default();
+        assert!(g.open(&a, 0));
+        g.strike(a, 0);
+        assert!(!g.open(&a, 59_999) && g.open(&a, 60_000), "one minute after the first failure");
+        assert!(g.open(&b, 1), "another peer is not held back");
+        g.strike(a, 60_000);
+        assert!(!g.open(&a, 60_000 + 119_999) && g.open(&a, 60_000 + 120_000), "two after the second");
+        for _ in 0..10 {
+            g.strike(a, 1_000_000);
+        }
+        assert!(!g.open(&a, 1_000_000 + 899_999) && g.open(&a, 1_000_000 + 900_000), "never more than fifteen");
+        assert!(g.forgive(&a) && g.open(&a, 1_000_001) && !g.forgive(&a));
+        g.strike(a, 0);
+        g.strike(b, 0);
+        assert_eq!(g.forgive_all(10), 2);
+        assert!(g.open(&a, 10) && g.open(&b, 10));
+        g.strike(a, 10);
+        assert!(!g.open(&a, 10 + 119_999), "the count was kept: straight back to the longer wait");
+    }
+}
+
 /// The browser's transport. A tab cannot bind UDP, accept inbound connections or hole-punch, so
 /// its node reaches peers only through relays (a circle's own DERP when one is known, n0's
 /// otherwise) — the same `haven/social/0` wire, one uni stream per frame.
@@ -112,6 +185,8 @@ pub mod web {
         home: Option<RelayUrl>,
         conns: Conns,
         listener: Arc<dyn InboundListener>,
+        /// Per-peer dial backoff ([`super::DialGate`]).
+        gate: Mutex<super::DialGate>,
     }
 
     impl HavenNode {
@@ -159,7 +234,7 @@ pub mod web {
                     }
                 });
             }
-            Ok(Arc::new(Self { endpoint, home: customs.into_iter().next(), conns, listener }))
+            Ok(Arc::new(Self { endpoint, home: customs.into_iter().next(), conns, listener, gate: Mutex::new(super::DialGate::default()) }))
         }
 
         /// Resolves once a relay connection is up — the point at which peers can reach this node.
@@ -186,13 +261,14 @@ pub mod web {
             hex(self.endpoint.id().as_bytes())
         }
 
-        /// The browser node keeps no dial backoff, so there is never a gate to forgive.
-        pub fn forgive_dial(&self, _node_hex: String) -> bool {
-            false
+        /// Forgive one peer's dial backoff: there is fresh evidence it is reachable.
+        pub fn forgive_dial(&self, node_hex: String) -> bool {
+            endpoint_id(&node_hex).is_ok_and(|id| self.gate.lock().unwrap_or_else(|e| e.into_inner()).forgive(id.as_bytes()))
         }
 
+        /// Re-open every held-back peer once (the network path changed).
         pub fn forgive_all_dials(&self) -> u32 {
-            0
+            self.gate.lock().unwrap_or_else(|e| e.into_inner()).forgive_all(crate::engine::now_ms())
         }
 
         /// A relay's mailbox over the node's blob ALPN is not offered in a browser: the same
@@ -226,6 +302,8 @@ pub mod web {
             payload: Vec<u8>,
         ) -> Result<(), HavenError> {
             let url = super::browser_relay_url(relay_url.trim()).parse::<RelayUrl>().map_err(invalid)?;
+            // Someone just scanned this device's code: always a real attempt (as natively).
+            let _ = self.forgive_dial(node_id_hex.clone());
             self.send_inner(node_id_hex, Some(url), payload).await
         }
 
@@ -248,7 +326,17 @@ pub mod web {
                     if let Some(relay) = via.or(self.home.clone()) {
                         addr = addr.with_relay_url(relay);
                     }
-                    let conn = self.endpoint.connect(addr, ALPN).await.map_err(invalid)?;
+                    if !self.gate.lock().unwrap_or_else(|e| e.into_inner()).open(id.as_bytes(), crate::engine::now_ms()) {
+                        return Err(invalid("dial backoff: peer unreachable, retry later"));
+                    }
+                    let conn = match self.endpoint.connect(addr, ALPN).await {
+                        Ok(conn) => conn,
+                        Err(e) => {
+                            self.gate.lock().unwrap_or_else(|e| e.into_inner()).strike(*id.as_bytes(), crate::engine::now_ms());
+                            return Err(invalid(e));
+                        }
+                    };
+                    self.gate.lock().unwrap_or_else(|e| e.into_inner()).forgive(id.as_bytes());
                     lock(&self.conns).insert(id, conn.clone());
                     crate::rt::spawn(read_loop(conn.clone(), self.conns.clone(), self.listener.clone()));
                     conn

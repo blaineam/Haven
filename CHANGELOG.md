@@ -9,6 +9,14 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Fixed
+- **QR codes were drawn the size of an icon.** In the desktop app (Linux, Windows) and the web
+  client, every QR code (an invite, "link a device", and the code a browser shows to be linked)
+  was drawn 16 pixels square, far too small for a camera. A style rule meant for icons, added in
+  1.5.0, applied to them as well. They are now drawn 288 pixels wide, or 72% of a narrow screen.
+  A unit test and the web smokes now fail on a code smaller than a camera can read. The iPhone,
+  iPad, Mac and Android apps draw their codes differently and were not affected.
+
 ## 2.2.1 (2026-11-20)
 
 ### Added

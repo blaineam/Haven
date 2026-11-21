@@ -97,6 +97,9 @@ try {
   const code = await until("the page's own code", () => page.evaluate(() => document.querySelector("#pair-copy")?.dataset.code || null), 90000);
   if (!code.startsWith("haven-pair:")) throw new Error(`not a device code: ${code.slice(0, 40)}`);
   if (!(await page.evaluate(() => !!document.querySelector("#pair-qr svg")))) throw new Error("the code is not shown as a QR");
+  // Shown is not the same as scannable: an icon-sized code passes the line above.
+  const qrSide = await page.evaluate(() => document.querySelector("#pair-qr svg").getBoundingClientRect().width);
+  if (qrSide < 200) throw new Error(`the code is drawn ${qrSide}px wide, too small for a camera`);
   step(`a page that no relay served still shows a code (${PUBLIC ? "reachable through a public rendezvous relay" : "reachable through the relay its site names"})`);
 
   await page.locator('input[type="checkbox"]').first().check();

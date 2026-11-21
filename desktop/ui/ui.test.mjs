@@ -255,3 +255,15 @@ test('app: composer audience names the circle only when it fits (Apple ComposerA
   assert.equal(A.placeholder(''), 'Post to everyone…');
   assert.equal(A.placeholder(undefined), 'Post to everyone…');
 });
+
+// ── QR codes are drawn to be scanned ─────────────────────────────────────────────────────────
+// styles.css sizes every bare <svg> as a 16px icon. A QR is an <svg> too, and from 1.5.0 to 2.2.1
+// each one in the app (invite, link a device, the browser's own code) was drawn 16px square.
+test('a QR code is not sized as an icon', () => {
+  const css = readFileSync(join(here, 'styles.css'), 'utf8');
+  assert.match(css, /^svg \{ width: 16px; height: 16px; \}$/m, 'the icon rule this test guards against is gone; revisit');
+  const rule = css.match(/^\.qr-box svg \{([^}]*)\}$/m);
+  assert.ok(rule, 'no .qr-box svg rule: the icon rule shrinks every QR to 16px');
+  const px = Number((rule[1].match(/width:\s*min\((\d+)px/) || rule[1].match(/width:\s*(\d+)px/) || [])[1]);
+  assert.ok(px >= 240, `a QR ${px}px wide is too small to scan`);
+});

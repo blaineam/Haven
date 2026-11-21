@@ -300,6 +300,9 @@ await run(
         () => page.evaluate(() => document.querySelector("#pair-copy")?.dataset.code || null), 60000);
       if (!pairCode.startsWith("haven-pair:")) throw new Error(`not a device code: ${pairCode.slice(0, 40)}`);
       if (!(await page.evaluate(() => !!document.querySelector("#pair-qr svg")))) throw new Error("the code is not shown as a QR");
+      // Shown is not the same as scannable: an icon-sized code passes the line above.
+      const qrSide = await page.evaluate(() => document.querySelector("#pair-qr svg").getBoundingClientRect().width);
+      if (qrSide < 200) throw new Error(`the code is drawn ${qrSide}px wide, too small for a camera`);
       if (Object.keys(await rawStorage(page)).length !== 0) throw new Error("showing a code stored something before anyone answered it");
       await shots(page, "0-code");
       step("an unlinked browser shows its own code (QR + text) and stores nothing while it waits");

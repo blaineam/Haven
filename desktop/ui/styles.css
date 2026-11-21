@@ -920,6 +920,9 @@ button.set-row:hover { background: var(--panel); }
 /* ---- Connect / QR ---- */
 .qr-box { background: white; padding: 16px; border-radius: var(--r-md); width: max-content; box-shadow: var(--shadow); }
 .qr-box img, .qr-box canvas { display: block; image-rendering: pixelated; }
+/* The code itself. The element rule `svg { 16px }` above is for icons; without this line it shrank
+   every QR in the app to an icon nobody's camera can read. Sized to be scanned from arm's length. */
+.qr-box svg { width: min(288px, 72vw); height: auto; display: block; }
 .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12px; word-break: break-all; overflow-wrap: anywhere; }
 .list-item { display: flex; align-items: center; gap: 11px; padding: 11px; border-radius: var(--r-md); transition: background .18s; }
 .list-item:hover { background: var(--panel2); }

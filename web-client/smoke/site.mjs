@@ -96,7 +96,10 @@ try {
   // cancels as an uncaught "…due to access control checks". Those are not crashes of a running
   // page, so errors are not counted between `leaving = true` and the next page being ready.
   let leaving = false;
-  page.on("pageerror", (e) => { if (!leaving) crashes.push(e.message); });
+  // The same report can arrive after the next page is up, for the one request that is always
+  // in flight (the node publishing its address, best effort); that one is ignored by name.
+  const tornDown = (m) => /dns\.iroh\.link\/pkarr\/\S+ due to access control checks/.test(m);
+  page.on("pageerror", (e) => { if (!leaving && !tornDown(e.message)) crashes.push(e.message); });
   page.on("console", (m) => { if (m.type() === "error" && m.text().includes("[haven panic]")) crashes.push(m.text()); });
   await page.evaluate(() => window.__HAVEN_WEB__.ready);
   step(`a plain web site serves the client at ${site.url}/ (the relay is ${relay})`);

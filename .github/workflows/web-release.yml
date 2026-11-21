@@ -1,0 +1,54 @@
+name: web-release
+
+# Web-client-ONLY release path. A fix that touches nothing but the browser client (a style, a
+# string, the page's own script) does not need new installers or a store submission: tag it
+# `web-vX.Y.Z-N` (the app version it follows, then a counter) and this builds the client from
+# that commit, drives it end to end in a browser, and publishes the two archives as a Release.
+#
+# The Release is never marked "latest": the desktop updater, the relay installer and everything
+# else that asks GitHub for the latest release keep getting the last full `v*` one. The project
+# site (static.yml) serves whichever is newer of the latest full release and the latest web one,
+# so the next full release takes over again by itself. The page at /app/ is still a tested,
+# tagged build that anyone can compare with a public archive (Scripts/verify-web-site.mjs).
+
+on:
+  push:
+    tags: ["web-v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  # The build and the whole browser smoke. A failure here publishes nothing.
+  client:
+    uses: ./.github/workflows/web-client.yml
+
+  publish:
+    needs: client
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-client
+      - name: Publish the web client
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Via env, never `${{ }}` in the script: a tag name is text someone else can choose.
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^web-v[0-9]+\.[0-9]+\.[0-9]+-[0-9]+$ ]] || { echo "::error::tag must be web-vX.Y.Z-N"; exit 1; }
+          test -s haven-web-site.tar.gz && test -s haven-web-client.tar.gz
+          sha256sum haven-web-site.tar.gz haven-web-client.tar.gz | tee -a "$GITHUB_STEP_SUMMARY"
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --latest=false \
+            --title "Haven web client ${TAG#web-v}" \
+            --notes "The browser client only. Installers and store apps are unchanged; see CHANGELOG.md." \
+            haven-web-site.tar.gz haven-web-client.tar.gz
+      # A Release published with the workflow token starts no other workflow.
+      - name: Refresh the site's web client
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run static.yml --repo "$GITHUB_REPOSITORY" --ref main

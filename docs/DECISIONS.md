@@ -554,7 +554,7 @@ other device and loses new content when it is. The apps are not affected at all.
 **What is done about it:**
 - The page says on the link screen that it comes from a web site, names the site, and says the
   person is trusting it.
-- The site serves a tagged Release's archive, not a build of its own. `Scripts/verify-web-site.mjs`
+- The site serves a tagged Release's archive, not a build of its own. That Release is the newest of the full ones and the web-client-only ones (`web-vX.Y.Z-N`, `web-release.yml`), so a browser-only fix does not wait for new installers. `Scripts/verify-web-site.mjs`
   lets anyone compare what the site serves with that Release, byte for byte. It cannot detect a
   page served differently to one chosen visitor, and says so.
 - Publishing on the project's site is a switch the owner holds, off until set: the repository

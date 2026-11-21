@@ -232,6 +232,13 @@ See `docs/STORE-AUTOPUBLISH.md` for the full track table and the overrides.
 **Dry run:** `workflow_dispatch` on `release.yml` builds everything without publishing. Off a
 branch with no input it builds whatever `MARKETING_VERSION` currently says.
 
+**Web-client-only fix:** tag `web-v<X.Y.Z>-<N>` (the app version it follows, then a counter, e.g.
+`web-v2.2.1-1`) → `web-release.yml` builds the browser client from that commit, runs the browser
+smokes, and publishes `haven-web-site.tar.gz` + `haven-web-client.tar.gz` as a Release that is
+**not** marked latest. The project site then serves it at `/app/` (it serves the newest of the full
+and web-only releases), with no installers rebuilt and nothing sent to a store. Relays keep the
+client they were installed with until the next full release.
+
 **Relay-only hotfix:** tag `relay-v<X.Y.Z>` → `relay-release.yml` ships just the relay binaries
 and `.deb`s. It stamps `core/haven-relay/Cargo.toml` from the tag exactly as `release.yml` does,
 so `relay-v1.0.6` yields `haven-relay_1.0.6-1_amd64.deb` and `apt upgrade` moves users onto it.

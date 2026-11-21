@@ -17,6 +17,11 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   A unit test and the web smokes now fail on a code smaller than a camera can read. The iPhone,
   iPad, Mac and Android apps draw their codes differently and were not affected.
 
+### Changed
+- **A fix to the browser client alone no longer needs a full release.** A `web-vX.Y.Z-N` tag builds
+  and browser-tests the client and publishes it by itself; the project site serves the newest of
+  the full and web-only releases. Installers, store apps and the "latest" release are untouched.
+
 ## 2.2.1 (2026-11-20)
 
 ### Added

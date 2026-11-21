@@ -655,6 +655,12 @@ the app meet on the public rendezvous relays (so both need the internet), and th
 relay from the account. `web-client/smoke/site.mjs <web_primary_engine binary>` is the same path
 with the desktop engine as the primary, hermetic by default; CI runs it.
 
+`SMOKE_BROWSER=webkit` runs the same smoke in Playwright's WebKit build, Safari's engine (it
+refuses things Chromium lets through: 2.2.1's page never linked in Safari). CI runs the site smoke
+in Chromium, in WebKit, and in WebKit with `SMOKE_RENDEZVOUS=public`. `SMOKE_PAIR_DELAY_MS` leaves
+the code on screen that long before it is answered. A web-only release tag must not sit on a
+commit whose message says `[ci skip]`: the tag's workflow is skipped with it.
+
 **Android.** The same test drives the Android app over adb — its QA channel is `files/qa/`,
 reached with `run-as` — when `PHONE_ADB_PKG=com.blaineam.haven` is set instead of `PHONE_QA_DIR`:
 

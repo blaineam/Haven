@@ -27,6 +27,10 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   refuses a secure connection to such a name, so the page reached no relay and stayed on
   "could not reach the relay". The page now uses the same servers by their plain names. The
   site smoke now also runs in WebKit and fails if the page asks for a dotted host.
+- **Receiving a picture or video crashed the browser client.** Storing received media asked for a
+  process id, which a browser does not have; the request stops the page's whole engine, so no
+  media appeared and nothing else loaded afterwards either. The browser now names those files
+  without one. The site smoke now sends pictures each way and checks the page draws them.
 
 ### Changed
 - **A fix to the browser client alone no longer needs a full release.** A `web-vX.Y.Z-N` tag builds

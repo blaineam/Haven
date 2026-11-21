@@ -307,7 +307,7 @@ impl LocalMedia {
         let name = bare_id(reference);
         let tmp = self.dir.join(format!(
             "incoming_{name}.{}-{}.raw.part",
-            std::process::id(),
+            proc_tag(),
             SEQ.fetch_add(1, Ordering::Relaxed)
         ));
         if fs::write(&tmp, blob).and_then(|_| fs::rename(&tmp, self.dir.join(name))).is_ok() {
@@ -484,7 +484,7 @@ impl LocalMedia {
         let dst = self.dir.join(name);
         let Ok(md) = fs::metadata(&dst) else { return false };
         let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let tag = format!("{}-{n}", std::process::id());
+        let tag = format!("{}-{n}", proc_tag());
         if md.len() > 64 * 1024 * 1024 {
             // Big video: stay file→file so neither plaintext nor envelope is ever whole in RAM here.
             let plain = self.dir.join(format!("incoming_{name}.{tag}.plain.part"));
@@ -808,6 +808,22 @@ impl LocalMedia {
     /// Record "a sweep just ran" (see [`Self::gc_due`]).
     pub fn touch_gc_stamp(&self) {
         let _ = fs::write(self.dir.join(".gc-stamp"), b"");
+    }
+}
+
+
+/// A tag that keeps one process's temporary media files apart from another's. A browser has no
+/// process id (asking for one PANICS there, and a panic stops the page's whole engine), and no
+/// second process sharing its store either, so there the tag is a constant; the per-call
+/// counter beside every use still keeps the names unique.
+fn proc_tag() -> u32 {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::process::id()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        0
     }
 }
 

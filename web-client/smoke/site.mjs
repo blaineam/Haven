@@ -153,6 +153,19 @@ try {
   await until("the page's post on the primary", async () => peer.lines.includes("FEED me hello from a page on a web site"), 180000);
   step("the primary shows the page's post");
 
+  // Pictures each way. They are fetched and sent as larger blobs than a post, and from a web site
+  // every one of those calls crosses origins too.
+  const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+  peer.write("!img picture from the primary\n");
+  const pic = await until("the primary's picture post on the page", async () => (await feed()).find((p) => p.body === "picture from the primary" && p.media?.length), 180000);
+  const dataUrl = await until("the primary's picture bytes on the page", () => invoke(page, "media_data_url", { circleId: "", reference: pic.media[0] }), 180000);
+  if (!dataUrl.endsWith(PNG)) throw new Error(`the page opened different bytes: ${dataUrl.slice(0, 60)}…`);
+  await until("the picture drawn in the feed", () => page.evaluate(() => [...document.querySelectorAll(".post-media img")].some((i) => i.complete && i.naturalWidth > 0)), 60000);
+  const ref = await invoke(page, "add_media", { circleId: "", dataBase64: PNG, isVideo: false });
+  await invoke(page, "post", { circleId: "", body: "picture from the page", media: [ref] });
+  await until("the page's picture on the primary", async () => peer.lines.includes("FEED me picture from the page [media 1]"), 180000);
+  step("pictures travel each way and the page draws the one it received");
+
   // The mailbox is the relay's, never the site's, and the browser was allowed to read it.
   const relayOrigin = new URL(relay).origin;
   const toRelay = calls.filter((c) => c.origin === relayOrigin);

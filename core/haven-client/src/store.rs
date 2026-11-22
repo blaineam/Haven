@@ -285,6 +285,12 @@ pub struct AcceptedFriendInvite {
 pub struct Prefs {
     #[serde(default)]
     pub profile: Profile,
+    /// The history hand-off (`engine::historyhandoff`): what this device asked my other devices
+    /// for and how far it has read, and the runs it is serving to them.
+    #[serde(default)]
+    pub history_want: Option<crate::engine::historyhandoff::Want>,
+    #[serde(default)]
+    pub history_serves: std::collections::HashMap<String, crate::engine::historyhandoff::Serve>,
     /// Offline friend invites (docs/OFFLINE-FRIEND-INVITES.md): tickets I issued, so the
     /// mailbox pass can poll for parked acceptances and approvals can write grants. Mirrors
     /// iOS FriendInviteStore.issued (there: UserDefaults haven.friendInvites.issued).

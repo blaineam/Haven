@@ -1094,6 +1094,20 @@ pub fn relay_history_status(engine: Eng) -> serde_json::Value {
     engine.relay_history_status()
 }
 
+/// The history hand-off from my other devices (engine::historyhandoff): where it stands, "the
+/// reader reached the end of the feed, allow the next pages", and "stop waiting, read the relays".
+pub fn history_status(engine: Eng) -> serde_json::Value {
+    engine.history_status()
+}
+
+pub fn history_more(engine: Eng) -> bool {
+    engine.history_more()
+}
+
+pub fn history_use_relays(engine: Eng) {
+    engine.history_use_relays();
+}
+
 pub fn get_profile(engine: Eng) -> Profile {
     engine.get_profile()
 }

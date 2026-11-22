@@ -1095,6 +1095,28 @@ const RelayNudge = {
 
 /// The nudge: a brand-gradient card at the top of the feed. Clicking it opens the walkthrough; the ✕
 /// dismisses it for this circle for good. Returns null when the gate says no, so the call site is one line.
+/** The reader is at the end of what this browser holds: let the engine read the next pages of
+ *  history from my other devices. Nothing happens off the web, or once there is no more. */
+function wantOlderFromMyDevices() {
+  if (HOST_WEB) invoke("history_more").catch(() => {});
+}
+
+/** Shown while a linked browser has asked for history and no device of the account has answered.
+ *  The phone answers when Haven is next opened on it; the button reads the relays instead. */
+function historyWaitingBanner() {
+  const card = el("div", { class: "nudge-banner", id: "history-waiting" },
+    el("div", { class: "nudge-body" },
+      el("span", { class: "nudge-icon" }, "📱"),
+      el("div", { style: "min-width:0" },
+        el("div", { class: "nudge-title" }, t("history_waiting_title")),
+        el("div", { class: "nudge-sub" }, t("history_waiting_sub")),
+      ),
+    ),
+    el("button", { class: "btn", onclick: () => { invoke("history_use_relays").catch(() => {}); card.remove(); } }, t("history_use_relays")),
+  );
+  return card;
+}
+
 async function relayNudgeBanner(circleId, memberCount) {
   if (!(await RelayNudge.shouldShow(circleId, memberCount))) return null;
   const card = el("div", { class: "nudge-banner" },
@@ -1278,7 +1300,12 @@ async function renderFeed() {
   // Declared here rather than at the paginator below: the signature has to hash the same window
   // the paginator renders.
   const FEED_PAGE = 25;
+  // A linked browser gets its backlog from another device of the account, newest first, a few
+  // pages at a time. Where that stands decides whether the "waiting for your phone" note shows.
+  const hist = HOST_WEB ? await invoke("history_status").catch(() => null) : null;
+  const histWaiting = !!hist && hist.state === "waiting";
   const sig = JSON.stringify({
+    hist: histWaiting,
     c: state.activeCircle, name: state.activeCircleName,
     hidden: Hidden.showHidden, snd: state.videoSoundOn, status: connectionText(state.status),
     member: (active || {}).member_count || 0,
@@ -1322,8 +1349,10 @@ async function renderFeed() {
   if (upgrade) list.append(upgrade);
   const nudge = await relayNudgeBanner(state.activeCircle, (active || {}).member_count || 0);
   if (nudge) list.append(nudge);
+  if (histWaiting) list.append(historyWaitingBanner());
   list.append(await storiesTray(storyItems));
   if (!items.length) {
+    wantOlderFromMyDevices();
     list.append(el("div", { class: "empty" },
       el("span", { class: "big" }, icon("sparkles", "empty-ic")),
       el("div", { class: "h" }, t("nothing_here_yet")),
@@ -1372,6 +1401,7 @@ async function renderFeed() {
       // cursor on the Rust side, so paging to the end repeatedly does not re-ask.
       const oldest = all.length ? all[all.length - 1].created_at : 0;   // feed DTOs are snake_case
       if (oldest) invoke("request_older_history", { circleId: state.activeCircle, oldestCreatedAt: oldest }).catch(() => {});
+      wantOlderFromMyDevices();
     }
   };
   // Page in a tail that arrived AFTER this feed was built, without a teardown.
@@ -1382,7 +1412,12 @@ async function renderFeed() {
   // nothing left to page them in and nothing to force a rebuild either. The sentinel now stays,
   // and this runs the same "is it near the viewport" test its rootMargin does.
   state.feedNudge = () => {
-    if ((state.feedItems || []).length <= rendered) return;
+    if ((state.feedItems || []).length <= rendered) {
+      // Nothing new for THIS circle, and the reader is still at the end: the pages just read
+      // belonged to other circles, so the next ones are asked for.
+      if (!items.length || sentinel.getBoundingClientRect().top < window.innerHeight + 800) wantOlderFromMyDevices();
+      return;
+    }
     // Items exist beyond what is rendered: re-arm the observer (disconnected when the list ran out)
     // and only page one in if the sentinel is genuinely near the viewport.
     if (feedObserver) feedObserver.observe(sentinel);

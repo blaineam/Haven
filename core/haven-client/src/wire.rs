@@ -77,9 +77,10 @@ pub const KEY_HANDOFF_REQ: u8 = 39;
 /// The answer: keys sealed to the asking device and signed by the answering one.
 pub const KEY_HANDOFF: u8 = 40;
 
-/// RESERVED — the Apple apps' history hand-off nudge between a user's own devices ("look at the
-/// account lane now", `HistoryHandoff.nudgeFrame`). Desktop, Android and the browser neither send
-/// nor act on it (docs/MULTI-DEVICE.md); it is named here so the number is never reused.
+/// The history hand-off nudge between a user's own devices: "look at the account lane now"
+/// (Apple `HistoryHandoff.nudgeFrame`; `engine::historyhandoff` here). The payload is the asking
+/// device's id and carries no authority: the request itself is on the account lane, which only
+/// the account's own devices can write.
 pub const HISTORY_NUDGE: u8 = 36;
 
 /// Body of a [`RELAY_INTERFACE`] frame.

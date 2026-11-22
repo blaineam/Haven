@@ -76,7 +76,7 @@ try {
       });
       page.on("response", (r) => {
         const u = new URL(r.url());
-        if (/^\/(k|l|t)\//.test(u.pathname)) calls.push({ origin: u.origin, method: r.request().method(), status: r.status() });
+        if (/^\/(k|l|t)\//.test(u.pathname)) calls.push({ origin: u.origin, method: r.request().method(), status: r.status(), path: decodeURIComponent(u.pathname) });
       });
     },
   });
@@ -119,6 +119,9 @@ try {
   step(`a page that no relay served still shows a code (${PUBLIC ? "reachable through a public rendezvous relay" : "reachable through the relay its site names"})`);
 
   await page.locator('input[type="checkbox"]').first().check();
+  // What the account already holds before this browser exists: its history.
+  for (let i = 1; i <= 3; i++) peer.write(`before the link ${i}\n`);
+  await until("the primary's posts from before the link", async () => peer.lines.includes("FEED me before the link 3"));
   // A person does not scan the instant the code appears. SMOKE_PAIR_DELAY_MS leaves the page
   // showing its code for that long first, as it sits while someone finds their phone.
   if (process.env.SMOKE_PAIR_DELAY_MS) await new Promise((r) => setTimeout(r, Number(process.env.SMOKE_PAIR_DELAY_MS)));
@@ -144,6 +147,21 @@ try {
   step("the primary answered the code and the browser is a linked device of its account");
 
   const feed = async () => (await invoke(page, "feed", { circleId: "" })) || [];
+  // History is handed over by the account's other device, newest first. The mailbox as it stood
+  // at linking is NOT downloaded: on a real account that is thousands of envelopes in no order.
+  await until("the posts from before the link, handed over by the primary", async () => {
+    const bodies = (await feed()).map((p) => p.body);
+    return [1, 2, 3].every((i) => bodies.includes(`before the link ${i}`));
+  }, 240000);
+  const handed = await until("the primary's history pages", async () => {
+    const h = await invoke(page, "history_status");
+    return h.received >= 3 && ["receiving", "paused", "done"].includes(h.state) ? h : null;
+  }, 240000);
+  if (!(handed.skipped >= 3)) throw new Error(`the mailbox as it stood at linking was not left alone: ${JSON.stringify(handed)}`);
+  const backlogGets = calls.filter((c) => c.method === "GET" && c.path.startsWith("/k/haven/mailbox/") && !c.path.includes("/__"));
+  console.log(`  (mailbox envelopes fetched so far: ${backlogGets.length}; hand-off: ${JSON.stringify(handed)})`);
+  step("history from before the link is handed over by the account's other device, not dug out of the mailbox");
+
   const first = await until("the circle's standing", () => invoke(page, "circle_web_access", { circleId: "" }), 60000);
   if (!first.this_is_web || first.can_sign) throw new Error(`a linked browser must be a marked web device that cannot sign: ${JSON.stringify(first)}`);
   peer.write("posted with nobody asked\n");

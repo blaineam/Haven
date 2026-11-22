@@ -625,3 +625,43 @@ other device and loses new content when it is. The apps are not affected at all.
 the public rendezvous relays); `a_page_from_another_origin_may_ask_but_still_needs_a_members_signature`
 on the relay. The linking protocol is unchanged, so `docs/formal/haven_pair.spthy` still covers
 it: the relay named in a code is a locator, not a party to the proof.
+
+## D26 — A linked browser takes its backlog from another device, not from the mailbox (2026-11-22)
+
+**What happened.** A browser linked to a real account made 10,681 requests and pulled 634 MB
+before showing anything but its owner's own posts, oldest and newest mixed. All of it was the relay
+mailbox: sealed envelopes of 13 to 44 KB, named by their hash, most fetched twice (once before the
+key hand-off of D25 and once after, because gaining keys forgot every "seen" mark of the circle).
+
+**Why the mailbox cannot be read newest first.** A mailbox key is the hash of the sealed envelope.
+The relay keeps no post time and no arrival order: the only time it has is a file's modification
+time, which the daily liveness TOUCH moves. That is deliberate (a relay holds as little about a
+circle as it can), and it means a listing is in hash order. And order alone would not be enough:
+friends' older posts are sealed under epoch keys a new device never held (D25 hands over the
+last four epochs per author, no more).
+
+**Decision.** The engine implements the target half of the Apple apps' history hand-off
+(`engine::historyhandoff`, wire-compatible with `HistoryHandoffWire.swift`): the browser puts a
+request on the account lane, a device holding the history uploads pages newest first, one circle
+at a time in turn, re-sealed under the current key and carrying the roster and key commit, and the
+browser reads `FIRST_PAGES` of them and then `MORE_PAGES` more each time the reader reaches the end
+of the feed. What is in a mailbox the first time the browser lists it (within ten minutes of the
+ask) is marked seen unfetched; what arrives later is read as before. The engine also implements
+the source half for a device that holds the account key, so a desktop can answer.
+
+**What this costs.** Until a device of the account answers, a new browser shows only what is
+posted from then on. A phone answers when Haven is next open on it. The feed says so, offers
+"Load from relays instead" (the old behaviour, complete but unordered), and falls back to that
+after fifteen minutes. An account whose only other device is an Android phone always takes that
+path today: Android does not serve the hand-off.
+
+**Known gaps.** A post that reaches a mailbox between a source exporting that circle's first page
+and the browser first listing that circle is skipped by both; the authors' periodic re-send is
+the backstop, and "Load history from your relays" reads it on demand. Pages a browser never reads
+stay on the account lane until the source drops the run (three days).
+
+**Open question (not decided here).** The relay could offer a newest-first listing by arrival
+without storing anything new (a file's creation time). That would let a browser read recent
+posts it holds keys for with no other device awake. It also means a relay answers "what arrived
+most recently" to any member, which it does not do today; that is a change to what a relay
+reveals and is the owner's call.

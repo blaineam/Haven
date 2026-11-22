@@ -195,8 +195,11 @@ whose page completed directly first is withdrawn (empty body) so the source skip
 
 Paging is by `created_at`, strictly older than the previous page's oldest, with a timestamp tie
 kept on one page (`epoch_sync_bundle_paged`) — the events vector is arrival-ordered, so a
-positional "newest N" would skip events. Android and desktop ignore frame 36 and neither serve nor
-request yet; the lane is plain relay storage, so adding them is client work only.
+positional "newest N" would skip events. The shared engine (desktop and the browser client) speaks it too
+(`engine::historyhandoff`, DECISIONS D26): a linked browser requests and reads pages a few at a
+time, and a desktop that holds the account key serves them, posts only (media is fetched by the
+ordinary paths). Android ignores frame 36 and neither serves nor requests yet; the lane is plain
+relay storage, so adding it is client work only.
 
 ## Receiving on all devices (how it actually works today)
 

@@ -10,6 +10,19 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 ## Unreleased
 
 ### Changed
+- **A linked browser no longer downloads the whole relay mailbox to draw a feed.** A mailbox is a
+  pile of sealed envelopes named by their hash: nothing in it says which is newest, and most of it
+  is sealed under keys a device linked today never held. On a real account a new browser made
+  more than ten thousand requests and pulled over 600 MB, in no order, and could open only its
+  own account's posts. Now the browser leaves what is in the mailbox at linking where it is and
+  asks the account's other devices for the history instead (the hand-off the Apple apps already
+  use between phones): newest first, every circle in turn, friends' posts included, a few pages
+  at a time and more when the reader reaches the end of the feed. Posts that arrive after
+  linking still come from the mailbox as before. While no device has answered, the feed says it
+  is waiting for the phone and offers to read the relays instead; with no answer for fifteen
+  minutes it does that by itself. A desktop that holds the account key now answers the same
+  request a phone does. Android does not serve it yet.
+- **Keys handed over by another device no longer make a browser fetch every envelope twice.**
 - **The browser client downloads media only when it comes on screen.** It used to prefetch a week
   of full-size media and every thumbnail as soon as it was linked, like an app with a disk. Now
   a picture, video or thumbnail is fetched when the post it belongs to is scrolled to. Posts

@@ -44,6 +44,10 @@ use crate::wire;
 #[path = "relayhistory.rs"]
 pub mod relayhistory;
 
+/// The history hand-off between devices of one account (a child module for the same reason).
+#[path = "historyhandoff.rs"]
+pub mod historyhandoff;
+
 pub const DEFAULT_CIRCLE: &str = "default";
 
 /// The push Worker — also hosts the content-free moderation ledger (`/flag`).
@@ -488,6 +492,9 @@ pub struct Engine {
     mailbox_backlog: std::sync::atomic::AtomicBool,
     /// When this device last asked its account's other devices for keys (ms; 0 = never).
     key_handoff_asked: StdMutex<u64>,
+    /// One history hand-off pull / serve pass at a time (`historyhandoff`).
+    history_pulling: std::sync::atomic::AtomicBool,
+    history_serving: std::sync::atomic::AtomicBool,
     /// When each of my devices was last answered (device hex → ms).
     key_handoff_answered: StdMutex<HashMap<String, u64>>,
     /// When every relay began refusing this device its OWN account's slots, with no relay
@@ -1021,6 +1028,8 @@ impl Engine {
             revoked_told: std::sync::atomic::AtomicBool::new(false),
             mailbox_backlog: std::sync::atomic::AtomicBool::new(false),
             key_handoff_asked: StdMutex::new(0),
+            history_pulling: std::sync::atomic::AtomicBool::new(false),
+            history_serving: std::sync::atomic::AtomicBool::new(false),
             key_handoff_answered: StdMutex::new(HashMap::new()),
             self_refused: StdMutex::new((0, 0)),
             qa_call: std::sync::atomic::AtomicU8::new(0),
@@ -1149,6 +1158,8 @@ impl Engine {
             revoked_told: std::sync::atomic::AtomicBool::new(false),
             mailbox_backlog: std::sync::atomic::AtomicBool::new(false),
             key_handoff_asked: StdMutex::new(0),
+            history_pulling: std::sync::atomic::AtomicBool::new(false),
+            history_serving: std::sync::atomic::AtomicBool::new(false),
             key_handoff_answered: StdMutex::new(HashMap::new()),
             self_refused: StdMutex::new((0, 0)),
             qa_call: std::sync::atomic::AtomicU8::new(0),
@@ -2168,6 +2179,14 @@ impl Engine {
                 if beats % 30 == 1 {
                     me.request_key_handoff();
                 }
+                // The history hand-off between my devices: a linked browser reads the pages it
+                // is allowed (no request at all once it has them); a device that holds the
+                // account key answers what my other devices asked for.
+                if me.wants_history_handoff() {
+                    me.history_pull().await;
+                } else if beats % 3 == 1 {
+                    me.history_serve().await;
+                }
                 // Scheduled posts are time-sensitive — check every heartbeat so they fire punctually
                 // regardless of the adaptive back-off below (cheap: just compares due timestamps).
                 me.fire_due_scheduled();
@@ -2704,7 +2723,7 @@ impl Engine {
             // Canonical grant slot via core so it can never drift across platforms.
             let mailbox_key = format!("haven/{}", grant_slot_key(account_hex, &dev_hex));
             for t in &transports {
-                self.self_sync_put(t, &mailbox_key, &env).await;
+                let _ = self.self_sync_put(t, &mailbox_key, &env).await;
             }
         }
     }
@@ -5904,6 +5923,11 @@ impl Engine {
                 wire::DEVICE_ROSTER => me.handle_device_roster_announce(&body),
                 wire::KEY_HANDOFF_REQ => me.handle_key_handoff_request(sender_device.as_deref()),
                 wire::KEY_HANDOFF => me.handle_key_handoff(&body),
+                // "Look at the account lane now": the request itself is on the relay, and only
+                // my own devices can write there, so the frame carries no authority.
+                wire::HISTORY_NUDGE => {
+                    me.history_serve().await;
+                }
                 wire::RELAY => me.handle_relay(&body),
                 _ => log::debug!("ignoring frame type {t} (not yet handled)"),
             }
@@ -7502,6 +7526,18 @@ impl Engine {
             return;
         }
         log::info!("key hand-off: {} circle(s) gained keys", gained.len());
+        // A linked browser gets what it could not open from the history hand-off, re-sealed
+        // under a key it holds. Forgetting the mailbox marks here made it fetch every envelope
+        // of those circles a second time.
+        if self.history_replaces_backlog() {
+            self.persist();
+            self.emit_changed();
+            let me = self.clone();
+            crate::rt::spawn(async move {
+                me.history_pull().await;
+            });
+            return;
+        }
         {
             let mut st = self.dyn_state.lock();
             let before = st.seen_mailbox.len();
@@ -9394,6 +9430,8 @@ impl Engine {
     }
 
     pub async fn poll_mailbox(self: &Arc<Self>) {
+        // Before the first listing: a linked browser's backlog comes from my other devices.
+        self.ensure_history_want();
         // THE EPOCH MOVED -> re-seal my history under it (see `take_epoch_moved`). Asked directly
         // rather than inferred from a roster change, which is only a proxy and missed the rotation
         // and tree-commit cases.
@@ -9573,6 +9611,22 @@ impl Engine {
             }
             if !keys.is_empty() {
                 self.dyn_state.lock().relay_active = true;
+            }
+            // A LINKED BROWSER DOES NOT DRAIN THE BACKLOG. What is in a mailbox the first time
+            // this device lists it is history: thousands of envelopes in no order, most sealed
+            // under keys it never held. Another device of the account hands that over newest
+            // first (`historyhandoff`), so what is here now is marked seen unfetched and only
+            // what arrives from now on is read. Lanes with their own routing are left alone.
+            let backlog = keys.iter().filter(|k| historyhandoff::is_backlog_key(k)).count();
+            if got_via_http && backlog > 0 && self.history_skips_backlog(&digest_key, backlog) {
+                let skipped = backlog;
+                for k in keys.iter().filter(|k| historyhandoff::is_backlog_key(k)) {
+                    self.mark_mailbox_seen(k.clone());
+                }
+                log::info!(
+                    "mailbox circle={}: {skipped} backlog entries left for the history hand-off",
+                    &circle_id.chars().take(12).collect::<String>()
+                );
             }
             // Cap unopened keys processed per pass. A fat mailbox (matrix stub ~1k entries,
             // mostly `__live__` / history) used to GET+crypto every unseen key every poll →
@@ -13624,7 +13678,7 @@ impl Engine {
             None => base.seal(&seed_key.expect("v0 path always has a seed key")),
         };
         for t in &transports {
-            self.self_sync_put(t, &own_key, &sealed).await;
+            let _ = self.self_sync_put(t, &own_key, &sealed).await;
         }
 
         // A refusal anywhere above means a relay doesn't know this DEVICE id yet — publish the
@@ -13749,12 +13803,13 @@ impl Engine {
         }
     }
 
-    async fn self_sync_put(self: &Arc<Self>, t: &SelfSyncTransport, key: &str, data: &[u8]) {
+    /// True when the store took it.
+    async fn self_sync_put(self: &Arc<Self>, t: &SelfSyncTransport, key: &str, data: &[u8]) -> bool {
         match t {
             SelfSyncTransport::Relay(node_hex) => {
                 if let Some(h) = self.hosted_relay_for(node_hex) {
                     h.local_put(key.to_string(), data.to_vec());
-                    return;
+                    return true;
                 }
                 if let Some((bases, token)) = self.relay_http_reachable(node_hex) {
                     for base in &bases {
@@ -13765,28 +13820,33 @@ impl Engine {
                             Ok(()) => {
                                 self.mark_relay_ok(node_hex);
                                 self.note_self_accepted();
-                                return;
+                                return true;
                             }
                             Err(RelayErr::Forbidden) => {
                                 // Same-gate refusal — the iroh path would 403 too; heal, next pass.
                                 self.note_refused(node_hex, "selfsync put");
                                 self.note_self_refused();
-                                return;
+                                return false;
                             }
                             Err(RelayErr::Unreachable) => self.mark_http_url_bad(base),
                         }
                     }
                 }
                 if let Some(client) = self.relay_client_for(node_hex).await {
-                    match client.put(key.to_string(), data.to_vec()).await {
-                        Ok(()) => self.mark_relay_ok(node_hex),
-                        Err(_) => self.relay_failed(node_hex).await,
-                    }
+                    return match client.put(key.to_string(), data.to_vec()).await {
+                        Ok(()) => {
+                            self.mark_relay_ok(node_hex);
+                            true
+                        }
+                        Err(_) => {
+                            self.relay_failed(node_hex).await;
+                            false
+                        }
+                    };
                 }
+                false
             }
-            SelfSyncTransport::S3(c) => {
-                let _ = c.put(key, data).await;
-            }
+            SelfSyncTransport::S3(c) => c.put(key, data).await.is_ok(),
         }
     }
 

@@ -9,6 +9,12 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Changed
+- **The browser client downloads media only when it comes on screen.** It used to prefetch a week
+  of full-size media and every thumbnail as soon as it was linked, like an app with a disk. Now
+  a picture, video or thumbnail is fetched when the post it belongs to is scrolled to. Posts
+  themselves (text and who posted) still arrive as before, newest shown first, a page at a time.
+
 ## 2.2.2 (2026-11-21)
 
 ### Fixed

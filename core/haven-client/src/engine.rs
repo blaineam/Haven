@@ -242,6 +242,9 @@ struct DynState {
     /// Large media the person ASKED for in a browser (`media_download`): the one-time pass that lets
     /// [`Engine::web_defers_large`] fetch it. Cleared when the blob is released again.
     web_large_asked: std::collections::HashSet<String>,
+    /// Media a browser's page has put on screen ([`Engine::media_want`]). In a browser the
+    /// background sweep fetches these and nothing else.
+    web_media_wanted: std::collections::HashSet<String>,
     /// Camera-state ordering (frame 22): the stamp of the last one sent, and the newest applied
     /// from each peer — see [`Engine::camera_state_is_current`].
     camera_stamp_sent: u64,
@@ -4267,6 +4270,43 @@ impl Engine {
     /// User tapped "Download" on an evicted placeholder: clear the eviction (so the normal missing-
     /// media path may fetch it), then fetch this one ref now — relay/S3 first (idempotent), peer
     /// fallback second — like `request_missing_media`'s per-ref path. iOS `FeedStore.downloadEvicted`.
+    /// The page shows these media right now: fetch the ones not held, relay first.
+    ///
+    /// In a browser this is the ONLY thing that downloads media. The background sweep
+    /// ([`request_missing_media`](Self::request_missing_media)) prefetches a week of full-size
+    /// media and every thumbnail there is, which suits an app with a disk and makes a browser
+    /// download an account's whole recent history the moment it is linked. There the sweep is
+    /// narrowed to what was wanted here, so the page loads what the person scrolled to.
+    /// Bounded: a wanted set that grows past a few thousand entries is started over.
+    pub fn media_want(self: &Arc<Self>, circle_id: &str, references: Vec<String>) {
+        let mut fetch = Vec::new();
+        {
+            let mut st = self.dyn_state.lock();
+            if st.web_media_wanted.len() > 4000 {
+                st.web_media_wanted.clear();
+            }
+            for r in references {
+                if r.is_empty() || LocalMedia::is_synthetic(&r) {
+                    continue;
+                }
+                if st.web_media_wanted.insert(r.clone()) && !self.media.has(&r) && !st.media_unopenable.contains(&r) {
+                    fetch.push(r);
+                }
+            }
+        }
+        for r in fetch {
+            if self.evicted_contains(&r) {
+                continue; // deliberately removed: only an explicit Download brings it back
+            }
+            let (me, cid) = (self.clone(), circle_id.to_string());
+            crate::rt::spawn(async move {
+                if me.fetch_media_healing(&cid, &r).await {
+                    me.emit_changed();
+                }
+            });
+        }
+    }
+
     pub fn media_download(self: &Arc<Self>, reference: String) {
         // The person asked for this one: in a browser that is what lets a large blob through.
         self.dyn_state.lock().web_large_asked.insert(reference.clone());
@@ -10370,6 +10410,23 @@ impl Engine {
                 }
             }
         }
+        // IN A BROWSER, ONLY WHAT THE PAGE PUT ON SCREEN (`media_want`). Everything above describes
+        // an app with a disk; a browser that prefetched it downloaded an account's recent history
+        // the moment it was linked.
+        if self.is_web_device() {
+            let (missing_all, thumbs_all) = (missing.len(), thumbs.len());
+            let st = self.dyn_state.lock();
+            missing.retain(|(r, _, _)| st.web_media_wanted.contains(r));
+            thumbs.retain(|(t, _)| st.web_media_wanted.contains(t));
+            drop(st);
+            if missing_all + thumbs_all > 0 {
+                log::debug!(
+                    "media sweep (browser): {} of {missing_all} media and {} of {thumbs_all} thumbs are on screen",
+                    missing.len(),
+                    thumbs.len()
+                );
+            }
+        }
         // THROTTLE the direct (peer) fallback. A missing ref used to be re-requested from EVERY contact
         // on every 15s sweep, so a backlog of missing media flooded the network with hundreds of thousands
         // of frames per cycle, drowning real delivery (the iOS "nothing communicates" flood). Direct-request
@@ -11578,6 +11635,16 @@ impl Engine {
     /// it and reports whether the blob is now held, instead of downloading it a second time into the
     /// same file (that race is what left a satellite post's preview permanently missing on desktop).
     async fn fetch_media_healing(self: &Arc<Self>, circle_id: &str, reference: &str) -> bool {
+        // In a browser, media is fetched only when the page has it on screen (`media_want`) or the
+        // person asked for it (`media_download`). Checked HERE, at the one door every download
+        // goes through, because the sweep is not the only caller: a new post prefetched its
+        // pictures for the notification, and an announce prefetched what it named.
+        if self.is_web_device() {
+            let st = self.dyn_state.lock();
+            if !st.web_media_wanted.contains(reference) && !st.web_large_asked.contains(reference) {
+                return false;
+            }
+        }
         let _claim = loop {
             if let Some(claim) = self.media.claim_fetch(reference) {
                 break claim;

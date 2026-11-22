@@ -327,9 +327,40 @@ async function loadMedia(node, circleId, ref) {
     const post = card ? { circleId, postId: card.dataset.post, authorShort: card.dataset.author, isMe: !!card.dataset.mine } : null;
     const bytes = await invoke("media_evicted_size", { reference: ref }).catch(() => null);
     if (bytes != null) node.replaceWith(evictedPlaceholder(circleId, ref, bytes, isVideo, post));
-    else node.replaceWith(syncingPlaceholder(circleId, ref, isVideo));
+    else {
+      const box = syncingPlaceholder(circleId, ref, isVideo);
+      node.replaceWith(box);
+      // In a browser nothing is downloaded until it is on screen. The app prefetches by itself.
+      if (HOST_WEB) wantWhenVisible(box, circleId, [ref, ThumbIndex.thumbFor(ref)].filter(Boolean));
+    }
   } catch (_) {}
 }
+
+// Browser only: ask the engine for media when its placeholder actually comes into view (or close
+// to it), and not before. A placeholder existing is not enough: the feed is built for a view
+// that may not be showing, and a page of posts is built ahead of the reader. One observer for
+// all of them; an element is asked for once.
+const wantWhenVisible = (() => {
+  let observer = null;
+  const pending = new WeakMap();
+  const ask = (el) => {
+    const w = pending.get(el);
+    if (!w) return;
+    pending.delete(el);
+    invoke("media_want", { circleId: w.circleId, references: w.refs }).catch(() => {});
+  };
+  return (el, circleId, refs) => {
+    if (!refs.length) return;
+    pending.set(el, { circleId, refs });
+    if (typeof IntersectionObserver === "undefined") { ask(el); return; }
+    if (!observer) {
+      observer = new IntersectionObserver((entries) => {
+        for (const e of entries) if (e.isIntersecting) { observer.unobserve(e.target); ask(e.target); }
+      }, { rootMargin: "600px 0px" });
+    }
+    observer.observe(el);
+  };
+})();
 
 // Honest still-syncing placeholder (iOS MissingMediaPlaceholder parity): the post's blurred
 // `thumb:` companion behind the spinner when one is held (real shape and color instead of a grey

@@ -168,6 +168,22 @@ try {
   await until("the page's picture on the primary", async () => peer.lines.includes("FEED me picture from the page [media 1]"), 180000);
   step("pictures travel each way and the page draws the one it received");
 
+  // Nothing is downloaded until it is on screen. A picture is posted and then buried under more
+  // than a page of newer posts: it arrives as a post, and its bytes stay on the relay until the
+  // reader scrolls down to it.
+  peer.write("!newimg picture far down the feed\n");
+  for (let i = 1; i <= 32; i++) peer.write(`newer post ${i}\n`);
+  await until("the newest of them on the page", async () => (await feed()).some((p) => p.body === "newer post 32"), 240000);
+  const buried = (await feed()).find((p) => p.body === "picture far down the feed" && p.media?.length);
+  if (!buried) throw new Error("the buried picture post did not arrive");
+  await page.waitForTimeout(15000);   // several passes of the engine's background media sweep
+  if (await invoke(page, "media_present", { reference: buried.media[0] })) throw new Error("the page downloaded media nobody had scrolled to");
+  await until("the picture once the reader scrolls down to it", async () => {
+    await page.evaluate(() => { for (const v of document.querySelectorAll(".view")) v.scrollTop = v.scrollHeight; window.scrollTo(0, document.body.scrollHeight); });
+    return invoke(page, "media_present", { reference: buried.media[0] });
+  }, 120000);
+  step("media is fetched when the reader scrolls to it, not before");
+
   // The mailbox is the relay's, never the site's, and the browser was allowed to read it.
   const relayOrigin = new URL(relay).origin;
   const toRelay = calls.filter((c) => c.origin === relayOrigin);

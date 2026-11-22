@@ -1669,6 +1669,14 @@ pub fn media_download(engine: Eng, reference: String) {
     engine.media_download(reference);
 }
 
+/// A browser's page has put these media on screen (a rendered post, a thumbnail behind a
+/// placeholder): fetch them now. In a browser nothing else fetches media at all, so what is
+/// downloaded is what the person scrolled to. See [`Engine::media_want`](crate::engine::Engine::media_want).
+pub fn media_want(engine: Eng, circle_id: String, references: Vec<String>) {
+    let cid = if circle_id.is_empty() { DEFAULT_CIRCLE.to_string() } else { circle_id };
+    engine.media_want(&cid, references);
+}
+
 /// User tapped "Ask for it back": ask the post's AUTHOR to re-upload media a relay has swept.
 /// A relay's retention swept it, but the author almost always still has the original — this is the
 /// difference between "gone" and "gone from the relay".

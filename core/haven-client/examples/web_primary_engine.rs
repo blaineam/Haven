@@ -166,6 +166,7 @@ async fn run() -> AnyResult<()> {
     }
 
     let mut tickets = 1;
+    let mut unique_pictures: u32 = 0;
     let mut shown: HashSet<String> = HashSet::new();
     let mut known_contacts: HashSet<String> = HashSet::new();
     let mut web_allowed = false;
@@ -242,6 +243,24 @@ async fn run() -> AnyResult<()> {
                     Ok(()) => println!("PAIRED"),
                     Err(e) => println!("PAIRFAIL {e}"),
                 }
+                continue;
+            }
+            // `!newimg <caption>` attaches a picture nobody holds yet (media is addressed by its
+            // content, so the fixed PNG below is the SAME blob every time it is posted).
+            if let Some(caption) = line.strip_prefix("!newimg ") {
+                unique_pictures += 1;
+                let mut img = image::RgbImage::new(24, 24);
+                for (x, y, px) in img.enumerate_pixels_mut() {
+                    *px = image::Rgb([(x * 9) as u8, (y * 9) as u8, (unique_pictures * 37 % 251) as u8]);
+                }
+                let mut png = Vec::new();
+                image::DynamicImage::ImageRgb8(img)
+                    .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+                    .map_err(|e| format!("png: {e}"))?;
+                let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &png);
+                let reference = haven_client::commands::add_media(Eng(&engine), CIRCLE.into(), b64, false)
+                    .map_err(|e| format!("add_media: {e}"))?;
+                engine.post(CIRCLE.into(), caption.to_string(), vec![reference], None, false, None);
                 continue;
             }
             // `!img <caption>` attaches a tiny PNG; anything else is a text post.

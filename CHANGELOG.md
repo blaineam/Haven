@@ -10,6 +10,14 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 ## Unreleased
 
 ### Fixed
+- **A browser finds its relay again after the relay's address changes.** A relay behind a free
+  tunnel gets a new hostname every time it restarts. Apps ask the relay's node where it went; a
+  browser had no way to, because HTTPS to the old hostname was the only thing it could do with
+  a relay, so it sat on stale posts with every request failing until another device happened to
+  tell it. It now asks the relay's node directly (found by its id, reached through a public
+  rendezvous relay) and adopts the address the relay states for itself. It also stopped insisting
+  on the circle's own relay as the way to reach its account's other devices when that relay is
+  the thing that is down.
 - **A shared video can no longer come out many times the size it should be (Apple).** The
   encoder was given a bitrate to aim for and nothing held it to it: on six seconds of busy 4K HDR
   it produced 9.9 Mbps against its target. The result is now measured, and a file over the limit

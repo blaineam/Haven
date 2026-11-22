@@ -147,6 +147,11 @@ pub mod web {
 
     /// Same ALPN as `haven_net` — a browser node is a peer on the same protocol.
     const ALPN: &[u8] = b"haven/social/0";
+    /// The relay mailbox ALPN (`haven_net::blobstore::BLOB_ALPN`). A browser uses it for ONE
+    /// thing: asking a relay how it is reached now ([`HavenNode::relay_get`]).
+    const BLOB_ALPN: &[u8] = b"haven/blob/1";
+    /// `haven_net::blobstore::VERB_GET`.
+    const BLOB_VERB_GET: u8 = b'G';
     /// Same per-frame cap as `haven_net`.
     const MAX_PAYLOAD: usize = 256 * 1024 * 1024;
     /// Must match `haven_net::endpoint_builder` — both ends negotiate multipath or neither does.
@@ -271,6 +276,35 @@ pub mod web {
             self.gate.lock().unwrap_or_else(|e| e.into_inner()).forgive_all(crate::engine::now_ms())
         }
 
+        /// GET one small key from a relay over its blob ALPN, found through address lookup.
+        ///
+        /// A browser reaches a relay's mailbox over HTTPS and nothing else, so when that address
+        /// stops answering (a free tunnel is given a new hostname every time its relay restarts)
+        /// it had no way left to ask the relay anything, including where it had gone. The relay's
+        /// NODE is still reachable: it is found by its id and dialed through a public rendezvous
+        /// relay, like any peer. `None` on any failure, a miss, or a refusal.
+        pub async fn relay_get(&self, relay_node_hex: String, key: String) -> Result<Option<Vec<u8>>, HavenError> {
+            let id = endpoint_id(&relay_node_hex)?;
+            if id == self.endpoint.id() || key.is_empty() || key.len() > 1024 {
+                return Err(invalid("not a key to ask a relay for"));
+            }
+            // No relay hint: the one this node holds for a circle is the address that just failed.
+            let conn = self.endpoint.connect(EndpointAddr::new(id), BLOB_ALPN).await.map_err(invalid)?;
+            let (mut send, mut recv) = conn.open_bi().await.map_err(invalid)?;
+            let mut head = vec![BLOB_VERB_GET];
+            head.extend_from_slice(&(key.len() as u16).to_be_bytes());
+            head.extend_from_slice(key.as_bytes());
+            head.extend_from_slice(&0u64.to_be_bytes());
+            send.write_all(&head).await.map_err(invalid)?;
+            send.finish().map_err(invalid)?;
+            let bytes = recv.read_to_end(64 * 1024).await.map_err(invalid)?;
+            conn.close(0u32.into(), b"done");
+            if bytes.starts_with(b"ERR ") {
+                return Err(invalid(String::from_utf8_lossy(&bytes).into_owned()));
+            }
+            Ok((bytes != b"\0MISS").then_some(bytes))
+        }
+
         /// A relay's mailbox over the node's blob ALPN is not offered in a browser: the same
         /// mailbox is reached over the relay's signed HTTPS interface instead.
         pub async fn relay_client(&self, _relay_node_hex: String) -> Result<Arc<RelayClient>, HavenError> {
@@ -323,6 +357,7 @@ pub mod web {
                 Some(c) => c,
                 None => {
                     let mut addr = EndpointAddr::new(id);
+                    let hinted = via.is_none() && self.home.is_some();
                     if let Some(relay) = via.or(self.home.clone()) {
                         addr = addr.with_relay_url(relay);
                     }
@@ -331,6 +366,16 @@ pub mod web {
                     }
                     let conn = match self.endpoint.connect(addr, ALPN).await {
                         Ok(conn) => conn,
+                        // The circle's own relay was only a hint, and it may be the thing that is
+                        // down. Once more with no hint: the peer is then found by address lookup
+                        // and reached through whichever public relay it is on.
+                        Err(_) if hinted => match self.endpoint.connect(EndpointAddr::new(id), ALPN).await {
+                            Ok(conn) => conn,
+                            Err(e) => {
+                                self.gate.lock().unwrap_or_else(|e| e.into_inner()).strike(*id.as_bytes(), crate::engine::now_ms());
+                                return Err(invalid(e));
+                            }
+                        },
                         Err(e) => {
                             self.gate.lock().unwrap_or_else(|e| e.into_inner()).strike(*id.as_bytes(), crate::engine::now_ms());
                             return Err(invalid(e));

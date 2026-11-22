@@ -218,6 +218,24 @@ try {
   if (calls.some((c) => c.origin === new URL(site.url).origin)) throw new Error("the page used the web site as a mailbox");
   step(`${toRelay.length} mailbox calls crossed from the site's origin to the relay's`);
 
+  // A relay behind a free tunnel is given a new address every time it restarts, and HTTPS is the
+  // only way a browser reaches a mailbox. With every address it holds dead, the page asks the
+  // relay's NODE where it is now: found by its id, dialed through a public rendezvous relay.
+  // (Only with real rendezvous relays: a hermetic run has nothing to find the node through.)
+  if (PUBLIC) {
+    // The relay an app hosts in-process publishes no address document (the stand-alone relay
+    // does), so here the node's ANSWER is the proof: it was found, dialed and asked, and it
+    // answered this member. A node that could not be reached logs "could not be asked".
+    const answers = () => pageLog.filter((l) => /relay interface .*learned \d+ url\(s\) over iroh|relay \w+: its node publishes no address/.test(l)).length;
+    const before = answers();
+    await page.route(`${relayOrigin}/**`, (route) => route.abort());
+    await until("the relay's node to answer the page", async () => answers() > before, 420000);
+    await page.unroute(`${relayOrigin}/**`);
+    peer.write("after the relay was found again\n");
+    await until("a post made after the relay was found again", async () => (await feed()).some((p) => p.body === "after the relay was found again"), 240000);
+    step("a page whose relay stopped answering reaches the relay's node to ask where it is, and carries on");
+  }
+
   // Coming back to the site: still linked ("this is my computer"), still no relay of its own.
   await page.evaluate(() => window.__HAVEN_WEB__.flush());
   leaving = true;

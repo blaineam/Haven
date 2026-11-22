@@ -6394,6 +6394,37 @@ impl Engine {
     /// `force`: the caller WATCHED the front door fail in a way only a fresh interface can fix (a
     /// 401 — the relay's token rotated), so fetch even though we hold usable-looking URLs, and
     /// allow it once a minute instead of the speculative path's five (iOS/Android parity).
+    /// The relay's own statement of how it is reached now, asked of the relay's NODE.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn fetch_relay_interface_doc(self: &Arc<Self>, relay_hex: &str) -> Option<Vec<u8>> {
+        // relay_client_for self-guards (own node) and honors the backoff window.
+        let client = self.relay_client_for(relay_hex).await?;
+        client.get(crate::net::blobstore::RELAY_INTERFACE_KEY.to_string()).await
+    }
+
+    /// In a browser there is no mailbox client over the node transport, only this one question
+    /// (`HavenNode::relay_get`): without it a browser whose relay moved could never find it again.
+    #[cfg(target_arch = "wasm32")]
+    async fn fetch_relay_interface_doc(self: &Arc<Self>, relay_hex: &str) -> Option<Vec<u8>> {
+        if crate::netgate::offline() || relay_hex.starts_with("s3:") {
+            return None;
+        }
+        let node = self.node.lock().clone()?;
+        let short: String = relay_hex.chars().take(8).collect();
+        log::info!("relay {short}: no address of it answers; asking its node where it is now");
+        match node.relay_get(relay_hex.to_string(), crate::net::blobstore::RELAY_INTERFACE_KEY.to_string()).await {
+            Ok(Some(doc)) => Some(doc),
+            Ok(None) => {
+                log::info!("relay {short}: its node publishes no address");
+                None
+            }
+            Err(e) => {
+                log::info!("relay {short}: its node could not be asked: {e}");
+                None
+            }
+        }
+    }
+
     fn refresh_relay_interface_if_needed(self: &Arc<Self>, node_hex: &str, force: bool) {
         let lower = node_hex.to_lowercase();
         // Only when we hold no usable HTTP interface, or every URL we hold is in its bad window.
@@ -6420,12 +6451,7 @@ impl Engine {
         }
         let me = self.clone();
         crate::rt::spawn(async move {
-            // relay_client_for self-guards (own node) and honors the backoff window.
-            let Some(client) = me.relay_client_for(&lower).await else { return };
-            let Some(data) = client.get(crate::net::blobstore::RELAY_INTERFACE_KEY.to_string()).await
-            else {
-                return;
-            };
+            let Some(data) = me.fetch_relay_interface_doc(&lower).await else { return };
             let Ok(v) = serde_json::from_slice::<serde_json::Value>(&data) else { return };
             // A relay may only describe ITSELF — the key is served from its own store, but never
             // adopt a doc whose node field disagrees with who we asked.
@@ -9621,6 +9647,10 @@ impl Engine {
                 }
             }
             if !got_via_http {
+                // A browser has no mailbox client over the node transport: every HTTPS address it
+                // holds for this relay failed, so ask the relay's node where it is now.
+                #[cfg(target_arch = "wasm32")]
+                self.refresh_relay_interface_if_needed(&node_hex, false);
                 let Some(client) = self.relay_client_for(&node_hex).await else { continue };
                 // list() now surfaces transport errors (was unwrap_or_default, which hid a dead
                 // dial as an empty mailbox); a failed iroh list here just means try the next relay.

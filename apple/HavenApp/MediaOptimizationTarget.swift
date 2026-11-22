@@ -6,7 +6,7 @@ import ImageIO
 /// What "already optimized" looks like, and how to tell by LOOKING at a file.
 ///
 /// Today's encoder rewrite gave the posting path an explicit target (see `VideoEncoder`): 1080p
-/// H.264 @ 4.5 Mbps, stills at 1600px JPEG q0.62, audio AAC 96k. Everything shared before that —
+/// H.264 @ 2.4 Mbps, stills at 1600px JPEG q0.62, audio AAC 96k. Everything shared before that —
 /// and anything shared at any time with auto-optimize OFF — went out at whatever the camera or the
 /// sender's file happened to be. A real device is sitting on 53 items / 1.3 GB with single videos at
 /// 320 MB, all from the old path. This is the predicate the "re-optimize" run uses to find them.
@@ -56,7 +56,8 @@ enum MediaOptimizationTarget {
     // the probe's threshold sat at the nominal rate, our OWN freshly-encoded output would come back
     // reading "above target" and the button would offer the same clip forever, re-encoding it on
     // every run. The headroom below is what makes a second pass a no-op, and it is measured, not
-    // guessed: real encoder output lands around 4.5–5.0 Mbps overall against a 6.0 Mbps trigger.
+    // guessed: at the earlier 4.5 Mbps target real encoder output landed around 4.5–5.0 Mbps overall
+    // against a 6.0 Mbps trigger, and the same 30% is kept at today's 2.4 Mbps (a 3.3 Mbps trigger).
     static let videoBitrateCeiling = Int(Double(VideoEncoderTargets.videoBitrate + VideoEncoderTargets.audioBitrate) * 1.30)
     /// Same idea for stills: JPEG q0.62 at 1600px measures well under 0.40 bytes per pixel.
     static let imageBytesPerPixelCeiling: Double = 0.40

@@ -10,12 +10,25 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 ## Unreleased
 
 ### Fixed
+- **A shared video can no longer come out many times the size it should be (Apple).** The
+  encoder was given a bitrate to aim for and nothing held it to it: on six seconds of busy 4K HDR
+  it produced 9.9 Mbps against its target. The result is now measured, and a file over the limit
+  is encoded again with the aim lowered by as much as it overshot, at 720p if it has to be.
+- **HDR video is tone-mapped to SDR before it is shared.** An iPhone records HDR by default, and
+  those values went into 8-bit H.264 with no colour information, which plays washed out or
+  blown out on Android and in a browser. Apple now converts every frame to Rec. 709 and labels
+  the file; Android asks its decoder to do the same (Android 12 and later) and labels the file.
 - **Browser client: cover art on a post's song shows.** The page's content policy allowed images
   only from the page itself, so every song's artwork was refused. Artwork is now allowed from the
   one image host the song catalogue serves it from, as the apps already load it. Nothing else
   changes: no referrer is sent, and scripts, frames and other image hosts stay refused.
 
 ### Changed
+- **Shared video is smaller: 1080p SDR H.264 at 2.4 Mbps, down from 4.5.** The longest video
+  allowed (15 minutes) is now under 300 MB with its sound, where it was about 520 MB, and a few
+  seconds is a megabyte or two. Same on Apple, Android and desktop. Videos shared at the old rate
+  now count as above target for "Re-optimize media I already shared", so they can be shrunk from
+  the phone.
 - **A linked browser no longer downloads the whole relay mailbox to draw a feed.** A mailbox is a
   pile of sealed envelopes named by their hash: nothing in it says which is newest, and most of it
   is sealed under keys a device linked today never held. On a real account a new browser made

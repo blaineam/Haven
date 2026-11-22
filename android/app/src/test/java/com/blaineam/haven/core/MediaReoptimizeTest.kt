@@ -69,7 +69,7 @@ class MediaReoptimizeTest {
         // 1920x1088 is what several encoders emit for "1080p" (macroblock rounding). The 2% slack
         // exists so our own output is not perpetually flagged on a rounding artifact.
         val seconds = 60.0
-        val bytes = (4_500_000L * seconds / 8).toLong()
+        val bytes = (MediaTargets.VIDEO_BITRATE.toLong() * seconds / 8).toLong()
         val s = MediaOptimizationTarget.judgeVideo(bytes, 1920, 1088, "video/avc", seconds)!!
         assertFalse("1088px is inside the rounding slack: ${s.aboveTargetReason}", s.aboveTarget)
     }

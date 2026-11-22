@@ -1500,7 +1500,7 @@ private fun transcodeVideo(context: Context, uri: Uri, maxBytes: Int): ByteArray
         // 1080p clip came out at the maximum. That is the Android half of the 320 MB-video problem.
         //
         // Still never INFLATE a source that was already leaner than the target — re-encoding a
-        // 2 Mbps clip up to 4.5 would spend bytes to lose quality.
+        // 1 Mbps clip up to the target would spend bytes to lose quality.
         val srcBitrate = if (srcFormat.containsKey(MediaFormat.KEY_BIT_RATE)) srcFormat.getInteger(MediaFormat.KEY_BIT_RATE) else Int.MAX_VALUE
         val bitrate = MediaTargets.VIDEO_BITRATE.coerceAtMost(srcBitrate)
         val fps = if (srcFormat.containsKey(MediaFormat.KEY_FRAME_RATE))
@@ -1512,14 +1512,32 @@ private fun transcodeVideo(context: Context, uri: Uri, maxBytes: Int): ByteArray
             setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
             setInteger(MediaFormat.KEY_FRAME_RATE, fps)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, MediaTargets.VIDEO_I_FRAME_INTERVAL_SEC)
+            // Say what the pixels are: SDR, Rec. 709 (see the tone-map request below).
+            setInteger(MediaFormat.KEY_COLOR_STANDARD, MediaFormat.COLOR_STANDARD_BT709)
+            setInteger(MediaFormat.KEY_COLOR_TRANSFER, MediaFormat.COLOR_TRANSFER_SDR_VIDEO)
+            setInteger(MediaFormat.KEY_COLOR_RANGE, MediaFormat.COLOR_RANGE_LIMITED)
         }
         encoder = MediaCodec.createEncoderByType("video/avc")
         encoder.configure(outFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         inputSurface = encoder.createInputSurface()
         encoder.start()
 
+        // SDR, ALWAYS. A phone camera may record HDR (HLG / HDR10 / Dolby Vision). Those values
+        // pushed into 8-bit H.264 play washed out everywhere, so the DECODER is asked to tone-map
+        // down to SDR (Android 12+; older releases ignore the key and have few HDR cameras).
+        val srcTransfer = if (srcFormat.containsKey(MediaFormat.KEY_COLOR_TRANSFER)) srcFormat.getInteger(MediaFormat.KEY_COLOR_TRANSFER) else 0
+        val srcIsHdr = srcTransfer == MediaFormat.COLOR_TRANSFER_HLG || srcTransfer == MediaFormat.COLOR_TRANSFER_ST2084
+        if (android.os.Build.VERSION.SDK_INT >= 31) {
+            srcFormat.setInteger(MediaFormat.KEY_COLOR_TRANSFER_REQUEST, MediaFormat.COLOR_TRANSFER_SDR_VIDEO)
+        }
         decoder = MediaCodec.createDecoderByType(srcMime)
         decoder.configure(srcFormat, inputSurface, null, 0)
+        if (srcIsHdr) {
+            // What the decoder agreed to. A device that cannot tone-map still produces a playable
+            // clip, with flatter colour; that beats falling back to the multi-hundred-MB original.
+            val granted = runCatching { decoder.inputFormat.getInteger(MediaFormat.KEY_COLOR_TRANSFER_REQUEST) }.getOrDefault(0)
+            android.util.Log.i("LocalMedia", "video transcode: HDR source, tone-map to SDR ${if (granted == MediaFormat.COLOR_TRANSFER_SDR_VIDEO) "granted" else "NOT available on this device"}")
+        }
         decoder.start()
         extractor.selectTrack(videoTrack)
 

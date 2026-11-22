@@ -2670,7 +2670,8 @@ function secretBubble(body, isMe) {
 const MEDIA_TARGETS = {
   // Video: long edge 1920 (1080p), explicit bitrates. Container/codec diverge — see above.
   VIDEO_LONG_EDGE: 1920,
-  VIDEO_BITRATE_BPS: 4_500_000,
+  // 2.4 Mbps: 15 minutes (the cap below) is about 285 MB with its audio. Apple/Android parity.
+  VIDEO_BITRATE_BPS: 2_400_000,
   VIDEO_AUDIO_BITRATE_BPS: 128_000,
   // Stills: longest edge 1600, JPEG quality 0.62.
   STILL_LONG_EDGE: 1600,

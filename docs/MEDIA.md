@@ -34,7 +34,9 @@ Each platform keeps **one** constants block, so the three can be diffed at a gla
 | Target | Value | Apple | Android | Desktop |
 | --- | --- | --- | --- | --- |
 | Video long edge | 1920 | ✅ | ✅ | ✅ |
-| Video bitrate | **4.5 Mbps, explicit** | ✅ | ✅ | ✅ |
+| Video bitrate | **2.4 Mbps, explicit** (15 min ≈ 285 MB with audio; 300 MB is the ceiling the owner set) | ✅ | ✅ | ✅ |
+| Dynamic range | **SDR, Rec. 709** (HDR sources are tone-mapped) | ✅ composition + tags | ✅ decoder request, Android 12+ | ✅ canvas is SDR |
+| Size guarantee | measured after encoding; over 2.65 Mbps overall is encoded again, lower | ✅ | ❌ aims only | ❌ aims only |
 | Video codec | H.264 | ✅ | ✅ | ❌ VP8/9 (WebM) |
 | Faststart (`moov` first) | required | ✅ | ✅ (muxer already does it) | ❌ n/a to WebM |
 | Rotation | upright on arrival | ✅ baked into pixels | ✅ MP4 display matrix | decoder-handled |
@@ -76,7 +78,7 @@ Android, `VideoTranscodeTargetTest` on a 1080p fixture: **5.80 MB / 12,170 kbps 
 
 ### Never inflate
 
-`VIDEO_BITRATE` is a target, not a ceiling on the source. A clip already leaner than 4.5 Mbps — a
+`VIDEO_BITRATE` is a target, not a ceiling on the source. A clip already leaner than 2.4 Mbps — a
 screen recording, something re-shared, anything a sender already compressed — would otherwise be
 re-encoded *up* to the target, paying bytes **and** a generation of quality. Android compares the
 transcoded output against the source and falls through to the lossless strip-remux when the
@@ -114,9 +116,9 @@ Avatars: 192px JPEG q0.70 (rides the signed profile card) — Apple `Profile.ava
 
 | | optimize ON | optimize OFF |
 | --- | --- | --- |
-| **Apple** (`MediaStore.addVideo` → `VideoEncoder.encode`) | ≤1080p H.264 @ 4.5 Mbps + AAC 128k, faststart, rotation baked | passthrough remux (same codec/quality), faststart |
-| **Android** (`readVideoBytes` → `transcodeVideo`) | ≤1080p H.264 @ 4.5 Mbps + copied audio, faststart, rotation as display matrix | passthrough remux (same codec/quality) |
-| **Desktop** (`handleFiles` → `optimizeVideoStrippingMetadata`) | ≤1080p @ 4.5 Mbps via canvas+MediaRecorder (VP8/9 WebM) | (same — no "off") |
+| **Apple** (`MediaStore.addVideo` → `VideoEncoder.encode`) | ≤1080p SDR H.264 @ 2.4 Mbps + AAC 128k, faststart, rotation baked | passthrough remux (same codec/quality), faststart |
+| **Android** (`readVideoBytes` → `transcodeVideo`) | ≤1080p SDR H.264 @ 2.4 Mbps + copied audio, faststart, rotation as display matrix | passthrough remux (same codec/quality) |
+| **Desktop** (`handleFiles` → `optimizeVideoStrippingMetadata`) | ≤1080p @ 2.4 Mbps via canvas+MediaRecorder (VP8/9 WebM) | (same — no "off") |
 
 Apple's ladder falls back preset-export → passthrough remux if the bitrate encode fails, so a clip
 it cannot handle is still shareable rather than lost. Android's falls back to the strip-remux, which
@@ -156,7 +158,7 @@ Metadata handling (GPS) is **always** applied, in every mode:
   to the encoder's configured (downscaled) size via the BufferQueue — no GL. Audio track copied through
   verbatim.
 - Target size: fit within 1920×1080 (long×short edge), preserve aspect, never upscale, even dims.
-- Target bitrate: an **explicit** `MediaTargets.VIDEO_BITRATE` (4.5 Mbps), never above the source's
+- Target bitrate: an **explicit** `MediaTargets.VIDEO_BITRATE` (2.4 Mbps), never above the source's
   declared bitrate, and never producing output larger than the source (see "Never inflate" above).
 - Faststart: `Mp4Faststart.relocate` moves `moov` ahead of `mdat` and fixes the `stco`/`co64` chunk
   offsets. Measured on API 35, `MediaMuxer` already emits `ftyp moov free mdat`, so this is a no-op

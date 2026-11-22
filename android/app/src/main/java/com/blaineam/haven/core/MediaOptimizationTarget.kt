@@ -41,7 +41,7 @@ import java.io.File
  * - **The video bitrate ceiling still budgets [MediaTargets.VIDEO_AUDIO_BITRATE]** even though the
  *   Android transcode COPIES the source audio track through rather than re-encoding it (see the
  *   divergence note in [MediaTargets]). Passthrough camera AAC is ordinarily 128–256 kbps, which sits
- *   comfortably inside the 1.5 Mbps of headroom the 1.30 factor leaves above the 4.5 Mbps video
+ *   inside the 0.75 Mbps of headroom the 1.30 factor leaves above the 2.4 Mbps video
  *   target. Keeping the arithmetic identical to Apple's matters more than shaving it.
  */
 object MediaOptimizationTarget {
@@ -51,8 +51,8 @@ object MediaOptimizationTarget {
     /**
      * Overall bits/second above which a video is worth rewriting. 30% of headroom over the nominal
      * video+audio target, for the reason in the class doc: our own output must land UNDER this or
-     * the scan never converges. Measured on Apple against real encoder output: 4.5–5.0 Mbps out
-     * against this 6.0 Mbps trigger.
+     * the scan never converges. Measured on Apple at the earlier 4.5 Mbps target: 4.5–5.0 Mbps out
+     * against a 6.0 Mbps trigger; the same 30% is kept at 2.4 Mbps (a 3.3 Mbps trigger).
      */
     val videoBitrateCeiling: Int =
         ((MediaTargets.VIDEO_BITRATE + MediaTargets.VIDEO_AUDIO_BITRATE) * 1.30).toInt()

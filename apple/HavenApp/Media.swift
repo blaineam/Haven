@@ -1067,7 +1067,7 @@ final class MediaStore: ObservableObject {
         // fallbacks for anything AVAssetWriter can't handle rather than the normal route.
         ok = await VideoEncoder.encode(src, to: scratch)
         if ok {
-            HavenLog.sync("video add: encoded 1080p H.264 @ \(VideoEncoder.videoBitrate / 1_000_000)Mbps")
+            HavenLog.sync("video add: encoded 1080p SDR H.264 @ \(VideoEncoder.videoBitrate / 1000) kbps")
         } else {
             try? FileManager.default.removeItem(at: scratch)
             HavenLog.sync("video add: bitrate encode FAILED — falling back to the preset export")

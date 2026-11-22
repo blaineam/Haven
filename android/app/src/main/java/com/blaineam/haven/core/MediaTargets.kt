@@ -48,11 +48,12 @@ object MediaTargets {
      * The whole point of this file: an EXPLICIT rate, not a quality preset and not a
      * pixels-times-a-constant formula that pins itself to its own ceiling.
      *
-     * 1080p at 4.5 Mbps is visually fine in a phone feed and roughly a third of what the old path
-     * emitted. Measured on Apple against real library videos: 305.7 MB → 37.7, 191.5 → 47.0,
-     * 179.9 → 22.4.
+     * 1080p SDR at 2.4 Mbps. With the audio that is about 2.5 Mbps overall, so the longest clip
+     * allowed (15 minutes) comes to roughly 285 MB, under the 300 MB the owner set as the most a
+     * video may cost a circle. It was 4.5 Mbps (520 MB for the same clip) until 2.2.2; before
+     * that, the old path's 8 Mbps.
      */
-    const val VIDEO_BITRATE = 4_500_000
+    const val VIDEO_BITRATE = 2_400_000
 
     /** Never inflate a source that was already leaner than the target — see `transcodeVideo`. */
     const val VIDEO_I_FRAME_INTERVAL_SEC = 2

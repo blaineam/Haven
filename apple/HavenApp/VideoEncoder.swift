@@ -1,5 +1,6 @@
 import AVFoundation
 import CoreImage
+import VideoToolbox
 
 /// Re-encode a video to a network-friendly H.264 MP4 at an EXPLICIT bitrate.
 ///
@@ -13,14 +14,50 @@ import CoreImage
 /// a bitrate, so targeting a size means driving `AVAssetWriter` directly.
 enum VideoEncoder {
 
-    /// 1080p at this rate is visually fine in a phone feed and roughly a third of a preset export.
+    /// See `VideoEncoderTargets.videoBitrate` for the size this buys.
     static let videoBitrate = VideoEncoderTargets.videoBitrate
     /// Transparent for speech, and usually far leaner than the camera's original track.
     static let audioBitrate = VideoEncoderTargets.audioBitrate
 
     /// Encode `src` to `dst`. Returns false on any failure — callers must keep a fallback path, so a
     /// video this cannot handle is still shareable rather than lost.
+    ///
+    /// THE SIZE IS A PROMISE, NOT A REQUEST. An encoder treats its bitrate as something to aim
+    /// for, and on busy footage it misses by a wide margin (measured: 9.9 Mbps against 2.4 on six
+    /// seconds of moving 4K HDR; 6.2 with the rate limit set). So the result is MEASURED, and a
+    /// file over `VideoEncoderTargets.overallCeiling` is encoded again with the aim lowered by as
+    /// much as it overshot, and at 720p if that is still not enough. What comes back is under the
+    /// ceiling, or is the smallest of the attempts.
     static func encode(_ src: URL, to dst: URL, maxDimension: CGFloat = 1920) async -> Bool {
+        let seconds = (try? await AVURLAsset(url: src).load(.duration).seconds) ?? 0
+        func overall(_ url: URL) -> Int {
+            let bytes = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            return seconds > 0 ? Int(Double(bytes) * 8 / seconds) : 0
+        }
+        guard await encodeOnce(src, to: dst, maxDimension: maxDimension, bitrate: videoBitrate) else { return false }
+        var aim = videoBitrate
+        var dimension = maxDimension
+        for attempt in 1...3 {
+            let got = overall(dst)
+            guard got > VideoEncoderTargets.overallCeiling else { break }
+            // Lower the aim in proportion to the miss, with a little to spare; the last attempt
+            // also gives up resolution, which is what a clip this busy actually needs.
+            aim = max(300_000, Int(Double(aim) * Double(videoBitrate) / Double(got) * 0.9))
+            if attempt == 3 { dimension = min(dimension, 1280) }
+            let retry = dst.deletingLastPathComponent().appendingPathComponent("retry-\(UUID().uuidString).mp4")
+            defer { try? FileManager.default.removeItem(at: retry) }
+            let poster = lastPoster
+            guard await encodeOnce(src, to: retry, maxDimension: dimension, bitrate: aim), overall(retry) < got else {
+                lastPoster = poster
+                break
+            }
+            try? FileManager.default.removeItem(at: dst)
+            guard (try? FileManager.default.moveItem(at: retry, to: dst)) != nil else { return false }
+        }
+        return true
+    }
+
+    private static func encodeOnce(_ src: URL, to dst: URL, maxDimension: CGFloat, bitrate: Int) async -> Bool {
         try? FileManager.default.removeItem(at: dst)
         let asset = AVURLAsset(url: src)
         guard let vTrack = try? await asset.loadTracks(withMediaType: .video).first,
@@ -49,6 +86,14 @@ enum VideoEncoder {
             request.finish(with: img.transformed(by: CGAffineTransform(scaleX: s, y: s)), context: nil)
         }
         comp.renderSize = CGSize(width: outW, height: outH)
+        // SDR, ALWAYS. An iPhone records HDR (HLG / Dolby Vision) by default. Left alone, the
+        // composition keeps the source's colour space, and those values squeezed into 8-bit H.264
+        // with no colour tags play washed out or blown out on Android and in a browser. Naming
+        // Rec. 709 here makes AVFoundation tone-map every frame down to SDR before it is encoded;
+        // an SDR source passes through unchanged.
+        comp.colorPrimaries = AVVideoColorPrimaries_ITU_R_709_2
+        comp.colorTransferFunction = AVVideoTransferFunction_ITU_R_709_2
+        comp.colorYCbCrMatrix = AVVideoYCbCrMatrix_ITU_R_709_2
 
         let vTracks = (try? await asset.loadTracks(withMediaType: .video)) ?? []
         guard !vTracks.isEmpty else { return false }
@@ -64,8 +109,17 @@ enum VideoEncoder {
             AVVideoCodecKey: AVVideoCodecType.h264,          // H.264, not HEVC — Android decodes it
             AVVideoWidthKey: outW,
             AVVideoHeightKey: outH,
+            // Say what the pixels are, so no player has to guess (see the composition above).
+            AVVideoColorPropertiesKey: [
+                AVVideoColorPrimariesKey: AVVideoColorPrimaries_ITU_R_709_2,
+                AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_709_2,
+                AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2,
+            ],
             AVVideoCompressionPropertiesKey: [
-                AVVideoAverageBitRateKey: videoBitrate,       // the whole point: an explicit rate
+                AVVideoAverageBitRateKey: bitrate,            // the whole point: an explicit rate
+                // A limit on what any few seconds may spend. It helps, and it is not enough by
+                // itself (see `encode`): the result is measured afterwards.
+                kVTCompressionPropertyKey_DataRateLimits as String: VideoEncoderTargets.dataRateLimits(for: bitrate),
                 AVVideoMaxKeyFrameIntervalKey: 60,
                 AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
                 AVVideoAllowFrameReorderingKey: true,

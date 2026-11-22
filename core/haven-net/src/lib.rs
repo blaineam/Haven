@@ -21,6 +21,7 @@ use iroh::{
 
 pub mod blobstore;
 mod dircache;
+mod birthtime;
 pub mod cfquicktunnel;
 pub mod derp;
 pub mod accountdiscovery;

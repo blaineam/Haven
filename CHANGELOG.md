@@ -23,6 +23,16 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   minutes it does that by itself. A desktop that holds the account key now answers the same
   request a phone does. Android does not serve it yet.
 - **Keys handed over by another device no longer make a browser fetch every envelope twice.**
+
+### Added
+- **Relay: a mailbox can be listed newest arrival first (`GET /n/<prefix>`).** A mailbox entry is
+  named by a hash, so a plain listing says nothing about what is recent. The new listing is the
+  same keys, behind the same membership check, in the order they reached the relay. The order
+  comes from the creation time the filesystem already keeps for each file: the relay stores
+  nothing new and still writes no logs. A browser asks for it and reads the newest 150 entries
+  of each circle at linking and 150 more each time the reader reaches the end of the feed, so
+  recent posts show with no other device awake. Relays that predate it, or whose filesystem
+  keeps no creation times, are listed the old way.
 - **The browser client downloads media only when it comes on screen.** It used to prefetch a week
   of full-size media and every thumbnail as soon as it was linked, like an app with a disk. Now
   a picture, video or thumbnail is fetched when the post it belongs to is scrolled to. Posts

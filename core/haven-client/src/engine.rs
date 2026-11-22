@@ -495,6 +495,9 @@ pub struct Engine {
     /// One history hand-off pull / serve pass at a time (`historyhandoff`).
     history_pulling: std::sync::atomic::AtomicBool,
     history_serving: std::sync::atomic::AtomicBool,
+    /// Relay URLs that could not list newest first (an older relay, or a host whose filesystem
+    /// keeps no creation times): not asked again this session.
+    no_newest_listing: StdMutex<std::collections::HashSet<String>>,
     /// When each of my devices was last answered (device hex → ms).
     key_handoff_answered: StdMutex<HashMap<String, u64>>,
     /// When every relay began refusing this device its OWN account's slots, with no relay
@@ -1030,6 +1033,7 @@ impl Engine {
             key_handoff_asked: StdMutex::new(0),
             history_pulling: std::sync::atomic::AtomicBool::new(false),
             history_serving: std::sync::atomic::AtomicBool::new(false),
+            no_newest_listing: StdMutex::new(Default::default()),
             key_handoff_answered: StdMutex::new(HashMap::new()),
             self_refused: StdMutex::new((0, 0)),
             qa_call: std::sync::atomic::AtomicU8::new(0),
@@ -1160,6 +1164,7 @@ impl Engine {
             key_handoff_asked: StdMutex::new(0),
             history_pulling: std::sync::atomic::AtomicBool::new(false),
             history_serving: std::sync::atomic::AtomicBool::new(false),
+            no_newest_listing: StdMutex::new(Default::default()),
             key_handoff_answered: StdMutex::new(HashMap::new()),
             self_refused: StdMutex::new((0, 0)),
             qa_call: std::sync::atomic::AtomicU8::new(0),
@@ -9555,6 +9560,10 @@ impl Engine {
             // no deferrals — otherwise a 204 next poll would skip keys we listed but never fetched.
             let digest_key = format!("{node_hex}|{circle_id}");
             let mut fresh_digest: Option<String> = None;
+            // A browser asks for the listing newest arrival first (`GET /n/`), so what it reads
+            // first is what is recent. A relay that cannot say so is listed the plain way.
+            let mut newest_first = false;
+            let ask_newest = self.is_web_device();
             if let Some((bases, token)) = self.relay_http_reachable(&node_hex) {
                 let cached =
                     self.dyn_state.lock().mailbox_list_digests.get(&digest_key).cloned();
@@ -9562,7 +9571,23 @@ impl Engine {
                     if self.http_url_bad(base) {
                         continue;
                     }
-                    match self.http_list_delta(base, &token, &prefix, cached.as_deref()).await {
+                    let mut listed = None;
+                    if ask_newest && !self.no_newest_listing.lock().contains(base) {
+                        match self.http_list_newest(base, &token, &prefix, cached.as_deref()).await {
+                            Some(answer) => {
+                                newest_first = true;
+                                listed = Some(Ok(answer));
+                            }
+                            None => {
+                                self.no_newest_listing.lock().insert(base.clone());
+                            }
+                        }
+                    }
+                    let listed = match listed {
+                        Some(l) => l,
+                        None => self.http_list_delta(base, &token, &prefix, cached.as_deref()).await,
+                    };
+                    match listed {
                         // 204: byte-identical key set — nothing to walk, nothing to GET.
                         Ok((None, _)) => {
                             got_via_http = true;
@@ -9617,11 +9642,27 @@ impl Engine {
             // under keys it never held. Another device of the account hands that over newest
             // first (`historyhandoff`), so what is here now is marked seen unfetched and only
             // what arrives from now on is read. Lanes with their own routing are left alone.
-            let backlog = keys.iter().filter(|k| historyhandoff::is_backlog_key(k)).count();
-            if got_via_http && backlog > 0 && self.history_skips_backlog(&digest_key, backlog) {
-                let skipped = backlog;
-                for k in keys.iter().filter(|k| historyhandoff::is_backlog_key(k)) {
-                    self.mark_mailbox_seen(k.clone());
+            //
+            // Where the relay lists newest first, the newest of the backlog IS read (a browser
+            // then shows recent posts with no other device awake), and the next stretch is
+            // opened each time the reader reaches the end of the feed.
+            let backlog: Vec<String> = keys.iter().filter(|k| historyhandoff::is_backlog_key(k)).cloned().collect();
+            let plan = if got_via_http && !backlog.is_empty() {
+                self.history_plan_backlog(&digest_key, &backlog, newest_first)
+            } else {
+                historyhandoff::BacklogPlan::default()
+            };
+            if !plan.reopen.is_empty() {
+                let mut st = self.dyn_state.lock();
+                for k in &plan.reopen {
+                    st.seen_mailbox.remove(k);
+                }
+                st.seen_journal.note_removed();
+            }
+            if !plan.skip.is_empty() {
+                let skipped = plan.skip.len();
+                for k in plan.skip {
+                    self.mark_mailbox_seen(k);
                 }
                 log::info!(
                     "mailbox circle={}: {skipped} backlog entries left for the history hand-off",
@@ -10803,6 +10844,44 @@ impl Engine {
     /// an UNCHANGED key set comes back as a bodiless 204 (`keys == None`) instead of the same list
     /// again. A 200 carries the fresh keys plus the digest to echo next time. A relay that doesn't
     /// speak the header simply never answers 204 and never hands us a digest — today's behavior.
+    /// LIST newest arrival first (`GET /n/<prefix>`, `haven_net::httprelay`). `None` when this
+    /// relay cannot (it predates the route, or keeps no creation times) or could not be asked:
+    /// the caller then lists the plain way, which also reports what actually went wrong.
+    async fn http_list_newest(
+        self: &Arc<Self>,
+        base: &str,
+        token: &str,
+        prefix: &str,
+        digest: Option<&str>,
+    ) -> Option<(Option<Vec<String>>, Option<String>)> {
+        if crate::netgate::relay_http_offline_for(base) {
+            return None;
+        }
+        let auth = self.http_auth(token, "GET", prefix, b"")?;
+        let url = Self::http_list_url(base, prefix).replacen("/l/", "/n/", 1);
+        let mut req = self.http.get(url).header("authorization", auth).timeout(HTTP_LIST_TIMEOUT);
+        if let Some(d) = digest.filter(|d| !d.is_empty()) {
+            req = req.header(crate::net::httprelay::LIST_DIGEST_HEADER, d);
+        }
+        let resp = req.send().await.ok()?;
+        let resp_digest = resp
+            .headers()
+            .get(crate::net::httprelay::LIST_DIGEST_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        // An older relay hands an unknown path to its status page or its web client, which can
+        // answer 200 with a page. Only a real listing carries the digest.
+        resp_digest.as_ref()?;
+        match resp.status().as_u16() {
+            204 => Some((None, resp_digest)),
+            200 => {
+                let text = resp.text().await.ok()?;
+                Some((Some(text.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect()), resp_digest))
+            }
+            _ => None,
+        }
+    }
+
     async fn http_list_delta(
         self: &Arc<Self>,
         base: &str,

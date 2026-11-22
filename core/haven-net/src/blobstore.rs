@@ -1305,6 +1305,13 @@ pub(crate) fn local_list(root: &Path, prefix: &str) -> Vec<String> {
     out
 }
 
+/// [`local_list`] with each key's creation time (see `birthtime`), for the newest-first listing.
+/// `None` when the platform or filesystem keeps no creation time for one of them: a listing that
+/// is only partly ordered would be worse than one that says it cannot be.
+pub(crate) fn local_list_births(root: &Path, keys: &[String]) -> Option<Vec<u128>> {
+    keys.iter().map(|k| crate::birthtime::birth_nanos(&safe_path(root, k).ok()?)).collect()
+}
+
 /// Like [`local_list`] but with each key's idle age in seconds — the AGES verb / age-aware
 /// mesh sync read their inventory through this.
 pub(crate) fn local_list_ages(root: &Path, prefix: &str) -> Vec<(String, u64)> {

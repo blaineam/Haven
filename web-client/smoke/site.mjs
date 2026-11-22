@@ -76,7 +76,7 @@ try {
       });
       page.on("response", (r) => {
         const u = new URL(r.url());
-        if (/^\/(k|l|t)\//.test(u.pathname)) calls.push({ origin: u.origin, method: r.request().method(), status: r.status(), path: decodeURIComponent(u.pathname) });
+        if (/^\/(k|l|n|t)\//.test(u.pathname)) calls.push({ origin: u.origin, method: r.request().method(), status: r.status(), path: decodeURIComponent(u.pathname) });
       });
     },
   });
@@ -157,7 +157,8 @@ try {
     const h = await invoke(page, "history_status");
     return h.received >= 3 && ["receiving", "paused", "done"].includes(h.state) ? h : null;
   }, 240000);
-  if (!(handed.skipped >= 3)) throw new Error(`the mailbox as it stood at linking was not left alone: ${JSON.stringify(handed)}`);
+  // The relay here lists newest arrival first, so the page reads what is recent from it directly.
+  if (!calls.some((c) => c.path.startsWith("/n/haven/mailbox/") && c.status === 200)) throw new Error(`the mailbox was not listed newest first: ${JSON.stringify(calls.filter((c) => /^\/[ln]\//.test(c.path)).slice(0, 6))}`);
   const backlogGets = calls.filter((c) => c.method === "GET" && c.path.startsWith("/k/haven/mailbox/") && !c.path.includes("/__"));
   console.log(`  (mailbox envelopes fetched so far: ${backlogGets.length}; hand-off: ${JSON.stringify(handed)})`);
   step("history from before the link is handed over by the account's other device, not dug out of the mailbox");

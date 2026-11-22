@@ -37,6 +37,9 @@ pub const GIVE_UP_WAITING_MS: u64 = 15 * 60 * 1000;
 /// A mailbox listed for the first time this soon after the ask is the backlog the hand-off
 /// replaces, and is skipped. Later listings are new posts.
 pub const BASELINE_WINDOW_MS: u64 = 10 * 60 * 1000;
+/// Backlog entries read from a relay that lists newest first: at linking, and again each time
+/// the reader reaches the end of the feed.
+pub const RELAY_STRETCH: usize = 150;
 const RENUDGE_MS: u64 = 10 * 60 * 1000;
 /// Pages a source uploads per pass, so one heartbeat never turns into the whole export.
 const SERVE_PAGES_PER_PASS: u32 = 12;
@@ -204,6 +207,25 @@ pub struct Want {
     /// How many backlog envelopes were left on the relays unfetched.
     #[serde(default)]
     pub skipped: u64,
+    /// Per `relay|circle` mailbox on a relay that lists newest first: the oldest backlog entry
+    /// opened so far. Everything the relay lists after it is still unread there.
+    #[serde(default)]
+    pub floors: HashMap<String, String>,
+    /// Mailboxes whose next stretch the reader has asked for.
+    #[serde(default)]
+    pub more_pairs: Vec<String>,
+    /// Mailboxes that have been planned from a newest-first listing.
+    #[serde(default)]
+    pub ordered: Vec<String>,
+}
+
+/// What a mailbox pass does with the backlog it was just shown.
+#[derive(Debug, Default, PartialEq)]
+pub struct BacklogPlan {
+    /// Marked seen without being fetched.
+    pub skip: Vec<String>,
+    /// Skipped earlier, to be read now.
+    pub reopen: Vec<String>,
 }
 
 impl Want {
@@ -217,6 +239,57 @@ impl Want {
             && now.saturating_sub(self.at) < BASELINE_WINDOW_MS
             && !self.baselined.iter().any(|p| p == pair)
     }
+    /// Decide what to do with `backlog` (the content keys of one mailbox, in the order the relay
+    /// listed them). `newest_first` says that order is by arrival, newest first.
+    pub fn plan_backlog(&mut self, pair: &str, backlog: &[String], newest_first: bool, now: u64) -> BacklogPlan {
+        let mut plan = BacklogPlan::default();
+        if self.skips_backlog_of(pair, now) {
+            self.baselined.push(pair.to_string());
+            // In hash order nothing can be said about which entries are recent: leave them all.
+            let keep = if newest_first { RELAY_STRETCH.min(backlog.len()) } else { 0 };
+            plan.skip = backlog[keep..].to_vec();
+            self.skipped += plan.skip.len() as u64;
+            if newest_first {
+                self.ordered.push(pair.to_string());
+                if keep < backlog.len() {
+                    self.floors.insert(pair.to_string(), backlog[keep - 1].clone());
+                }
+            }
+            return plan;
+        }
+        // Skipped whole while its relay could not order a listing, and the relay now can (it was
+        // upgraded): the newest stretch is read after all, once.
+        if newest_first && !self.fallback && !self.ordered.iter().any(|p| p == pair) {
+            self.ordered.push(pair.to_string());
+            let keep = RELAY_STRETCH.min(backlog.len());
+            plan.reopen = backlog[..keep].to_vec();
+            self.skipped = self.skipped.saturating_sub(keep as u64);
+            if keep < backlog.len() {
+                self.floors.insert(pair.to_string(), backlog[keep - 1].clone());
+            }
+            return plan;
+        }
+        if !newest_first || !self.more_pairs.iter().any(|p| p == pair) {
+            return plan;
+        }
+        self.more_pairs.retain(|p| p != pair);
+        let Some(floor) = self.floors.get(pair).cloned() else { return plan };
+        // A floor the relay no longer holds (swept) leaves nothing to count from.
+        let Some(at) = backlog.iter().position(|k| *k == floor) else {
+            self.floors.remove(pair);
+            return plan;
+        };
+        let end = (at + 1 + RELAY_STRETCH).min(backlog.len());
+        plan.reopen = backlog[at + 1..end].to_vec();
+        self.skipped = self.skipped.saturating_sub(plan.reopen.len() as u64);
+        if end < backlog.len() {
+            self.floors.insert(pair.to_string(), backlog[end - 1].clone());
+        } else {
+            self.floors.remove(pair);
+        }
+        plan
+    }
+
     pub fn state(&self, now: u64) -> &'static str {
         if self.fallback {
             "relays"
@@ -318,18 +391,17 @@ impl Engine {
         log::info!("history hand-off: asking my other devices for recent history");
     }
 
-    /// A mailbox being listed: is its backlog the hand-off's job? If so the pair is recorded and
-    /// the caller marks what is there now as seen without fetching it.
-    pub(super) fn history_skips_backlog(&self, pair: &str, entries: usize) -> bool {
+    /// A mailbox was just listed: what of its backlog is left on the relay, and what that was
+    /// left earlier is read now ([`Want::plan_backlog`]).
+    pub(super) fn history_plan_backlog(&self, pair: &str, backlog: &[String], newest_first: bool) -> BacklogPlan {
         let mut p = self.prefs.lock();
-        let Some(w) = p.history_want.as_mut() else { return false };
-        if !w.skips_backlog_of(pair, now_ms()) {
-            return false;
+        let Some(w) = p.history_want.as_mut() else { return BacklogPlan::default() };
+        let before = (w.baselined.len(), w.more_pairs.len(), w.ordered.len());
+        let plan = w.plan_backlog(pair, backlog, newest_first, now_ms());
+        if before != (w.baselined.len(), w.more_pairs.len(), w.ordered.len()) {
+            let _ = p.save(&self.paths);
         }
-        w.baselined.push(pair.to_string());
-        w.skipped += entries as u64;
-        let _ = p.save(&self.paths);
-        true
+        plan
     }
 
     /// Is the hand-off (not the mailbox) how this device gets what it could not open?
@@ -508,18 +580,33 @@ impl Engine {
     /// The reader reached the end of what this device holds: allow the next pages. False when
     /// there is nothing more to ask for.
     pub fn history_more(self: &Arc<Self>) -> bool {
-        {
+        let (relays, pages) = {
             let mut p = self.prefs.lock();
             let Some(w) = p.history_want.as_mut() else { return false };
-            if w.complete || w.fallback {
-                return false;
-            }
-            // Only once the pages already allowed have been read: a burst of scroll events must
-            // not turn into the whole history.
-            if w.next_page >= w.allowed_pages {
+            // The next stretch of every mailbox that still has one, on relays that list newest
+            // first. One request per stretch: asked again only once this one has been taken.
+            let relays: Vec<String> =
+                if w.fallback || !w.more_pairs.is_empty() { Vec::new() } else { w.floors.keys().cloned().collect() };
+            w.more_pairs.extend(relays.iter().cloned());
+            // The next pages from my other devices, only once the pages already allowed have
+            // been read: a burst of scroll events must not turn into the whole history.
+            let pages = !w.complete && !w.fallback;
+            if pages && w.next_page >= w.allowed_pages {
                 w.allowed_pages = w.next_page + MORE_PAGES;
-                let _ = p.save(&self.paths);
             }
+            let _ = p.save(&self.paths);
+            (relays, pages)
+        };
+        if !relays.is_empty() {
+            // An unchanged listing answers 204 with no keys: forget the digests so it is sent.
+            let mut st = self.dyn_state.lock();
+            for pair in &relays {
+                st.mailbox_list_digests.remove(pair);
+            }
+            st.next_poll_due_ms = 0;
+        }
+        if relays.is_empty() && !pages {
+            return false;
         }
         let me = self.clone();
         crate::rt::spawn(async move {
@@ -538,6 +625,8 @@ impl Engine {
             }
             w.fallback = true;
             w.baselined.clear();
+            w.floors.clear();
+            w.more_pairs.clear();
             let _ = p.save(&self.paths);
         }
         {
@@ -561,7 +650,7 @@ impl Engine {
                 "received": w.received_events,
                 "total": w.total_events,
                 "skipped": w.skipped,
-                "more": !w.complete && !w.fallback,
+                "more": (!w.complete && !w.fallback) || !w.floors.is_empty(),
             }),
             _ => serde_json::json!({ "state": "idle", "received": 0, "total": 0, "skipped": 0, "more": false }),
         }
@@ -799,6 +888,65 @@ mod tests {
         for k in ["haven/mailbox/c/__hello__/a/b/c", "haven/mailbox/c/__relay__/x", "haven/mailbox/c/__live__/d/e"] {
             assert!(!is_backlog_key(k), "{k}");
         }
+    }
+
+    fn keys(n: usize) -> Vec<String> {
+        (0..n).map(|i| format!("haven/mailbox/c/{i:04}")).collect()
+    }
+
+    #[test]
+    fn on_a_relay_that_lists_newest_first_the_newest_stretch_is_read_and_the_rest_waits() {
+        let mut w = Want { account: "a".into(), at: 1_000, ..Default::default() };
+        let all = keys(RELAY_STRETCH * 2 + 10);
+        let plan = w.plan_backlog("r|c", &all, true, 2_000);
+        assert_eq!(plan.skip, all[RELAY_STRETCH..].to_vec(), "only what is older than the first stretch is left");
+        assert!(plan.reopen.is_empty());
+        assert_eq!(w.floors.get("r|c"), Some(&all[RELAY_STRETCH - 1]));
+        assert_eq!(w.skipped as usize, RELAY_STRETCH + 10);
+        // Listed again with nothing asked: nothing moves.
+        assert_eq!(w.plan_backlog("r|c", &all, true, 3_000), BacklogPlan::default());
+
+        // The reader reaches the end: the next stretch, counted from the floor even though two
+        // newer posts have arrived above it since.
+        w.more_pairs.push("r|c".into());
+        let mut later = vec!["haven/mailbox/c/new2".to_string(), "haven/mailbox/c/new1".to_string()];
+        later.extend(all.iter().cloned());
+        let plan = w.plan_backlog("r|c", &later, true, 4_000);
+        assert_eq!(plan.reopen, all[RELAY_STRETCH..RELAY_STRETCH * 2].to_vec());
+        assert!(plan.skip.is_empty() && w.more_pairs.is_empty());
+        assert_eq!(w.floors.get("r|c"), Some(&all[RELAY_STRETCH * 2 - 1]));
+
+        // The last ten, and then there is no floor left to ask from.
+        w.more_pairs.push("r|c".into());
+        assert_eq!(w.plan_backlog("r|c", &later, true, 5_000).reopen, all[RELAY_STRETCH * 2..].to_vec());
+        assert!(w.floors.is_empty());
+        assert_eq!(w.skipped, 0);
+    }
+
+    #[test]
+    fn a_short_mailbox_is_read_whole_and_hash_order_is_left_alone() {
+        let mut w = Want { account: "a".into(), at: 1_000, ..Default::default() };
+        let few = keys(7);
+        assert_eq!(w.plan_backlog("r|c", &few, true, 2_000), BacklogPlan::default());
+        assert!(w.floors.is_empty() && w.baselined == vec!["r|c".to_string()]);
+        // A relay that cannot order its listing: nothing in it can be called recent.
+        let plan = w.plan_backlog("old|c", &few, false, 2_000);
+        assert_eq!(plan.skip, few);
+        assert!(w.floors.is_empty());
+        // That relay is upgraded later: the newest of what was skipped is read, once.
+        let many = keys(RELAY_STRETCH + 5);
+        let plan = w.plan_backlog("old|c", &many, true, 9_000_000);
+        assert_eq!(plan.reopen, many[..RELAY_STRETCH].to_vec());
+        assert_eq!(w.floors.get("old|c"), Some(&many[RELAY_STRETCH - 1]));
+        assert_eq!(w.plan_backlog("old|c", &many, true, 9_000_001), BacklogPlan::default());
+        w.floors.clear();
+        // Asking for more of a mailbox whose floor the relay has swept: nothing, and no loop.
+        w.floors.insert("r|d".into(), "haven/mailbox/d/gone".into());
+        w.baselined.push("r|d".into());
+        w.ordered.push("r|d".into());
+        w.more_pairs.push("r|d".into());
+        assert_eq!(w.plan_backlog("r|d", &few, true, 3_000), BacklogPlan::default());
+        assert!(w.floors.is_empty() && w.more_pairs.is_empty());
     }
 
     #[test]

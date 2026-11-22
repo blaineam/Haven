@@ -12,7 +12,7 @@
 //!
 //! | Kind | Paths | Backend |
 //! |---|---|---|
-//! | **Media** | `/k/…`, `/l/…`, `/t/…` | HTTP mailbox (`httprelay`) |
+//! | **Media** | `/k/…`, `/l/…`, `/n/…`, `/t/…` | HTTP mailbox (`httprelay`) |
 //! | **Fabric** | `/relay`, `/derp`, `/ping` (+ subpaths) | iroh-relay (DERP / live + call signaling) |
 //! | **Hairpin** | `/webrtc`, `/webrtc/…` | WebSocket call-media bipipe (works over free CF) |
 //! | **Status** | `/`, `/_haven`, `/_haven/…` | answered here (JSON route table) |
@@ -99,8 +99,8 @@ pub fn classify_path(path: &str) -> RouteKind {
         return RouteKind::Fabric;
     }
 
-    // Media — httprelay verbs (GET/PUT/HEAD /k/, LIST /l/, TOUCH /t/).
-    if path.starts_with("/k/") || path.starts_with("/l/") || path.starts_with("/t/") {
+    // Media — httprelay verbs (GET/PUT/HEAD /k/, LIST /l/ and /n/, TOUCH /t/).
+    if path.starts_with("/k/") || path.starts_with("/l/") || path.starts_with("/n/") || path.starts_with("/t/") {
         return RouteKind::Media;
     }
 
@@ -237,7 +237,7 @@ impl ProxyState {
             None => "null".into(),
         };
         format!(
-            r#"{{"service":"haven-path-proxy","bind":"{}","routes":[{{"kind":"media","paths":["/k/*","/l/*","/t/*"],"backend":{media}}},{{"kind":"fabric","paths":["/relay","/relay/*","/derp","/derp/*","/ping","/ping/*"],"backend":{fabric},"note":"iroh DERP — live frames + call signaling"}},{{"kind":"hairpin","paths":["/webrtc","/webrtc/hairpin"],"backend":"local","note":"WebSocket call-media bipipe — works over free Cloudflare tunnels"}},{{"kind":"status","paths":["/","/_haven","/_haven/*"],"backend":"local"}}],"web":{web}}}"#,
+            r#"{{"service":"haven-path-proxy","bind":"{}","routes":[{{"kind":"media","paths":["/k/*","/l/*","/n/*","/t/*"],"backend":{media}}},{{"kind":"fabric","paths":["/relay","/relay/*","/derp","/derp/*","/ping","/ping/*"],"backend":{fabric},"note":"iroh DERP — live frames + call signaling"}},{{"kind":"hairpin","paths":["/webrtc","/webrtc/hairpin"],"backend":"local","note":"WebSocket call-media bipipe — works over free Cloudflare tunnels"}},{{"kind":"status","paths":["/","/_haven","/_haven/*"],"backend":"local"}}],"web":{web}}}"#,
             self.local_addr
         )
     }
@@ -311,7 +311,7 @@ async fn handle_client(mut client: TcpStream, state: &ProxyState) -> Result<()> 
         RouteKind::Unknown => {
             let body = format!(
                 "haven path proxy: unknown path `{path}`\n\
-                 media:   /k/… /l/… /t/…\n\
+                 media:   /k/… /l/… /n/… /t/…\n\
                  fabric:  /relay /derp /ping\n\
                  hairpin: /webrtc/hairpin  (WebSocket call media over free CF)\n\
                  status:  /  /_haven\n\
@@ -776,6 +776,7 @@ mod tests {
     fn classifies_media() {
         assert_eq!(classify_path("/k/haven/media/x"), RouteKind::Media);
         assert_eq!(classify_path("/l/haven/mailbox/c"), RouteKind::Media);
+        assert_eq!(classify_path("/n/haven/mailbox/c"), RouteKind::Media);
         assert_eq!(classify_path("/t/haven/mailbox/c"), RouteKind::Media);
         assert_eq!(classify_path("/k/x?q=1"), RouteKind::Media);
     }

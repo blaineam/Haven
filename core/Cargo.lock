@@ -1722,6 +1722,7 @@ dependencies = [
  "haven-p2p",
  "iroh",
  "iroh-relay",
+ "libc",
  "n0-future",
  "rand 0.8.6",
  "rustls",

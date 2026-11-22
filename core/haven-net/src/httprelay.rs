@@ -15,6 +15,7 @@
 //!   HEAD /k/<key>      → 200                 | 404          (HAS; a hit refreshes liveness)
 //!   PUT  /k/<key>      → 200 "OK"            | 4xx/5xx      (body = blob, ≤ 256 MiB)
 //!   GET  /l/<prefix>   → 200 newline-joined keys            (LIST)
+//!   GET  /n/<prefix>   → 200 the same keys, newest first    (LIST by arrival) | 501
 //!   POST /t/<prefix>   → 200 newline-joined MISSING keys    (TOUCH; body = keys to refresh)
 //! ```
 //!
@@ -26,6 +27,15 @@
 //! set. A client that echoes it on its next LIST of the same prefix gets `204 No Content`
 //! (header only, no body) when nothing changed, so idle mailbox polls stop re-downloading an
 //! unchanged list over the radio. A client that never sends the header gets today's `200`.
+//!
+//! `/n/` is `/l/` in the order the entries reached THIS relay, newest first, so a device with
+//! nothing yet (a newly linked browser) can read what is recent without downloading a whole
+//! mailbox to find it. A mailbox key is a hash and says nothing about when it was posted. The
+//! order comes from each file's creation time, which the filesystem already keeps: the relay
+//! records nothing for it. It is authorized exactly as a LIST, shows exactly the keys a LIST
+//! shows, and carries the same digest (of the SORTED set), so the 204 short-circuit is shared.
+//! What it adds is that a member can tell which entries arrived most recently, which the relay
+//! always could. `501` means this host keeps no creation times; ask `/l/`.
 //!
 //! `<key>`/`<prefix>` are percent-encoded store keys and pass through the same
 //! [`super::blobstore::safe_path`] validation as the iroh path (no traversal, no NUL).
@@ -213,7 +223,7 @@ fn verb_of(route: &Route) -> u8 {
         Route::Get(_) => VERB_GET,
         Route::Head(_) => VERB_HAS,
         Route::Put(_) => VERB_PUT,
-        Route::List(_) => VERB_LIST,
+        Route::List(_) | Route::Newest(_) => VERB_LIST,
         Route::Touch(_) => VERB_TOUCH,
         Route::Bad => 0,
     }
@@ -605,6 +615,39 @@ async fn handle_conn(
                     digest_respond(&mut w, 200, "OK", keep_alive, &digest, body.as_bytes()).await?;
                 }
             }
+            Route::Newest(_) => {
+                let (root2, auth2, peer2, key2) = (root.to_path_buf(), auth.clone(), peer.clone(), key.clone());
+                let echoed = header(&headers, "x-haven-list-digest").map(|v| v.trim().to_ascii_lowercase());
+                // (digest, None = unchanged | Some(None) = no creation times | Some(Some(body)))
+                let (digest, answer) = tokio::task::spawn_blocking(move || {
+                    let mut keys = local_list(&root2, &key2);
+                    {
+                        let a = auth2.lock().unwrap();
+                        listing_retain(&root2, &a, &peer2, &mut keys, |k| k.as_str());
+                    }
+                    keys.sort();
+                    let digest = list_digest(&keys.join("\n"));
+                    // Unchanged: answered before a single file is looked at.
+                    if echoed.as_deref() == Some(digest.as_str()) {
+                        return (digest, None);
+                    }
+                    let Some(births) = crate::blobstore::local_list_births(&root2, &keys) else {
+                        return (digest, Some(None));
+                    };
+                    let mut order: Vec<usize> = (0..keys.len()).collect();
+                    // Newest first; entries created in the same instant keep key order.
+                    order.sort_by(|a, b| births[*b].cmp(&births[*a]).then_with(|| keys[*a].cmp(&keys[*b])));
+                    let body = order.into_iter().map(|i| keys[i].as_str()).collect::<Vec<_>>().join("\n");
+                    (digest, Some(Some(body)))
+                })
+                .await
+                .unwrap_or_else(|_| (String::new(), Some(None)));
+                match answer {
+                    None => digest_respond(&mut w, 204, "no content", keep_alive, &digest, b"").await?,
+                    Some(None) => respond(&mut w, 501, "no arrival order here", keep_alive, b"").await?,
+                    Some(Some(body)) => digest_respond(&mut w, 200, "OK", keep_alive, &digest, body.as_bytes()).await?,
+                }
+            }
             Route::Touch(_) => {
                 // Mailbox-GC liveness refresh: body = newline-joined keys; reply = the keys we do
                 // NOT hold. Every listed key is re-authorized individually — the prefix was
@@ -633,6 +676,8 @@ enum Route {
     Head(String),
     Put(String),
     List(String),
+    /// LIST, newest arrival first.
+    Newest(String),
     Touch(String),
     Bad,
 }
@@ -640,7 +685,7 @@ enum Route {
 /// The store key/prefix a route names — the string the signature binds and the gate authorizes.
 fn route_key(r: &Route) -> &str {
     match r {
-        Route::Get(k) | Route::Head(k) | Route::Put(k) | Route::List(k) | Route::Touch(k) => k,
+        Route::Get(k) | Route::Head(k) | Route::Put(k) | Route::List(k) | Route::Newest(k) | Route::Touch(k) => k,
         Route::Bad => "",
     }
 }
@@ -657,6 +702,9 @@ fn route(method: &str, path: &str) -> Route {
     }
     if let (Some(p), "GET") = (path.strip_prefix("/l/"), method) {
         return Route::List(decode(p));
+    }
+    if let (Some(p), "GET") = (path.strip_prefix("/n/"), method) {
+        return Route::Newest(decode(p));
     }
     if let (Some(p), "POST") = (path.strip_prefix("/t/"), method) {
         return Route::Touch(decode(p));
@@ -1240,6 +1288,99 @@ mod tests {
             // … which then short-circuits again.
             let hdr = format!("{}X-Haven-List-Digest: {d2}\r\n", signed(m, "GET", "/l/haven/mailbox/fam/", b""));
             assert!(req("GET", "/l/haven/mailbox/fam/", &hdr, b"").starts_with("HTTP/1.1 204"));
+        });
+        blocking.await.unwrap();
+        srv.stop();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// `/n/` is the LIST in the order entries reached this relay, newest first: the same keys,
+    /// the same digest, the same authorization, and a liveness refresh does not reorder it.
+    #[tokio::test]
+    async fn the_newest_first_listing_follows_arrival_and_nothing_else() {
+        use ed25519_dalek::SigningKey;
+
+        let dir = std::env::temp_dir().join(format!("httprelay-newest-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // A filesystem that keeps no creation times answers 501, which the last lines check
+        // could not happen here by accident.
+        std::fs::write(dir.join("probe"), b"x").unwrap();
+        let ordered_here = crate::birthtime::birth_nanos(&dir.join("probe")).is_some();
+        std::fs::remove_file(dir.join("probe")).unwrap();
+
+        let member_sk = [7u8; 32];
+        let stranger_sk = [9u8; 32];
+        let member_hex = hex(SigningKey::from_bytes(&member_sk).verifying_key().as_bytes());
+        let auth = Arc::new(Mutex::new(RelayAuth::default()));
+        auth.lock().unwrap().authorize("fam", vec![member_hex], vec![]);
+        let srv = serve(dir.clone(), "127.0.0.1:0", "tok".into(), auth).await.unwrap();
+        let base = format!("127.0.0.1:{}", srv.port());
+
+        let req = move |verb: &str, path: &str, hdr: &str, body: &[u8]| {
+            use std::io::{Read, Write};
+            let mut s = std::net::TcpStream::connect(&base).unwrap();
+            let head = format!(
+                "{verb} {path} HTTP/1.1\r\nHost: x\r\n{hdr}Content-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            s.write_all(head.as_bytes()).unwrap();
+            s.write_all(body).unwrap();
+            let mut resp = Vec::new();
+            s.read_to_end(&mut resp).unwrap();
+            String::from_utf8_lossy(&resp).into_owned()
+        };
+        let signed = |sk: &[u8; 32], verb: &str, path: &str, body: &[u8]| {
+            let key = path.splitn(3, '/').nth(2).unwrap_or("");
+            format!("Authorization: {}\r\n", auth_header(sk, "tok", verb, key, body))
+        };
+        let digest_of = |resp: &str| {
+            resp.lines()
+                .find(|l| l.to_ascii_lowercase().starts_with("x-haven-list-digest:"))
+                .and_then(|l| l.split_once(':').map(|(_, v)| v.trim().to_string()))
+        };
+        let body_of = |resp: &str| resp.split_once("\r\n\r\n").map(|(_, b)| b.to_string()).unwrap_or_default();
+
+        let blocking = tokio::task::spawn_blocking(move || {
+            let m = &member_sk;
+            let (l, n) = ("/l/haven/mailbox/fam/", "/n/haven/mailbox/fam/");
+            // Arrival order is key order, so newest first is the reverse of what a LIST gives.
+            for name in ["aa", "bb", "cc"] {
+                let path = format!("/k/haven/mailbox/fam/{name}");
+                assert!(req("PUT", &path, &signed(m, "PUT", &path, b"x"), b"x").starts_with("HTTP/1.1 200"));
+                std::thread::sleep(std::time::Duration::from_millis(30));
+            }
+            let plain = req("GET", l, &signed(m, "GET", l, b""), b"");
+            assert_eq!(body_of(&plain), "haven/mailbox/fam/aa\nhaven/mailbox/fam/bb\nhaven/mailbox/fam/cc");
+            let newest = req("GET", n, &signed(m, "GET", n, b""), b"");
+            if !ordered_here {
+                assert!(newest.starts_with("HTTP/1.1 501"), "{newest}");
+                return;
+            }
+            assert!(newest.starts_with("HTTP/1.1 200"), "{newest}");
+            assert_eq!(body_of(&newest), "haven/mailbox/fam/cc\nhaven/mailbox/fam/bb\nhaven/mailbox/fam/aa");
+            assert_eq!(digest_of(&newest), digest_of(&plain), "one digest for one key set, whatever the order");
+
+            // A liveness refresh of the OLDEST entry moves its modification time, not its place.
+            let touch = "/t/haven/mailbox/fam/";
+            assert!(req("POST", touch, &signed(m, "POST", touch, b"haven/mailbox/fam/aa"), b"haven/mailbox/fam/aa").starts_with("HTTP/1.1 200"));
+            assert_eq!(body_of(&req("GET", n, &signed(m, "GET", n, b""), b"")), body_of(&newest));
+
+            // A new arrival goes first.
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            let path = "/k/haven/mailbox/fam/zz";
+            assert!(req("PUT", path, &signed(m, "PUT", path, b"y"), b"y").starts_with("HTTP/1.1 200"));
+            let after = req("GET", n, &signed(m, "GET", n, b""), b"");
+            assert!(body_of(&after).starts_with("haven/mailbox/fam/zz\n"), "{after}");
+
+            // The echoed digest short-circuits exactly as for a LIST.
+            let d = digest_of(&after).unwrap();
+            let hdr = format!("{}X-Haven-List-Digest: {d}\r\n", signed(m, "GET", n, b""));
+            assert!(req("GET", n, &hdr, b"").starts_with("HTTP/1.1 204"));
+
+            // And it is gated exactly as a LIST: a non-member learns nothing, order included.
+            let s = &stranger_sk;
+            assert!(req("GET", n, &signed(s, "GET", n, b""), b"").starts_with("HTTP/1.1 403"));
+            assert!(req("GET", n, "", b"").starts_with("HTTP/1.1 401"));
         });
         blocking.await.unwrap();
         srv.stop();

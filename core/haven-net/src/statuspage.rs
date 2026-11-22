@@ -29,7 +29,7 @@ pub fn front_door_page(status_json: &str, bind: &str) -> String {
 It is not a website — Haven clients use signed API paths. Opening it in a browser only checks that the tunnel reaches this host.</p>
 <p>Local bind: <code>{bind}</code></p>
 <ul>
- <li><code>/k/*</code> <code>/l/*</code> <code>/t/*</code> — sealed media mailbox</li>
+ <li><code>/k/*</code> <code>/l/*</code> <code>/n/*</code> <code>/t/*</code> — sealed media mailbox</li>
  <li><code>/relay</code> <code>/derp</code> <code>/ping</code> — iroh DERP fabric</li>
  <li><code>/webrtc/hairpin</code> — call media over free Cloudflare</li>
 </ul>
@@ -50,7 +50,7 @@ pub fn media_root_page() -> String {
 {css}
 </style></head><body>
 <h1>Haven media mailbox</h1>
-<p>This is the <strong>media port</strong>: it serves sealed media over signed <code>/k/</code> <code>/l/</code> <code>/t/</code> paths and nothing human-readable.</p>
+<p>This is the <strong>media port</strong>: it serves sealed media over signed <code>/k/</code> <code>/l/</code> <code>/n/</code> <code>/t/</code> paths and nothing human-readable.</p>
 <p>Open the <strong>path-proxy origin</strong> (the relay's public URL, usually a tunnel to <code>:8675</code>) for a status page.</p>
 </body></html>
 "#,

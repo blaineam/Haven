@@ -132,7 +132,7 @@ WebRTC uses circle TURN when known, else Google STUN for server-reflexive candid
 
    | Kind | Public path | Local backend |
    |---|---|---|
-   | Media | `/k/*`, `/l/*`, `/t/*` | `http://127.0.0.1:8674` |
+   | Media | `/k/*`, `/l/*`, `/n/*`, `/t/*` | `http://127.0.0.1:8674` |
    | Fabric | `/relay`, `/derp`, `/ping` | `http://127.0.0.1:3340` (live + call-signaling) |
    | Hairpin | `/webrtc/hairpin` (WebSocket) | proxy-local bipipe — **call media over free CF** |
    | Status | `/`, `/_haven` | proxy-local JSON |

@@ -30,5 +30,10 @@ sha1 = "0.10"
 # Pre-compressing the web client once, when a host hands it over (`webbundle`): pure Rust.
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
+# `statx` for a stored file's creation time (`birthtime`): the standard library only makes that
+# call on glibc, and the relay ships as a static musl binary and inside the Android app.
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

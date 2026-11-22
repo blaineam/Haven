@@ -57,7 +57,7 @@ local **path proxy** (default `127.0.0.1:8675`) that routes by path:
 
 | Kind | Paths | Backend |
 |---|---|---|
-| **Media** | `/k/*`, `/l/*`, `/t/*` | mailbox HTTP (`:8674`) |
+| **Media** | `/k/*`, `/l/*`, `/n/*`, `/t/*` | mailbox HTTP (`:8674`) |
 | **Fabric** | `/relay`, `/derp`, `/ping` (+ subpaths) | iroh DERP (`:3340`) |
 | **Hairpin** | `/webrtc`, `/webrtc/hairpin` | **WebSocket** call-media bipipe (local) |
 | **Status** | `/`, `/_haven`, `/_haven/*` | proxy-local JSON route table |

@@ -660,8 +660,20 @@ and the browser first listing that circle is skipped by both; the authors' perio
 the backstop, and "Load history from your relays" reads it on demand. Pages a browser never reads
 stay on the account lane until the source drops the run (three days).
 
-**Open question (not decided here).** The relay could offer a newest-first listing by arrival
-without storing anything new (a file's creation time). That would let a browser read recent
-posts it holds keys for with no other device awake. It also means a relay answers "what arrived
-most recently" to any member, which it does not do today; that is a change to what a relay
-reveals and is the owner's call.
+**Decided the same day: the relay lists newest first (`GET /n/<prefix>`).** The owner's call:
+a relay should be able to give a new browser what is recent without another device awake. `/n/`
+is a LIST in the order entries reached that relay, newest first. It is authorized exactly as a
+LIST, shows exactly the keys a LIST shows and carries the same digest. The order is each file's
+creation time, which the filesystem already keeps (read with `statx` on Linux and Android, where
+the standard library does not): the relay records nothing new and writes no log. What changes is
+that a circle member, who could already list every entry, can now also tell which arrived most
+recently; the relay itself always could. A host whose filesystem keeps no creation time answers
+501 and is listed the old way.
+
+A browser asks every relay for `/n/` first. Where it gets one, the newest `RELAY_STRETCH` (150)
+backlog entries of each mailbox are read at linking, and the next 150 each time the reader
+reaches the end of the feed; the rest stays on the relay. A relay upgraded after the browser was
+linked gets the same treatment once. Arrival order is not post order: an envelope uploaded again
+(a re-seal after a key change, an imported archive) counts as new. And it does not change what
+the browser can OPEN: friends' older posts still need keys from another device (D25) or the
+hand-off pages above.

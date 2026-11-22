@@ -1,3 +1,4 @@
-2.2.1 — Haven en el navegador, desde una sola dirección.
-• Abre haven.wemiller.com/app en un navegador web, escanea el código que muestra (Ajustes → Dispositivos) y sigue con el relay de tu círculo. Cada círculo decide si los navegadores pueden leerlo.
-• Corregido: vincular un dispositivo nuevo podía quedarse en «Vinculando…» para siempre si se perdía un mensaje. Ahora se recupera solo.
+2.2.2 — Un navegador vinculado ahora lo muestra todo.
+• Un navegador vinculado ahora lee todos tus círculos y mensajes. El interruptor «Navegadores web» de cada círculo desaparece; quita un navegador en Ajustes → Dispositivos.
+• Un dispositivo recién vinculado muestra enseguida las publicaciones recientes de los demás.
+• Corregido: escanear el código de un dispositivo podía fallar durante minutos.

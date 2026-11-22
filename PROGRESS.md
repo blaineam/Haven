@@ -6,6 +6,17 @@ Updated continuously. (Times in your local day.)
 ---
 
 ## 🆕 Latest waves (newest first)
+- **2.2.2 — a linked browser reads everything; own devices hand over keys (cut 2026-11-21)** — found
+  by trying the browser on a real account. Per-circle web consent is withdrawn (D22 withdrawn): a
+  linked browser is a device like any other. The devices of one account hand each other the
+  content keys they hold (D25, frames 39/40), so a new device reads other people's posts at once.
+  A removed device is told, and a removed browser erases itself. Fixes: Safari (relay names with
+  a trailing dot), the engine crash on receiving media in a browser, QR codes drawn 16 px,
+  phone avatars on the desktop UI, a failed scan that kept failing (dial backoff), no dial
+  backoff in the browser, mailbox catch-up one entry at a time. The browser client now also
+  ships by itself between app releases (`web-vX.Y.Z-N` tags, eleven so far). Not done: the
+  desktop engine and the browser do not implement the Apple apps' full history hand-off, so
+  history older than the keys still held waits for its authors.
 - **2.2.1 — Haven in a browser from one address; linking that recovers (cut 2026-11-20)** — the web
   client can be served by an ordinary web site as well as by a relay: a page with no relay of its
   own shows a code, the phone answers it through a rendezvous relay, and the browser then learns

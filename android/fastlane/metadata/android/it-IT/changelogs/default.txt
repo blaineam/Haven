@@ -1,3 +1,4 @@
-2.2.1 — Haven nel browser, da un unico indirizzo.
-• Apri haven.wemiller.com/app in un browser web, scansiona il codice mostrato (Impostazioni → Dispositivi) e prosegue con il relay della tua cerchia. Ogni cerchia decide se i browser possono leggerla.
-• Corretto: il collegamento di un nuovo dispositivo poteva restare fermo su “Collegamento…” per sempre se un messaggio andava perso. Ora si riprende da solo.
+2.2.2 — Un browser collegato ora mostra tutto.
+• Un browser collegato ora legge tutte le tue cerchie e i tuoi messaggi. L'interruttore «Browser web» per cerchia non c'è più; rimuovi un browser in Impostazioni → Dispositivi.
+• Un dispositivo appena collegato mostra subito i post recenti degli altri.
+• Corretto: la scansione del codice di un dispositivo poteva fallire per minuti.

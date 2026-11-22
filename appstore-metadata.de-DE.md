@@ -35,19 +35,26 @@ privat,verschlüsselt,Familie,Freunde,sicher,Messenger,offline,Anrufe,ohne Werbu
 Neu in 2.0: Dein Relay übernimmt die schwere Arbeit bei Fotos und Videos, damit dein Handy kühl bleibt – und du siehst immer genau, wen ein Beitrag erreicht. Kostenlos.
 
 ## whats_new
-2.2.1 – Haven im Browser, unter einer festen Adresse.
-• Neu: Öffne haven.wemiller.com/app im Webbrowser, scanne den angezeigten Code (Einstellungen → Geräte), und der Browser arbeitet danach selbst mit dem Relay deines Kreises weiter. Das Relay braucht diese Version und eine https-Adresse. Beiträge eines Kreises erreichen einen Browser erst, wenn der Kreis es erlaubt.
-• Behoben: Das Verknüpfen eines neuen Geräts konnte dauerhaft bei „Verknüpfen…“ hängen bleiben, wenn eine Nachricht verloren ging. Es erholt sich jetzt von selbst.
+2.2.2 – Ein verknüpfter Browser zeigt jetzt alles.
+• Ein Browser, den du unter haven.wemiller.com/app verknüpfst, liest jetzt alle deine Kreise und Nachrichten, wie jedes verknüpfte Gerät. Den Schalter „Webbrowser“ pro Kreis gibt es nicht mehr: Deine Bestätigung des Browsers ist die einzige Freigabe. Ein Browser ist schwächer als die App, entferne ihn also unter Einstellungen → Geräte, wenn du fertig bist.
+• Ein neu verknüpftes Gerät zeigt die neueren Beiträge anderer sofort: Deine anderen Geräte geben ihm die Schlüssel, die sie haben.
+• Ein entferntes Gerät erfährt das jetzt, und ein entfernter Browser löscht sich selbst.
+• Behoben: Das Scannen eines Gerätecodes konnte fehlschlagen und minutenlang weiter fehlschlagen.
 
 ## whats_new_macos
-2.2.1 – Haven im Browser, unter einer festen Adresse.
-• Neu: Öffne haven.wemiller.com/app im Webbrowser, scanne den angezeigten Code (Einstellungen → Geräte), und der Browser arbeitet danach selbst mit dem Relay deines Kreises weiter. Das Relay braucht diese Version und eine https-Adresse. Beiträge eines Kreises erreichen einen Browser erst, wenn der Kreis es erlaubt.
-• Behoben: Das Verknüpfen eines neuen Geräts konnte dauerhaft bei „Verknüpfen…“ hängen bleiben, wenn eine Nachricht verloren ging. Es erholt sich jetzt von selbst.
+2.2.2 – Ein verknüpfter Browser zeigt jetzt alles.
+• Ein Browser, den du unter haven.wemiller.com/app verknüpfst, liest jetzt alle deine Kreise und Nachrichten, wie jedes verknüpfte Gerät. Den Schalter „Webbrowser“ pro Kreis gibt es nicht mehr: Deine Bestätigung des Browsers ist die einzige Freigabe. Ein Browser ist schwächer als die App, entferne ihn also unter Einstellungen → Geräte, wenn du fertig bist.
+• Ein neu verknüpftes Gerät zeigt die neueren Beiträge anderer sofort: Deine anderen Geräte geben ihm die Schlüssel, die sie haben.
+• Ein entferntes Gerät erfährt das jetzt, und ein entfernter Browser löscht sich selbst.
+• Behoben: Das Scannen eines Gerätecodes konnte fehlschlagen und minutenlang weiter fehlschlagen.
 
 ## whats_new_windows
-2.2.1 – Haven im Browser, unter einer festen Adresse.
-• Ein Relay, das du mit dieser App hostest, funktioniert jetzt auch mit Haven unter haven.wemiller.com/app: Scanne den Code der Seite, und sie findet dein Relay selbst. Das Relay braucht eine https-Adresse.
-• Behoben: Das Verknüpfen eines neuen Geräts konnte dauerhaft bei „Verknüpfen…“ hängen bleiben, wenn eine Nachricht verloren ging. Es erholt sich jetzt von selbst.
+2.2.2 – Ein verknüpfter Browser zeigt jetzt alles.
+• Ein Browser, den du unter haven.wemiller.com/app verknüpfst, liest jetzt alle deine Kreise und Nachrichten, wie jedes verknüpfte Gerät. Den Schalter „Webbrowser“ pro Kreis gibt es nicht mehr: Deine Bestätigung des Browsers ist die einzige Freigabe. Ein Browser ist schwächer als die App, entferne ihn also unter Einstellungen → Geräte, wenn du fertig bist.
+• Ein neu verknüpftes Gerät zeigt die neueren Beiträge anderer sofort: Deine anderen Geräte geben ihm die Schlüssel, die sie haben.
+• Behoben: QR-Codes wurden zu klein zum Scannen dargestellt, und auf einem Telefon gesetzte Profilbilder erschienen nicht.
+• Das Nachladen von einem Relay ist deutlich schneller.
+• Behoben: Das Scannen eines Gerätecodes konnte fehlschlagen und minutenlang weiter fehlschlagen.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

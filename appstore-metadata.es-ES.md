@@ -35,19 +35,26 @@ privado,cifrado,familia,amigos,mensajería,seguro,sin conexión,llamadas,sin anu
 Novedad en 2.0: tu relay hace el trabajo pesado con fotos y vídeos para que tu móvil no se caliente, y siempre ves a quién llega cada publicación. Sigue siendo gratis.
 
 ## whats_new
-2.2.1 — Haven en el navegador, desde una sola dirección.
-• Nuevo: abre haven.wemiller.com/app en un navegador web, escanea el código que muestra (Ajustes → Dispositivos) y el navegador sigue por sí solo con el relay de tu círculo. El relay necesita esta versión y una dirección https. Las publicaciones de un círculo llegan a un navegador solo cuando ese círculo lo permite.
-• Corregido: vincular un dispositivo nuevo podía quedarse en «Vinculando…» para siempre si se perdía un mensaje. Ahora se recupera solo.
+2.2.2 — Un navegador vinculado ahora lo muestra todo.
+• Un navegador que vinculas en haven.wemiller.com/app ahora lee todos tus círculos y mensajes, como cualquier dispositivo vinculado. El interruptor «Navegadores web» de cada círculo desaparece: aprobar el navegador es la única aprobación. Un navegador es más débil que la app, así que quítalo en Ajustes → Dispositivos cuando termines.
+• Un dispositivo recién vinculado muestra enseguida las publicaciones recientes de los demás: tus otros dispositivos le pasan las claves que tienen.
+• Al quitar un dispositivo, ahora se le avisa, y un navegador quitado se borra a sí mismo.
+• Corregido: escanear el código de un dispositivo podía fallar y seguir fallando durante minutos.
 
 ## whats_new_macos
-2.2.1 — Haven en el navegador, desde una sola dirección.
-• Nuevo: abre haven.wemiller.com/app en un navegador web, escanea el código que muestra (Ajustes → Dispositivos) y el navegador sigue por sí solo con el relay de tu círculo. El relay necesita esta versión y una dirección https. Las publicaciones de un círculo llegan a un navegador solo cuando ese círculo lo permite.
-• Corregido: vincular un dispositivo nuevo podía quedarse en «Vinculando…» para siempre si se perdía un mensaje. Ahora se recupera solo.
+2.2.2 — Un navegador vinculado ahora lo muestra todo.
+• Un navegador que vinculas en haven.wemiller.com/app ahora lee todos tus círculos y mensajes, como cualquier dispositivo vinculado. El interruptor «Navegadores web» de cada círculo desaparece: aprobar el navegador es la única aprobación. Un navegador es más débil que la app, así que quítalo en Ajustes → Dispositivos cuando termines.
+• Un dispositivo recién vinculado muestra enseguida las publicaciones recientes de los demás: tus otros dispositivos le pasan las claves que tienen.
+• Al quitar un dispositivo, ahora se le avisa, y un navegador quitado se borra a sí mismo.
+• Corregido: escanear el código de un dispositivo podía fallar y seguir fallando durante minutos.
 
 ## whats_new_windows
-2.2.1 — Haven en el navegador, desde una sola dirección.
-• Un relay que alojas desde esta app ahora también funciona con Haven abierto desde haven.wemiller.com/app: escanea el código de la página y ella encuentra tu relay. El relay necesita una dirección https.
-• Corregido: vincular un dispositivo nuevo podía quedarse en «Vinculando…» para siempre si se perdía un mensaje. Ahora se recupera solo.
+2.2.2 — Un navegador vinculado ahora lo muestra todo.
+• Un navegador que vinculas en haven.wemiller.com/app ahora lee todos tus círculos y mensajes, como cualquier dispositivo vinculado. El interruptor «Navegadores web» de cada círculo desaparece: aprobar el navegador es la única aprobación. Un navegador es más débil que la app, así que quítalo en Ajustes → Dispositivos cuando termines.
+• Un dispositivo recién vinculado muestra enseguida las publicaciones recientes de los demás: tus otros dispositivos le pasan las claves que tienen.
+• Corregido: los códigos QR se dibujaban demasiado pequeños para escanearlos y las fotos de perfil puestas desde un teléfono no aparecían.
+• Ponerse al día desde un relay es mucho más rápido.
+• Corregido: escanear el código de un dispositivo podía fallar y seguir fallando durante minutos.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

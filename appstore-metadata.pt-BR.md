@@ -35,19 +35,26 @@ privado,criptografado,família,amigos,mensagens,seguro,offline,chamadas,sem anú
 Novo no 2.0: seu relay faz o trabalho pesado com fotos e vídeos para o celular não esquentar, e você sempre vê quem uma publicação alcança. Continua grátis.
 
 ## whats_new
-2.2.1 — Haven no navegador, a partir de um único endereço.
-• Novo: abra haven.wemiller.com/app em um navegador, escaneie o código exibido (Ajustes → Dispositivos) e o navegador continua sozinho com o relay do seu círculo. O relay precisa desta versão e de um endereço https. As publicações de um círculo só chegam a um navegador depois que o círculo permite.
-• Corrigido: vincular um novo dispositivo podia ficar em “Vinculando…” para sempre se uma mensagem se perdesse. Agora ele se recupera sozinho.
+2.2.2 — Um navegador vinculado agora mostra tudo.
+• Um navegador que você vincula em haven.wemiller.com/app agora lê todos os seus círculos e mensagens, como qualquer dispositivo vinculado. A opção “Navegadores web” por círculo deixou de existir: aprovar o navegador é a única aprovação. Um navegador é mais fraco que o app, então remova-o em Ajustes → Dispositivos quando terminar.
+• Um dispositivo recém-vinculado mostra na hora as publicações recentes das outras pessoas: seus outros dispositivos passam a ele as chaves que têm.
+• Ao remover um dispositivo, ele agora é avisado, e um navegador removido apaga a si mesmo.
+• Corrigido: escanear o código de um dispositivo podia falhar e continuar falhando por minutos.
 
 ## whats_new_macos
-2.2.1 — Haven no navegador, a partir de um único endereço.
-• Novo: abra haven.wemiller.com/app em um navegador, escaneie o código exibido (Ajustes → Dispositivos) e o navegador continua sozinho com o relay do seu círculo. O relay precisa desta versão e de um endereço https. As publicações de um círculo só chegam a um navegador depois que o círculo permite.
-• Corrigido: vincular um novo dispositivo podia ficar em “Vinculando…” para sempre se uma mensagem se perdesse. Agora ele se recupera sozinho.
+2.2.2 — Um navegador vinculado agora mostra tudo.
+• Um navegador que você vincula em haven.wemiller.com/app agora lê todos os seus círculos e mensagens, como qualquer dispositivo vinculado. A opção “Navegadores web” por círculo deixou de existir: aprovar o navegador é a única aprovação. Um navegador é mais fraco que o app, então remova-o em Ajustes → Dispositivos quando terminar.
+• Um dispositivo recém-vinculado mostra na hora as publicações recentes das outras pessoas: seus outros dispositivos passam a ele as chaves que têm.
+• Ao remover um dispositivo, ele agora é avisado, e um navegador removido apaga a si mesmo.
+• Corrigido: escanear o código de um dispositivo podia falhar e continuar falhando por minutos.
 
 ## whats_new_windows
-2.2.1 — Haven no navegador, a partir de um único endereço.
-• Um relay hospedado por este app agora também funciona com o Haven aberto em haven.wemiller.com/app: escaneie o código da página e ela encontra o seu relay. O relay precisa de um endereço https.
-• Corrigido: vincular um novo dispositivo podia ficar em “Vinculando…” para sempre se uma mensagem se perdesse. Agora ele se recupera sozinho.
+2.2.2 — Um navegador vinculado agora mostra tudo.
+• Um navegador que você vincula em haven.wemiller.com/app agora lê todos os seus círculos e mensagens, como qualquer dispositivo vinculado. A opção “Navegadores web” por círculo deixou de existir: aprovar o navegador é a única aprovação. Um navegador é mais fraco que o app, então remova-o em Ajustes → Dispositivos quando terminar.
+• Um dispositivo recém-vinculado mostra na hora as publicações recentes das outras pessoas: seus outros dispositivos passam a ele as chaves que têm.
+• Corrigido: os códigos QR eram desenhados pequenos demais para escanear, e as fotos de perfil definidas em um telefone não apareciam.
+• Colocar-se em dia a partir de um relay ficou muito mais rápido.
+• Corrigido: escanear o código de um dispositivo podia falhar e continuar falhando por minutos.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

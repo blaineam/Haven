@@ -1,3 +1,4 @@
-2.2.1 — Haven dans le navigateur, depuis une seule adresse.
-• Ouvrez haven.wemiller.com/app dans un navigateur web, scannez le code affiché (Réglages → Appareils), et il continue avec le relay de votre cercle. Chaque cercle décide si les navigateurs peuvent le lire.
-• Corrigé : l'association d'un nouvel appareil pouvait rester bloquée sur « Association… » si un message était perdu. Elle se rétablit désormais d'elle-même.
+2.2.2 — Un navigateur lié affiche désormais tout.
+• Un navigateur lié lit désormais tous vos cercles et messages. Le réglage « Navigateurs web » par cercle disparaît ; retirez un navigateur dans Réglages → Appareils.
+• Un appareil tout juste lié affiche aussitôt les publications récentes des autres.
+• Corrigé : scanner le code d'un appareil pouvait échouer pendant plusieurs minutes.

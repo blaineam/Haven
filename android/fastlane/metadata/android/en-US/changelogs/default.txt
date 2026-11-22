@@ -1,3 +1,4 @@
-2.2.1 — Haven in a browser, from one address.
-• Open haven.wemiller.com/app in a web browser, scan the code it shows (Settings → Devices), and it carries on with your circle's relay. Each circle decides whether browsers may read it.
-• Fixed: linking a new device could stay on “Linking…” for good when one message was lost. It now recovers by itself.
+2.2.2 — A linked browser now shows everything.
+• A browser you link now reads all your circles and messages. The per-circle “Web browsers” switch is gone; remove a browser in Settings → Devices.
+• A newly linked device shows other people's recent posts right away.
+• Fixed: scanning a device's code could keep failing for minutes.

@@ -1,3 +1,4 @@
-2.2.1 – Haven im Browser, unter einer festen Adresse.
-• Öffne haven.wemiller.com/app im Webbrowser, scanne den angezeigten Code (Einstellungen → Geräte), und er arbeitet mit dem Relay deines Kreises weiter. Jeder Kreis entscheidet, ob Browser ihn lesen dürfen.
-• Behoben: Das Verknüpfen eines neuen Geräts konnte dauerhaft bei „Verknüpfen…“ hängen bleiben, wenn eine Nachricht verloren ging. Es erholt sich jetzt von selbst.
+2.2.2 – Ein verknüpfter Browser zeigt jetzt alles.
+• Ein verknüpfter Browser liest jetzt alle deine Kreise und Nachrichten. Den Schalter „Webbrowser“ pro Kreis gibt es nicht mehr; entferne einen Browser unter Einstellungen → Geräte.
+• Ein neu verknüpftes Gerät zeigt die neueren Beiträge anderer sofort.
+• Behoben: Das Scannen eines Gerätecodes konnte minutenlang fehlschlagen.

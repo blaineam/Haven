@@ -33,19 +33,26 @@ private,encrypted,family,friends,circle,secure,messaging,offline,stories,calls,n
 New in 2.0: your relay does the heavy lifting for photos and videos, so your phone stays cool — and you always see exactly who a post reaches. Still free.
 
 ## whats_new
-2.2.1 — Haven in a browser, from one address.
-• New: open haven.wemiller.com/app in a web browser, scan the code it shows (Settings → Devices), and it carries on with your circle's relay by itself. The relay needs this version and an https address. A circle's posts reach a browser only after that circle allows it.
-• Fixed: linking a new device could stay on “Linking…” for good when one message was lost. It now recovers by itself.
+2.2.2 — A linked browser now shows everything.
+• A browser you link at haven.wemiller.com/app now reads all your circles and messages, like any device you link. The per-circle “Web browsers” switch is gone: approving the browser is the only approval. A browser is weaker than the app, so remove it in Settings → Devices when you are done.
+• A newly linked device shows other people's recent posts right away: your other devices hand it the keys they hold.
+• Removing a device now tells it, and a removed browser erases itself.
+• Fixed: scanning a device's code could fail and keep failing for minutes.
 
 ## whats_new_macos
-2.2.1 — Haven in a browser, from one address.
-• New: open haven.wemiller.com/app in a web browser, scan the code it shows (Settings → Devices), and it carries on with your circle's relay by itself. The relay needs this version and an https address. A circle's posts reach a browser only after that circle allows it.
-• Fixed: linking a new device could stay on “Linking…” for good when one message was lost. It now recovers by itself.
+2.2.2 — A linked browser now shows everything.
+• A browser you link at haven.wemiller.com/app now reads all your circles and messages, like any device you link. The per-circle “Web browsers” switch is gone: approving the browser is the only approval. A browser is weaker than the app, so remove it in Settings → Devices when you are done.
+• A newly linked device shows other people's recent posts right away: your other devices hand it the keys they hold.
+• Removing a device now tells it, and a removed browser erases itself.
+• Fixed: scanning a device's code could fail and keep failing for minutes.
 
 ## whats_new_windows
-2.2.1 — Haven in a browser, from one address.
-• A relay you host from this app now also serves Haven opened from haven.wemiller.com/app: scan the code the page shows and it finds your relay by itself. The relay needs an https address.
-• Fixed: linking a new device could stay on “Linking…” for good when one message was lost. It now recovers by itself.
+2.2.2 — A linked browser now shows everything.
+• A browser you link at haven.wemiller.com/app now reads all your circles and messages, like any device you link. The per-circle “Web browsers” switch is gone: approving the browser is the only approval. A browser is weaker than the app, so remove it in Settings → Devices when you are done.
+• A newly linked device shows other people's recent posts right away: your other devices hand it the keys they hold.
+• Fixed: QR codes were drawn too small to scan, and profile pictures set on a phone did not show.
+• Catching up from a relay is much faster.
+• Fixed: scanning a device's code could fail and keep failing for minutes.
 
 ## whats_new_previous
 2.0.2 — Optimized for iPhone Duo. Opened flat on a dual-screen phone, and on iPad, the feed and profile now sit in a centered column, so photos and videos are no longer huge and you scroll less.
@@ -64,11 +71,13 @@ https://wemiller.com/
 https://wemiller.com/privacy/
 
 ## review_notes
-WHAT IS NEW IN 2.2.1
-A reliability fix. No new permissions or entitlements, no data collection, no security fix.
-- Fix: linking a new device (Settings → Devices → link a device) could stay on "Linking…" for good if one message was lost in transit. The approving device now repeats its answer to the device the owner approved, and to no other.
-- A member can link a WEB BROWSER as one more device of their own account (since 2.2.0). The web page is served by a relay the circle's own members run, or by a web site (ours offers it); this app's part is the approval. To see it: Settings → Devices → link a device → "Scan its code", which scans (or accepts as pasted text) the code a browser shows, then asks the user to confirm the device by name. A browser is marked as such in the device list, and each circle has a switch ("Web browsers", off by default) deciding whether browsers may read it. The app loads no web content.
-- A linked browser can optionally be notified through our push worker with an empty Web Push message (no content); see NOTIFICATIONS.
+WHAT IS NEW IN 2.2.2
+How a linked web browser is treated changed. No new permissions, entitlements or data collection. Security-relevant.
+- A member can link a WEB BROWSER as one more device of their own account : Settings → Devices → link a device → "Scan its code", then confirm the device by name. The page comes from a relay the circle's members run or from a web site. The app loads no web content.
+- CHANGED: a linked browser now reads what the account's other devices read. The per-circle "Web browsers" switch is removed; approving the browser is the only approval. It is marked as a browser in the device list and removable there. Stated to users: a tampered page could read that account's circles until removed.
+- NEW: devices of ONE account hand each other the content keys they hold, sealed to the receiver, signed by the sender, only within that account's signed device list.
+- Fix: scanning a device's code could fail for minutes.
+- A linked browser can optionally be notified by an empty Web Push message (no content); see NOTIFICATIONS.
 
 Haven is a serverless, peer-to-peer, end-to-end encrypted social app for small private circles. There is no central server and no login.
 

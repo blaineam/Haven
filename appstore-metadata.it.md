@@ -35,19 +35,26 @@ privato,crittografato,famiglia,amici,messaggi sicuri,offline,chiamate,senza pubb
 Novità della 2.0: il tuo relay fa il lavoro pesante con foto e video, così il telefono resta fresco, e vedi sempre chi raggiunge un post. Sempre gratis.
 
 ## whats_new
-2.2.1 — Haven nel browser, da un unico indirizzo.
-• Novità: apri haven.wemiller.com/app in un browser web, scansiona il codice mostrato (Impostazioni → Dispositivi) e il browser prosegue da solo con il relay della tua cerchia. Il relay deve avere questa versione e un indirizzo https. I post di una cerchia arrivano a un browser solo dopo che la cerchia lo consente.
-• Corretto: il collegamento di un nuovo dispositivo poteva restare fermo su “Collegamento…” per sempre se un messaggio andava perso. Ora si riprende da solo.
+2.2.2 — Un browser collegato ora mostra tutto.
+• Un browser che colleghi su haven.wemiller.com/app ora legge tutte le tue cerchie e i tuoi messaggi, come qualsiasi dispositivo collegato. L'interruttore «Browser web» per cerchia non c'è più: approvare il browser è l'unica approvazione. Un browser è più debole dell'app, quindi rimuovilo in Impostazioni → Dispositivi quando hai finito.
+• Un dispositivo appena collegato mostra subito i post recenti degli altri: gli altri tuoi dispositivi gli passano le chiavi che hanno.
+• Un dispositivo rimosso ora viene avvisato, e un browser rimosso si cancella da solo.
+• Corretto: la scansione del codice di un dispositivo poteva fallire e continuare a fallire per minuti.
 
 ## whats_new_macos
-2.2.1 — Haven nel browser, da un unico indirizzo.
-• Novità: apri haven.wemiller.com/app in un browser web, scansiona il codice mostrato (Impostazioni → Dispositivi) e il browser prosegue da solo con il relay della tua cerchia. Il relay deve avere questa versione e un indirizzo https. I post di una cerchia arrivano a un browser solo dopo che la cerchia lo consente.
-• Corretto: il collegamento di un nuovo dispositivo poteva restare fermo su “Collegamento…” per sempre se un messaggio andava perso. Ora si riprende da solo.
+2.2.2 — Un browser collegato ora mostra tutto.
+• Un browser che colleghi su haven.wemiller.com/app ora legge tutte le tue cerchie e i tuoi messaggi, come qualsiasi dispositivo collegato. L'interruttore «Browser web» per cerchia non c'è più: approvare il browser è l'unica approvazione. Un browser è più debole dell'app, quindi rimuovilo in Impostazioni → Dispositivi quando hai finito.
+• Un dispositivo appena collegato mostra subito i post recenti degli altri: gli altri tuoi dispositivi gli passano le chiavi che hanno.
+• Un dispositivo rimosso ora viene avvisato, e un browser rimosso si cancella da solo.
+• Corretto: la scansione del codice di un dispositivo poteva fallire e continuare a fallire per minuti.
 
 ## whats_new_windows
-2.2.1 — Haven nel browser, da un unico indirizzo.
-• Un relay ospitato da questa app ora funziona anche con Haven aperto da haven.wemiller.com/app: scansiona il codice della pagina e questa trova il tuo relay. Il relay deve avere un indirizzo https.
-• Corretto: il collegamento di un nuovo dispositivo poteva restare fermo su “Collegamento…” per sempre se un messaggio andava perso. Ora si riprende da solo.
+2.2.2 — Un browser collegato ora mostra tutto.
+• Un browser che colleghi su haven.wemiller.com/app ora legge tutte le tue cerchie e i tuoi messaggi, come qualsiasi dispositivo collegato. L'interruttore «Browser web» per cerchia non c'è più: approvare il browser è l'unica approvazione. Un browser è più debole dell'app, quindi rimuovilo in Impostazioni → Dispositivi quando hai finito.
+• Un dispositivo appena collegato mostra subito i post recenti degli altri: gli altri tuoi dispositivi gli passano le chiavi che hanno.
+• Corretto: i codici QR erano disegnati troppo piccoli per essere scansionati e le foto profilo impostate da un telefono non comparivano.
+• Il recupero da un relay è molto più veloce.
+• Corretto: la scansione del codice di un dispositivo poteva fallire e continuare a fallire per minuti.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

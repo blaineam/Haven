@@ -35,19 +35,26 @@ privé,chiffré,famille,amis,cercle,sécurisé,messagerie,hors ligne,stories,app
 Nouveau en 2.0 : votre relay prend en charge photos et vidéos pour que votre téléphone reste frais, et vous voyez toujours qui atteint chaque publication. Gratuit.
 
 ## whats_new
-2.2.1 — Haven dans le navigateur, depuis une seule adresse.
-• Nouveau : ouvrez haven.wemiller.com/app dans un navigateur web, scannez le code affiché (Réglages → Appareils), et le navigateur continue tout seul avec le relay de votre cercle. Le relay doit avoir cette version et une adresse https. Les publications d'un cercle n'atteignent un navigateur qu'une fois que ce cercle l'autorise.
-• Corrigé : l'association d'un nouvel appareil pouvait rester bloquée sur « Association… » si un message était perdu. Elle se rétablit désormais d'elle-même.
+2.2.2 — Un navigateur lié affiche désormais tout.
+• Un navigateur que vous liez sur haven.wemiller.com/app lit désormais tous vos cercles et messages, comme tout appareil lié. Le réglage « Navigateurs web » par cercle disparaît : approuver le navigateur est la seule approbation. Un navigateur est plus fragile que l'app, retirez-le donc dans Réglages → Appareils quand vous avez fini.
+• Un appareil tout juste lié affiche aussitôt les publications récentes des autres : vos autres appareils lui transmettent les clés qu'ils détiennent.
+• Un appareil retiré en est maintenant informé, et un navigateur retiré s'efface lui-même.
+• Corrigé : scanner le code d'un appareil pouvait échouer et continuer d'échouer pendant plusieurs minutes.
 
 ## whats_new_macos
-2.2.1 — Haven dans le navigateur, depuis une seule adresse.
-• Nouveau : ouvrez haven.wemiller.com/app dans un navigateur web, scannez le code affiché (Réglages → Appareils), et le navigateur continue tout seul avec le relay de votre cercle. Le relay doit avoir cette version et une adresse https. Les publications d'un cercle n'atteignent un navigateur qu'une fois que ce cercle l'autorise.
-• Corrigé : l'association d'un nouvel appareil pouvait rester bloquée sur « Association… » si un message était perdu. Elle se rétablit désormais d'elle-même.
+2.2.2 — Un navigateur lié affiche désormais tout.
+• Un navigateur que vous liez sur haven.wemiller.com/app lit désormais tous vos cercles et messages, comme tout appareil lié. Le réglage « Navigateurs web » par cercle disparaît : approuver le navigateur est la seule approbation. Un navigateur est plus fragile que l'app, retirez-le donc dans Réglages → Appareils quand vous avez fini.
+• Un appareil tout juste lié affiche aussitôt les publications récentes des autres : vos autres appareils lui transmettent les clés qu'ils détiennent.
+• Un appareil retiré en est maintenant informé, et un navigateur retiré s'efface lui-même.
+• Corrigé : scanner le code d'un appareil pouvait échouer et continuer d'échouer pendant plusieurs minutes.
 
 ## whats_new_windows
-2.2.1 — Haven dans le navigateur, depuis une seule adresse.
-• Un relay hébergé depuis cette app fonctionne aussi avec Haven ouvert depuis haven.wemiller.com/app : scannez le code de la page et elle trouve votre relay. Le relay doit avoir une adresse https.
-• Corrigé : l'association d'un nouvel appareil pouvait rester bloquée sur « Association… » si un message était perdu. Elle se rétablit désormais d'elle-même.
+2.2.2 — Un navigateur lié affiche désormais tout.
+• Un navigateur que vous liez sur haven.wemiller.com/app lit désormais tous vos cercles et messages, comme tout appareil lié. Le réglage « Navigateurs web » par cercle disparaît : approuver le navigateur est la seule approbation. Un navigateur est plus fragile que l'app, retirez-le donc dans Réglages → Appareils quand vous avez fini.
+• Un appareil tout juste lié affiche aussitôt les publications récentes des autres : vos autres appareils lui transmettent les clés qu'ils détiennent.
+• Corrigé : les codes QR étaient affichés trop petits pour être scannés, et les photos de profil définies sur un téléphone n'apparaissaient pas.
+• Le rattrapage depuis un relais est beaucoup plus rapide.
+• Corrigé : scanner le code d'un appareil pouvait échouer et continuer d'échouer pendant plusieurs minutes.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

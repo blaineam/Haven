@@ -9,6 +9,8 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+## 2.2.2 (2026-11-21)
+
 ### Fixed
 - **QR codes were drawn the size of an icon.** In the desktop app (Linux, Windows) and the web
   client, every QR code (an invite, "link a device", and the code a browser shows to be linked)

@@ -620,3 +620,21 @@ fn a_browser_refused_its_own_account_for_minutes_is_removed_not_merely_new() {
     assert!(removed(1_000, 6, 1_000 + 180_000));
 }
 
+/// The keys a mailbox pass fetches ahead of time are exactly the ones its loop would have fetched.
+#[test]
+fn the_mailbox_pass_prefetches_only_what_it_will_open() {
+    use crate::engine::mailbox_key_wants_fetch as wants;
+    let me = vec!["aa".repeat(32), "bb".repeat(32)];
+    let k = "haven/mailbox/default/0123";
+    assert!(wants(k, false, None, 1_000_000, &me));
+    assert!(!wants(k, true, None, 1_000_000, &me), "already seen");
+    assert!(!wants(k, false, Some(1_000_000 - 119_999), 1_000_000, &me), "a control blob still backing off");
+    assert!(wants(k, false, Some(1_000_000 - 120_000), 1_000_000, &me), "its backoff is over");
+    assert!(!wants("haven/mailbox/default/__live__/x", false, None, 0, &me), "live-call frames are not history");
+    let mine = format!("haven/mailbox/default/__hello__/{}/abc", "BB".repeat(32));
+    let theirs = format!("haven/mailbox/default/__hello__/{}/abc", "cc".repeat(32));
+    assert!(wants(&mine, false, None, 0, &me), "a hello addressed to one of my ids, any case");
+    assert!(!wants(&theirs, false, None, 0, &me), "somebody else's hello");
+    assert!(!wants("haven/mailbox/default/__hello__/", false, None, 0, &me), "a hello naming nobody");
+}
+

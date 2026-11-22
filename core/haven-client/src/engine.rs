@@ -481,6 +481,8 @@ pub struct Engine {
     persist_pending: std::sync::atomic::AtomicBool,
     /// The host has been told this device was removed from its account (once is enough).
     revoked_told: std::sync::atomic::AtomicBool,
+    /// The last mailbox pass stopped at its per-pass cap with more waiting: poll again at once.
+    mailbox_backlog: std::sync::atomic::AtomicBool,
     /// When every relay began refusing this device its OWN account's slots, with no relay
     /// accepting since (ms; 0 = not refused), and how many refusals: see `note_self_refused`.
     self_refused: StdMutex<(u64, u32)>,
@@ -695,6 +697,31 @@ const HTTP_LIST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20
 /// Three minutes and six refusals: the roster heal that authorizes a new device runs every 30 s.
 pub(crate) fn self_refusals_mean_removed(since_ms: u64, count: u32, now_ms: u64) -> bool {
     since_ms != 0 && count >= 6 && now_ms.saturating_sub(since_ms) >= 180_000
+}
+
+/// How many mailbox envelopes are fetched from a relay at the same time.
+const MAILBOX_FETCH_AT_ONCE: usize = 8;
+/// How many passes in a row the mailbox loop makes while a backlog remains, before it lets the
+/// rest of its heartbeat run. With the per-pass cap that is a few thousand envelopes a burst.
+const MAILBOX_BACKLOG_PASSES: u32 = 40;
+
+/// Will the mailbox pass fetch this key? The same cheap tests its loop applies before a GET:
+/// not already seen, not a control blob still in its retry backoff, not a live-call frame (those
+/// belong to the in-call poll), and, for a hello, addressed to one of my ids.
+pub(crate) fn mailbox_key_wants_fetch(key: &str, seen: bool, control_retry_at: Option<u64>, now_ms: u64, my_hello_ids: &[String]) -> bool {
+    const CONTROL_RETRY_MS: u64 = 120_000;
+    if seen || key.contains("/__live__/") {
+        return false;
+    }
+    if control_retry_at.is_some_and(|t| now_ms.saturating_sub(t) < CONTROL_RETRY_MS) {
+        return false;
+    }
+    if key.contains("/__hello__/") {
+        let parts: Vec<&str> = key.split('/').collect();
+        let to = parts.iter().position(|p| *p == "__hello__").and_then(|i| parts.get(i + 1)).map(|s| s.to_lowercase());
+        return to.is_some_and(|t| my_hello_ids.iter().any(|m| *m == t));
+    }
+    true
 }
 
 /// Emitted once when a linked, seedless device finds its own account's roster no longer lists it.
@@ -985,6 +1012,7 @@ impl Engine {
         Ok(Arc::new(Self {
             persist_pending: std::sync::atomic::AtomicBool::new(false),
             revoked_told: std::sync::atomic::AtomicBool::new(false),
+            mailbox_backlog: std::sync::atomic::AtomicBool::new(false),
             self_refused: StdMutex::new((0, 0)),
             qa_call: std::sync::atomic::AtomicU8::new(0),
             last_epoch_reseal: StdMutex::new(0),
@@ -1110,6 +1138,7 @@ impl Engine {
         Ok(Arc::new(Self {
             persist_pending: std::sync::atomic::AtomicBool::new(false),
             revoked_told: std::sync::atomic::AtomicBool::new(false),
+            mailbox_backlog: std::sync::atomic::AtomicBool::new(false),
             self_refused: StdMutex::new((0, 0)),
             qa_call: std::sync::atomic::AtomicU8::new(0),
             last_epoch_reseal: StdMutex::new(0),
@@ -2146,6 +2175,18 @@ impl Engine {
                 // Self-sync is NOT run from here any more — see `start_self_sync_loop`.
                 if poll_due {
                     me.poll_mailbox().await;
+                    // A pass opens a bounded number of envelopes. While more are waiting, come
+                    // straight back (a short breath between passes keeps the app responsive)
+                    // instead of every 30 s: catching up used to take the better part of an hour.
+                    let mut passes = 0;
+                    while me.mailbox_backlog.swap(false, std::sync::atomic::Ordering::SeqCst) && passes < MAILBOX_BACKLOG_PASSES {
+                        passes += 1;
+                        crate::rt::sleep(std::time::Duration::from_millis(150)).await;
+                        me.poll_mailbox().await;
+                    }
+                    if passes == MAILBOX_BACKLOG_PASSES {
+                        me.dyn_state.lock().next_poll_due_ms = now_ms(); // still more: next heartbeat
+                    }
                 }
 
                 // Sync bucket (base 20s): the network fan-out that runs the radio hot, so it backs off
@@ -9153,6 +9194,30 @@ impl Engine {
         }
     }
 
+    /// GET one mailbox key from a relay's HTTP interface, trying each of its addresses in turn.
+    /// `None` = nobody had it, or nobody could be asked (a refusal is noted for the roster heal,
+    /// a dead address is marked so the next key does not wait on it again).
+    async fn http_get_from_relay(self: &Arc<Self>, node_hex: &str, key: &str) -> Option<Vec<u8>> {
+        let (bases, token) = self.relay_http_reachable(node_hex)?;
+        for base in &bases {
+            if self.http_url_bad(base) {
+                continue;
+            }
+            match self.http_get(base, &token, key).await {
+                Ok(Some(bytes)) => return Some(bytes),
+                Ok(None) => {}
+                Err(RelayErr::Forbidden) => {
+                    self.note_refused(
+                        node_hex,
+                        &format!("mailbox get {}", key.rsplit('/').next().unwrap_or(key).chars().take(16).collect::<String>()),
+                    );
+                }
+                Err(RelayErr::Unreachable) => self.mark_http_url_bad(base),
+            }
+        }
+        None
+    }
+
     pub async fn poll_mailbox(self: &Arc<Self>) {
         // THE EPOCH MOVED -> re-seal my history under it (see `take_epoch_moved`). Asked directly
         // rather than inferred from a roster change, which is only a proxy and missed the rotation
@@ -9342,9 +9407,51 @@ impl Engine {
             // A deferral (cap hit, failed GET, or an envelope that only buffered) means listed
             // keys remain un-ingested — the fresh LIST digest must NOT be committed below.
             let mut deferred = false;
+            // FETCH SEVERAL AT ONCE. Each GET is a round trip to the relay (through a tunnel, for
+            // most), and they used to go one after another: a device with a real history to catch
+            // up on, a newly linked browser above all, took the better part of an hour to show
+            // it. The keys this pass will open are chosen first, by the same cheap tests the loop
+            // below applies, and their bytes are fetched `MAILBOX_FETCH_AT_ONCE` at a time. What
+            // is done with each envelope, and in which order, is unchanged.
+            let mut prefetched: HashMap<String, Option<Vec<u8>>> = HashMap::new();
+            if got_via_http {
+                let wanted: Vec<String> = {
+                    let st = self.dyn_state.lock();
+                    let now = now_ms();
+                    keys.iter()
+                        .filter(|k| {
+                            mailbox_key_wants_fetch(
+                                k,
+                                st.seen_mailbox.contains(*k),
+                                st.control_retry_at.get(*k).copied(),
+                                now,
+                                &my_hello_ids,
+                            )
+                        })
+                        .take(MAX_FRESH_PER_PASS)
+                        .cloned()
+                        .collect()
+                };
+                use futures_util::StreamExt;
+                let got: Vec<(String, Option<Vec<u8>>)> = futures_util::stream::iter(wanted)
+                    .map(|k| {
+                        let (me, node_hex) = (self.clone(), node_hex.clone());
+                        async move {
+                            let bytes = me.http_get_from_relay(&node_hex, &k).await;
+                            (k, bytes)
+                        }
+                    })
+                    .buffer_unordered(MAILBOX_FETCH_AT_ONCE)
+                    .collect()
+                    .await;
+                prefetched.extend(got);
+            }
             for key in keys {
                 if fresh >= MAX_FRESH_PER_PASS {
                     deferred = true;
+                    // More is waiting than one pass opens: say so, and the loop that called us
+                    // comes straight back instead of waiting out its 30 s (`mailbox_backlog`).
+                    self.mailbox_backlog.store(true, std::sync::atomic::Ordering::SeqCst);
                     break;
                 }
                 // seen_mailbox is keyed by the content-addressed key, so the same envelope
@@ -9394,39 +9501,12 @@ impl Engine {
                         continue;
                     }
                 }
-                // Prefer HTTP GET when we listed over HTTP (same URL set).
-                let env = if got_via_http {
-                    if let Some((bases, token)) = self.relay_http_reachable(&node_hex) {
-                        let mut got = None;
-                        for base in &bases {
-                            if self.http_url_bad(base) {
-                                continue;
-                            }
-                            match self.http_get(base, &token, &key).await {
-                                Ok(Some(bytes)) => {
-                                    got = Some(bytes);
-                                    break;
-                                }
-                                Ok(None) => {}
-                                Err(RelayErr::Forbidden) => {
-                                    self.note_refused(
-                                        &node_hex,
-                                        &format!(
-                                            "mailbox get {}",
-                                            key.rsplit('/').next().unwrap_or(&key)
-                                                .chars().take(16).collect::<String>()
-                                        ),
-                                    );
-                                }
-                                Err(RelayErr::Unreachable) => {
-                                    self.mark_http_url_bad(base);
-                                }
-                            }
-                        }
-                        got
-                    } else {
-                        None
-                    }
+                // Prefer HTTP GET when we listed over HTTP (same URL set). Most keys were already
+                // fetched, several at a time, before this loop (`prefetched`).
+                let env = if let Some(got) = prefetched.remove(&key) {
+                    got
+                } else if got_via_http {
+                    self.http_get_from_relay(&node_hex, &key).await
                 } else if let Some(client) = self.relay_client_for(&node_hex).await {
                     client.get(key.clone()).await
                 } else {

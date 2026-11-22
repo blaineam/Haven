@@ -30,6 +30,7 @@ hex = "0.4"
 data-encoding = "2"
 base64 = "0.22"
 log = "0.4"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 rgb = "0.8"
 # Decoding/resizing for the preview and still tiers (pure Rust).
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }

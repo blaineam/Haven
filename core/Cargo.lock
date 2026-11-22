@@ -1670,6 +1670,7 @@ dependencies = [
  "base64 0.22.1",
  "data-encoding",
  "dirs",
+ "futures-util",
  "haven-net",
  "haven-p2p",
  "haven-s3",

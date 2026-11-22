@@ -54,6 +54,10 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - **A removed browser that missed the notice never found out.** A browser that every relay has
   refused its own account for three minutes, with nothing accepted in between, now concludes
   it was removed, erases itself and shows its link screen.
+- **Catching up from a relay took the better part of an hour.** The desktop app and the browser
+  fetched a relay's mailbox one entry at a time, at most 48 per circle per pass, one pass every
+  30 seconds. Entries are now fetched eight at a time, and passes follow one another while a
+  backlog remains.
 
 ### Changed
 - **A linked browser now reads everything its account reads.** Each circle used to have to allow

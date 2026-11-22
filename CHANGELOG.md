@@ -9,6 +9,12 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Fixed
+- **Browser client: cover art on a post's song shows.** The page's content policy allowed images
+  only from the page itself, so every song's artwork was refused. Artwork is now allowed from the
+  one image host the song catalogue serves it from, as the apps already load it. Nothing else
+  changes: no referrer is sent, and scripts, frames and other image hosts stay refused.
+
 ### Changed
 - **A linked browser no longer downloads the whole relay mailbox to draw a feed.** A mailbox is a
   pile of sealed envelopes named by their hash: nothing in it says which is newest, and most of it

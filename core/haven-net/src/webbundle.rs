@@ -20,7 +20,7 @@ pub const APP_PREFIX: &str = "/app/";
 /// injected; it may connect out (other relays, n0, a user's S3 bucket) only over TLS or to its own
 /// origin; it cannot be framed, and it sends no referrer.
 pub const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; \
-style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; media-src 'self' blob:; font-src 'self'; \
+style-src 'self' 'unsafe-inline'; img-src 'self' blob: data: https://*.mzstatic.com; media-src 'self' blob:; font-src 'self'; \
 connect-src 'self' https: wss:; worker-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; \
 frame-ancestors 'none'";
 

@@ -68,6 +68,14 @@ pub const RELAY_INTERFACE: u8 = 37;
 /// one frame a device with no account accepts — and only while it is showing a code, only if it
 /// opens under that code. Everything after it is frames 28/29.
 pub const PAIR_OFFER: u8 = 38;
+/// A device asks the OTHER devices of its own account for the content keys they hold (empty
+/// body). A device linked today is known to nobody but its own account: without this it showed
+/// its own posts and nothing of anyone else's until each contact's app came online and re-sealed
+/// for it. Answered with [`KEY_HANDOFF`], and only to an authorized device of the same account
+/// (`haven_ffi` `key_handoff`). Apple/Android-compat.
+pub const KEY_HANDOFF_REQ: u8 = 39;
+/// The answer: keys sealed to the asking device and signed by the answering one.
+pub const KEY_HANDOFF: u8 = 40;
 
 /// RESERVED — the Apple apps' history hand-off nudge between a user's own devices ("look at the
 /// account lane now", `HistoryHandoff.nudgeFrame`). Desktop, Android and the browser neither send
@@ -408,6 +416,7 @@ mod tests {
             SDP_OFFER, SDP_ANSWER, ICE, RELAY_NODE, PRESIGN, GROUP_INVITE, CALL_CAMERA, DEVICE_ENROLL, DEVICE_GRANT,
             DEVICE_ROSTER, SEEDLESS_ENROLL_REQ, SEEDLESS_ENROLL_GRANT, CALL_HANDLED, MEDIA_WANTED, MEDIA_AVAILABLE,
             MEDIA_RESUME_REQ, HISTORY_REQ, CALL_ENDED_ELSEWHERE, HISTORY_NUDGE, RELAY_INTERFACE, PAIR_OFFER,
+            KEY_HANDOFF_REQ, KEY_HANDOFF,
         ];
         let unique: std::collections::BTreeSet<u8> = all.iter().copied().collect();
         assert_eq!(unique.len(), all.len(), "two frame types share a number");

@@ -1564,6 +1564,8 @@ object HavenNet : InboundListener {
                 Wire.MEDIA_RESUME_REQ -> handleMediaResumeRequest(body)
                 Wire.MEDIA_CHUNK -> handleMediaChunk(body)
                 Wire.DEVICE_ROSTER -> handleDeviceRosterAnnounce(body)
+                Wire.KEY_HANDOFF_REQ -> handleKeyHandoffRequest(senderDevice)
+                Wire.KEY_HANDOFF -> handleKeyHandoff(body)
                 // 30 (handled-elsewhere) rides the same sealed+signed path: it can silence a ringing
                 // device, so it must be no more forgeable than an invite or a hangup. 22 (camera
                 // state) was declared and handled in CallManager but never routed here, so a peer
@@ -2985,6 +2987,40 @@ object HavenNet : InboundListener {
 
     /** PRIMARY: a frame-28 request arrived — verify its MAC against each live ticket, and on a match
      *  surface a confirm sheet (only an explicit confirm issues the grant). */
+    // ── Key hand-off between my own devices (frames 39 / 40; core `key_handoff`) ───────────────
+    // Every author seals to the devices they know of. A device linked today is known to nobody but
+    // its own account, so it showed its own posts and nothing of anyone else's until each contact's
+    // app came online and re-sealed for it. The devices already on the account hold the keys, so
+    // they hand them over: sealed to the asking device, signed by this one. The core refuses any
+    // device that is not an authorized device of my own account, in both directions.
+
+    /** When each of my devices was last answered (device hex → ms). */
+    private val keyHandoffAnswered = SharedCollections.map<Long>()
+
+    private fun handleKeyHandoffRequest(senderDevice: String?) {
+        val dev = senderDevice?.lowercase()?.takeIf { it.length == 64 } ?: return
+        val now = System.currentTimeMillis()
+        if ((keyHandoffAnswered[dev] ?: 0L) + 30_000L > now) return
+        keyHandoffAnswered[dev] = now
+        sendKeyHandoff(dev)
+    }
+
+    /** Seal what this device holds to one device of my account and send it. Sends nothing when
+     *  the core does not recognise that device as mine. */
+    private fun sendKeyHandoff(deviceHex: String) {
+        val blob = runCatching { social.exportKeyHandoff(deviceHex) }.getOrDefault(ByteArray(0))
+        if (blob.isNotEmpty()) sendFrame(Wire.KEY_HANDOFF, blob, deviceHex)
+    }
+
+    /** Keys from another device of my account (the core checks who sealed them). */
+    private fun handleKeyHandoff(body: ByteArray) {
+        val gained = runCatching { social.importKeyHandoff(body) }.getOrDefault(emptyList())
+        if (gained.isEmpty()) return
+        Log.i(TAG, "key hand-off: ${gained.size} circle(s) gained keys")
+        persist()
+        scope.launch { runCatching { pollMailboxOnce() } }
+    }
+
     private fun handleSeedlessEnrollRequest(body: ByteArray) {
         if (core.seedless) return   // only a seed-holding primary authorizes
         val now = (System.currentTimeMillis() / 1000).toULong()
@@ -3059,6 +3095,9 @@ object HavenNet : InboundListener {
             issuedEnrollGrant = IssuedEnrollGrant(ticket.secret, prompt.deviceHex, grant, ticket.issuedAt.toLong())
             NearbyTransport.broadcast(Wire.frame(Wire.SEEDLESS_ENROLL_GRANT, grant))
             runCatching { sendFrame(Wire.SEEDLESS_ENROLL_GRANT, grant, prompt.deviceHex) }
+            // …and the content keys this device holds, so the new device reads what other people
+            // posted without waiting for each of them to come online and re-seal for it.
+            sendKeyHandoff(prompt.deviceHex)
             // …and how to reach our relays, which a browser device cannot learn any other way.
             runCatching { teachMyDevicesRelayInterfaces(only = prompt.deviceHex) }
             pendingTickets.remove(secretHex)

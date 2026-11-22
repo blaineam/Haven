@@ -30,6 +30,11 @@ object Wire {
     /** Scan-to-link offer: an enrollment ticket for a device that SHOWED a `haven-pair:` code, sealed
      *  under that code's secret (core `haven_p2p::pair`). Desktop `wire::PAIR_OFFER`, iOS frame 38. */
     const val PAIR_OFFER: Int = 38
+    /** A device asks the OTHER devices of its own account for the content keys they hold (empty
+     *  body); answered with [KEY_HANDOFF], and only to an authorized device of the same account
+     *  (core `key_handoff`). Desktop `wire::KEY_HANDOFF_REQ` / `KEY_HANDOFF`, iOS frames 39 / 40. */
+    const val KEY_HANDOFF_REQ: Int = 39
+    const val KEY_HANDOFF: Int = 40
     const val PRESIGN: Int = 20      // S3 pre-signed URL pool bootstrap
     const val DEVICE_ENROLL: Int = 24 // a device asks its primary to authorize it (multi-device, iOS-compat)
     const val DEVICE_GRANT: Int = 25  // the primary returns a signed credential to the requesting device

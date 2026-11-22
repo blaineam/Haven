@@ -513,6 +513,33 @@ and an older app goes on applying the old rule to what it seals; this build igno
 Tamarin model `docs/formal/haven_web_consent.spthy` describes the withdrawn rule and no longer
 describes what ships.
 
+## D25 — The devices of one account hand each other the keys they hold (2026-11-21)
+
+**Decision:** A device asks the other devices of its own account for the content keys they hold
+(frame 39), and they answer with those keys sealed to it and signed by the answering device
+(frame 40). The primary also sends them, unasked, to a device it has just approved. Core:
+`haven-ffi/src/key_handoff.rs`.
+
+**Why:** every author seals their posts to the devices they know of. A device linked today is
+known to nobody but its own account, so it showed its own account's posts and nothing else until
+each contact's app happened to come online, learn the new roster and re-seal for it: hours or
+days, and never from a contact whose app is not opened. The devices already on the account hold
+the keys the whole time. Found with a browser, true of every new device.
+
+**What makes it safe:** the blob is sealed to the receiving device's own bundle; it is signed by
+the sending device and accepted only when that device is an authorized device of the SAME
+account in the account-signed roster the receiver holds; and a device only exports to a target
+that the same roster authorizes. A contact, a stranger, or a removed device can neither give nor
+get one. It changes nothing about who may read a circle: a device the account approved receives
+what the account's other devices can already read.
+
+**Limits, said plainly:** it reaches no further back than the keys still held (old keys are
+deleted on a schedule, four epochs per author); older history still arrives when its author
+re-seals it, or through the Apple apps' own history hand-off, which the desktop engine and the
+browser do not implement yet. Both devices have to be running for the exchange. A device that
+has been compromised but not yet removed can obtain current keys this way, as it could already
+read everything sealed to it.
+
 ## D23 — A browser is rung with a content-free doorbell, filed by its own device key (2026-11-20)
 
 **Decision.** A linked browser can be notified while its tab is closed (Web Push). The push worker

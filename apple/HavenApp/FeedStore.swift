@@ -7531,6 +7531,8 @@ final class FeedStore: ObservableObject {
         case 27: handleDeviceRosterAnnounce(payload)            // a friend's signed device roster (device-id auth/dial)
         case 28: handleSeedlessEnrollRequest(payload)           // S4: a new seedless device asks my primary to enroll it
         case 29: handleSeedlessEnrollGrant(payload)             // S4: the primary granted my new device its seedless identity
+        case 39: handleKeyHandoffRequest(senderDevice)          // a device of MY account asks for the content keys I hold
+        case 40: handleKeyHandoff(payload)                      // …and one answers: keys sealed to this device
         case 30: CallManager.shared.handleHandledElsewhere(payload)  // another of MY devices took/declined this call
         case 31: handleMediaWanted(payload)                          // someone wants media I authored, that a relay swept
         case 32: handleMediaAvailable(payload)                       // media I asked about is back on a relay
@@ -7949,6 +7951,52 @@ final class FeedStore: ObservableObject {
 
     /// Another of my devices asked for my full state (after being authorized). Push it: profile + circles
     /// + posts. (Same payload the passive nearby-connect sends, but triggered explicitly by linking.)
+    // MARK: - Key hand-off between my own devices (frames 39 / 40; core `key_handoff`)
+    //
+    // Every author seals to the devices they know of. A device linked today is known to nobody but
+    // its own account, so it showed its own posts and nothing of anyone else's until each contact's
+    // app came online and re-sealed for it. The devices already on the account hold the keys, so
+    // they hand them over: sealed to the asking device, signed by this one. The core refuses any
+    // device that is not an authorized device of my own account, in both directions.
+
+    /// When each of my devices was last answered (device hex → time).
+    private var keyHandoffAnswered: [String: Date] = [:]
+
+    private func handleKeyHandoffRequest(_ senderDevice: String?) {
+        guard let dev = senderDevice?.lowercased(), dev.count == 64 else { return }
+        if let last = keyHandoffAnswered[dev], Date().timeIntervalSince(last) < 30 { return }
+        keyHandoffAnswered[dev] = Date()
+        sendKeyHandoff(to: dev)
+    }
+
+    /// Seal what this device holds to one device of my account and send it. Sends nothing when
+    /// the core does not recognise that device as mine.
+    private func sendKeyHandoff(to deviceHex: String) {
+        guard let engine else { return }
+        Task { @MainActor [weak self] in
+            let blob = await engine.run { $0.exportKeyHandoff(targetDeviceHex: deviceHex) }
+            guard let self, self.engine === engine, !blob.isEmpty else { return }
+            self.sendToDeviceHex(40, blob, deviceHex)
+        }
+    }
+
+    /// Keys from another device of my account (the core checks who sealed them). A circle that
+    /// gained a key is read from its relays again, so what was skipped for want of one opens.
+    private func handleKeyHandoff(_ payload: Data) {
+        guard let engine else { return }
+        Task { @MainActor [weak self] in
+            let gained = await engine.run { $0.importKeyHandoff(blob: payload) }
+            guard let self, self.engine === engine, !gained.isEmpty else { return }
+            self.persist()
+            _ = await self.pullMailbox(circleIds: gained)
+        }
+    }
+
+    /// Ask my account's other devices for the keys they hold (an empty frame to each).
+    func requestKeyHandoff() {
+        sendToMyDevices(39, Data())
+    }
+
     private func handleRequestFullState(_ payload: Data) {
         guard AccountStore.storedSeed() != nil else { return }   // only a seed-holder can push the account state
         pushFullStateToMyDevices()
@@ -8141,6 +8189,9 @@ final class FeedStore: ObservableObject {
                                                        grant: grant, issuedAt: ticket.issuedAt)
             self.nearbyBroadcast(29, grant)
             self.sendToDeviceHex(29, grant, request.deviceHex)   // directed to the requester
+            // …and the content keys this device holds, so the new device reads what other people
+            // posted without waiting for each of them to come online and re-seal for it.
+            self.sendKeyHandoff(to: request.deviceHex)
             // …and how to reach our relays, which a browser device cannot learn any other way.
             self.teachMyDevicesRelayInterfaces(to: request.deviceHex)
             // Populate the newly-seedless device: its self-sync base initializes from this pushed slot.

@@ -418,6 +418,7 @@ pub mod friend_invite;
 /// "Load history from your relays": the deep mailbox resync's planner + ingested-key journal.
 /// `pub` so the desktop backend drives the same planner directly.
 pub mod history_resync;
+mod key_handoff;
 /// Version 2 of the circle tree: key packages, v2 Welcome, v2 genesis, the v1→v2 migration.
 mod keying_v2;
 
@@ -12382,7 +12383,7 @@ mod net_tests {
     /// `let _clk = clock_guard();` at the top of a rotation-/PCS-sensitive test so a parallel
     /// clock-advancing test can't leak a week of skew into it and spuriously fire a rotation or a PCS
     /// leaf Update. Readers share, so guarded tests still run in parallel; one line, no re-indentation.
-    fn clock_guard() -> std::sync::RwLockReadGuard<'static, ()> {
+    pub(super) fn clock_guard() -> std::sync::RwLockReadGuard<'static, ()> {
         CLOCK_LOCK.read().unwrap_or_else(|e| e.into_inner())
     }
 

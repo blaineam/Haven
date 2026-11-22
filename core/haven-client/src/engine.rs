@@ -483,6 +483,10 @@ pub struct Engine {
     revoked_told: std::sync::atomic::AtomicBool,
     /// The last mailbox pass stopped at its per-pass cap with more waiting: poll again at once.
     mailbox_backlog: std::sync::atomic::AtomicBool,
+    /// When this device last asked its account's other devices for keys (ms; 0 = never).
+    key_handoff_asked: StdMutex<u64>,
+    /// When each of my devices was last answered (device hex → ms).
+    key_handoff_answered: StdMutex<HashMap<String, u64>>,
     /// When every relay began refusing this device its OWN account's slots, with no relay
     /// accepting since (ms; 0 = not refused), and how many refusals: see `note_self_refused`.
     self_refused: StdMutex<(u64, u32)>,
@@ -1013,6 +1017,8 @@ impl Engine {
             persist_pending: std::sync::atomic::AtomicBool::new(false),
             revoked_told: std::sync::atomic::AtomicBool::new(false),
             mailbox_backlog: std::sync::atomic::AtomicBool::new(false),
+            key_handoff_asked: StdMutex::new(0),
+            key_handoff_answered: StdMutex::new(HashMap::new()),
             self_refused: StdMutex::new((0, 0)),
             qa_call: std::sync::atomic::AtomicU8::new(0),
             last_epoch_reseal: StdMutex::new(0),
@@ -1139,6 +1145,8 @@ impl Engine {
             persist_pending: std::sync::atomic::AtomicBool::new(false),
             revoked_told: std::sync::atomic::AtomicBool::new(false),
             mailbox_backlog: std::sync::atomic::AtomicBool::new(false),
+            key_handoff_asked: StdMutex::new(0),
+            key_handoff_answered: StdMutex::new(HashMap::new()),
             self_refused: StdMutex::new((0, 0)),
             qa_call: std::sync::atomic::AtomicU8::new(0),
             last_epoch_reseal: StdMutex::new(0),
@@ -2146,9 +2154,17 @@ impl Engine {
         self.start_self_sync_loop();
         let me = self.clone();
         crate::rt::spawn(async move {
+            let mut beats: u64 = 0;
             loop {
                 crate::rt::sleep(std::time::Duration::from_secs(10)).await;
                 let now = now_ms();
+                // Ask my account's other devices for the keys they hold: on the first heartbeat
+                // and every five minutes (the call itself allows one a minute). A device linked
+                // today reads other people's posts through this, not by waiting for each of them.
+                beats += 1;
+                if beats % 30 == 1 {
+                    me.request_key_handoff();
+                }
                 // Scheduled posts are time-sensitive — check every heartbeat so they fire punctually
                 // regardless of the adaptive back-off below (cheap: just compares due timestamps).
                 me.fire_due_scheduled();
@@ -3012,6 +3028,10 @@ impl Engine {
         // 5b. Tell the new device how to reach our relays (URLs + token). A browser device cannot
         //     learn that any other way before it holds circle keys — see `wire::RELAY_INTERFACE`.
         self.teach_my_devices_relay_interfaces();
+        // …and the content keys this device holds, so the new device reads what other people
+        // posted without waiting for each of them to come online and re-seal for it. It also
+        // asks for them itself once it is up (`request_key_handoff`), in case this is too early.
+        self.send_key_handoff_to(&req.device_hex);
         // 6. Push full state so the new device can prime its self-sync base from my pushed slot.
         let me = self.clone();
         crate::rt::spawn(async move {
@@ -5718,6 +5738,22 @@ impl Engine {
         self.teach_my_devices_relay_interfaces();
     }
 
+    /// Send one frame to exactly this DEVICE id (no account expansion, no hints). For frames
+    /// between the devices of one account, whose ids come straight from the account's roster.
+    fn send_frame_direct(self: &Arc<Self>, t: u8, payload: &[u8], device_hex: &str) {
+        let node = self.node.lock().clone();
+        let Some(node) = node else { return };
+        let frame = wire::frame(t, payload);
+        let to = device_hex.to_string();
+        // My own device, asked for on purpose: an earlier failed dial must not hold this back.
+        let _ = node.forgive_dial(to.clone());
+        crate::rt::spawn(async move {
+            if let Err(e) = node.send_to_node(to.clone(), frame).await {
+                log::debug!("send type={t} to my device {} failed: {e}", &to.chars().take(8).collect::<String>());
+            }
+        });
+    }
+
     fn send_frame(self: &Arc<Self>, t: u8, payload: &[u8], to_node_hex: &str) {
         let node = self.node.lock().clone();
         let Some(node) = node else { return };
@@ -5826,6 +5862,8 @@ impl Engine {
                 wire::SEEDLESS_ENROLL_REQ => me.handle_seedless_enroll_request(sender_device.as_deref(), &body),
                 wire::SEEDLESS_ENROLL_GRANT => me.handle_seedless_enroll_grant(&body).await,
                 wire::DEVICE_ROSTER => me.handle_device_roster_announce(&body),
+                wire::KEY_HANDOFF_REQ => me.handle_key_handoff_request(sender_device.as_deref()),
+                wire::KEY_HANDOFF => me.handle_key_handoff(&body),
                 wire::RELAY => me.handle_relay(&body),
                 _ => log::debug!("ignoring frame type {t} (not yet handled)"),
             }
@@ -7352,6 +7390,103 @@ impl Engine {
             self.authorize_membership();
             self.note_if_this_device_was_revoked();
         }
+    }
+
+    // ── Key hand-off between my own devices (haven_ffi `key_handoff`) ─────────────────────────
+
+    /// Ask the other devices of my account for the content keys they hold. Cheap (an empty frame
+    /// per device) and rate-limited: at most once a minute, whoever calls.
+    pub fn request_key_handoff(self: &Arc<Self>) {
+        const EVERY_MS: u64 = 60_000;
+        {
+            let mut last = self.key_handoff_asked.lock();
+            let now = now_ms();
+            if *last != 0 && now.saturating_sub(*last) < EVERY_MS {
+                return;
+            }
+            *last = now;
+        }
+        let me = self.social.my_device_node_hex().to_lowercase();
+        let acct = self.social.my_node_hex().to_lowercase();
+        let mut asked = 0;
+        for d in self.social.device_node_ids_for(acct.clone()) {
+            let d = d.to_lowercase();
+            if d == me || d == acct {
+                continue; // not myself; and the bare account id is no device to dial
+            }
+            self.send_frame_direct(wire::KEY_HANDOFF_REQ, &[], &d);
+            asked += 1;
+        }
+        if asked > 0 {
+            log::info!("key hand-off: asked {asked} of my devices");
+        }
+    }
+
+    /// One of my account's devices asks for keys: seal them to it. The core refuses anything
+    /// that is not an authorized device of my own account, so there is nothing to decide here
+    /// beyond not answering the same device more than once in half a minute.
+    fn handle_key_handoff_request(self: &Arc<Self>, sender_device: Option<&str>) {
+        const EVERY_MS: u64 = 30_000;
+        let Some(dev) = sender_device.map(|d| d.to_lowercase()) else { return };
+        {
+            let mut answered = self.key_handoff_answered.lock();
+            let now = now_ms();
+            if answered.get(&dev).is_some_and(|t| now.saturating_sub(*t) < EVERY_MS) {
+                return;
+            }
+            answered.insert(dev.clone(), now);
+            if answered.len() > 64 {
+                answered.retain(|_, t| now.saturating_sub(*t) < EVERY_MS);
+            }
+        }
+        self.send_key_handoff_to(&dev);
+    }
+
+    /// Seal what this device holds to one device of my account and send it (nothing is sent to
+    /// a device the core does not recognise as mine).
+    fn send_key_handoff_to(self: &Arc<Self>, device_hex: &str) {
+        let blob = self.social.export_key_handoff(device_hex.to_string());
+        if blob.is_empty() {
+            return;
+        }
+        log::info!("key hand-off: sent {} bytes to one of my devices", blob.len());
+        self.send_frame_direct(wire::KEY_HANDOFF, &blob, device_hex);
+    }
+
+    /// Keys from another device of my account. The core verifies who sealed them. If a circle
+    /// gained a key, what this device skipped for want of one is on the relay still: forget that
+    /// those entries were seen, so the next passes fetch and open them.
+    fn handle_key_handoff(self: &Arc<Self>, body: &[u8]) {
+        let gained = self.social.import_key_handoff(body.to_vec());
+        if gained.is_empty() {
+            return;
+        }
+        log::info!("key hand-off: {} circle(s) gained keys", gained.len());
+        {
+            let mut st = self.dyn_state.lock();
+            let before = st.seen_mailbox.len();
+            st.seen_mailbox.retain(|k| {
+                k.contains("/__live__/") || !gained.iter().any(|cid| k.starts_with(&format!("haven/mailbox/{cid}/")))
+            });
+            if st.seen_mailbox.len() != before {
+                st.seen_journal.note_removed();
+            }
+            st.mailbox_list_digests.retain(|k, _| !gained.iter().any(|cid| k.ends_with(&format!("|{cid}"))));
+            st.next_poll_due_ms = 0;
+        }
+        self.flush_seen_mailbox();
+        self.persist();
+        self.emit_changed();
+        let me = self.clone();
+        crate::rt::spawn(async move {
+            me.poll_mailbox().await;
+            let mut passes = 0;
+            while me.mailbox_backlog.swap(false, std::sync::atomic::Ordering::SeqCst) && passes < MAILBOX_BACKLOG_PASSES {
+                passes += 1;
+                crate::rt::sleep(std::time::Duration::from_millis(150)).await;
+                me.poll_mailbox().await;
+            }
+        });
     }
 
     /// A LINKED device that holds no account key learns it was removed: its own account's signed

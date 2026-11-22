@@ -58,6 +58,12 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   fetched a relay's mailbox one entry at a time, at most 48 per circle per pass, one pass every
   30 seconds. Entries are now fetched eight at a time, and passes follow one another while a
   backlog remains.
+- **A newly linked device showed only its own account's posts.** Everyone else's posts are sealed
+  by their devices to the devices they know of, so a new device (a browser most visibly) waited
+  for each contact's app to come online and re-seal for it, and got nothing from a contact whose
+  app stayed closed. The devices already on the account now hand a new device the keys they
+  hold: it asks on start and every five minutes, and the device that approved it sends them at
+  once. Only between authorized devices of the same account; a removed device gets nothing.
 
 ### Changed
 - **A linked browser now reads everything its account reads.** Each circle used to have to allow

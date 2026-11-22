@@ -129,6 +129,13 @@ What that means, said plainly:
 - An app from before this change still applies the old rule to what it seals, so its posts reach
   a browser only if that circle had allowed browsers.
 
+**Other people's posts.** Each author seals to the devices they know of, and nobody but your own
+account knows about a browser you linked a minute ago. Your other devices therefore hand it the
+keys they hold ([`DECISIONS.md`](DECISIONS.md) D25): the browser asks when it starts and every
+five minutes, and the device that approved it sends them straight away. That needs one of your
+devices to be running a build that has this, at the same time as the browser.
+`web-client/smoke/friend.mjs` proves it with the friend's app closed (`FRIEND_OFFLINE=1`).
+
 ## What a browser cannot do
 
 | Limit | Effect |

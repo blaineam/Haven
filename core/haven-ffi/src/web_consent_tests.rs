@@ -13,6 +13,7 @@ const ALICE: [u8; 32] = [71u8; 32];
 const BOB: [u8; 32] = [72u8; 32];
 const BOB_DEVICE: [u8; 32] = [73u8; 32];
 const WEB: [u8; 32] = [74u8; 32];
+const TABLET: [u8; 32] = [75u8; 32];
 
 fn acct_hex(seed: &[u8; 32]) -> String {
     hex(&Identity::from_seed(seed).public().node_id_bytes())
@@ -187,4 +188,118 @@ fn a_browser_still_cannot_sign_for_the_account() {
     assert!(!f.web.set_circle_web_access(f.cid.clone(), true));
     assert!(!f.web.circle_web_access(f.cid.clone()).can_sign);
     assert!(f.alice.circle_web_access(f.cid.clone()).can_sign);
+}
+
+// ── Key hand-off between my own devices (`key_handoff`) ─────────────────────────────────────
+
+/// Alice and Bob are contacts and have read each other. Then Alice links a new device that Bob's
+/// app never hears about (Bob does not come online again). Returns the new device.
+fn linked_while_bob_is_away(f: &Fleet, seed: [u8; 32], name: &str) -> Arc<HavenSocial> {
+    let (dev, roster) = link(&f.alice, ALICE, seed, name);
+    if f.cid != DEFAULT_CIRCLE {
+        dev.create_circle(f.cid.clone(), "Family".into());
+        let _ = dev.set_circle_creator(f.cid.clone(), acct_hex(&ALICE));
+    }
+    dev.add_contact_bundle(f.cid.clone(), f.bob.my_bundle()).unwrap();
+    assert!(f.alice.ingest_roster_wire(roster));
+    // The new device knows Bob's devices (that is account state, which its own account syncs)…
+    let bob_roster = f.bob.my_device_roster_wire();
+    assert!(dev.ingest_roster_wire(bob_roster));
+    dev
+}
+
+#[test]
+fn a_new_device_reads_a_friends_posts_once_my_own_device_hands_over_its_keys() {
+    // Keys rotate on a schedule: a parallel test that advances the clock must not rotate Bob's
+    // between his post and the hand-off.
+    let _clk = super::net_tests::clock_guard();
+    for owned in [false, true] {
+        let f = fleet(owned);
+        let Fleet { alice, bob, cid, .. } = &f;
+        // Alice's phone is a device in her own roster, as every real primary is.
+        assert!(!alice.register_device(alice.my_device_bundle(), "Alice's phone".into(), 0).is_empty());
+        post(bob, cid, "bob's, before the new device", 2_000);
+        settle(&f);
+        assert!(reads(alice, cid, "bob's, before the new device"));
+
+        let tablet = linked_while_bob_is_away(&f, TABLET, "Alice's tablet");
+        let tablet_hex = tablet.my_device_node_hex();
+        // Bob's envelopes reach the tablet (they are on the relay), but Bob sealed them before the
+        // tablet existed: it cannot open them.
+        sync(bob, &tablet, cid);
+        assert!(!reads(&tablet, cid, "bob's, before the new device"), "owned={owned}: nothing opens without a key");
+
+        // Alice's phone is up to date with Bob (it has been running all along); Bob's app never
+        // hears of the tablet. Her phone hands over what it holds.
+        sync(bob, alice, cid);
+        let blob = alice.export_key_handoff(tablet_hex.clone());
+        assert!(!blob.is_empty());
+        let gained = tablet.import_key_handoff(blob.clone());
+        assert!(gained.contains(cid), "owned={owned}: {gained:?}");
+        sync(bob, &tablet, cid);
+        assert!(reads(&tablet, cid, "bob's, before the new device"), "owned={owned}: the friend's post opens");
+        // Handing the same keys over again changes nothing.
+        assert!(tablet.import_key_handoff(blob).is_empty());
+    }
+}
+
+#[test]
+fn a_hand_off_is_only_between_authorized_devices_of_one_account() {
+    let f = fleet(false);
+    let Fleet { alice, bob, web, cid } = &f;
+    post(bob, cid, "bob's", 2_000);
+    post(alice, cid, "alice's", 2_100);
+    settle(&f);
+    let alice_dev = alice.my_device_node_hex();
+    let web_dev = web.my_device_node_hex();
+    let bob_dev = bob.my_device_node_hex();
+
+    // A device does not export to itself, to a contact's device, or to a made-up id.
+    assert!(alice.export_key_handoff(alice_dev.clone()).is_empty());
+    assert!(alice.export_key_handoff(bob_dev.clone()).is_empty(), "never to another account's device");
+    assert!(alice.export_key_handoff("ab".repeat(32)).is_empty());
+    assert!(alice.export_key_handoff("nonsense".into()).is_empty());
+
+    // Bob cannot hand Alice's devices anything: he is not a device of her account.
+    assert!(bob.export_key_handoff(web_dev.clone()).is_empty());
+
+    // A blob sealed to one device opens on no other.
+    let for_web = alice.export_key_handoff(web_dev.clone());
+    assert!(!for_web.is_empty());
+    assert!(bob.import_key_handoff(for_web.clone()).is_empty(), "not Bob's to open");
+    let mut tampered = for_web.clone();
+    let last = tampered.len() - 1;
+    tampered[last] ^= 1;
+    assert!(web.import_key_handoff(tampered).is_empty(), "a changed blob is refused");
+    assert!(web.import_key_handoff(vec![1, 2, 3]).is_empty());
+
+    // A device the account has removed is neither a target nor a source.
+    let (tablet, roster) = link(alice, ALICE, TABLET, "Alice's tablet");
+    assert!(web.ingest_roster_wire(roster));
+    let tablet_hex = tablet.my_device_node_hex();
+    let from_tablet_before = tablet.export_key_handoff(web_dev.clone());
+    // Alice removes the tablet: a newer account-signed roster without it.
+    let id = |b: Vec<u8>| HavenId::from_bytes(&b).unwrap().node_id_bytes().to_vec();
+    let list = crate::multidevice::sign_device_list(
+        ALICE.to_vec(),
+        99,
+        9,
+        vec![id(alice.my_bundle()), id(web.my_device_bundle())],
+        vec![id(tablet.my_device_bundle())],
+    )
+    .unwrap();
+    let creds = vec![
+        crate::multidevice::issue_device_credential(ALICE.to_vec(), alice.my_bundle(), "phone".into(), 9).unwrap(),
+        crate::multidevice::issue_device_credential(
+            ALICE.to_vec(),
+            web.my_device_bundle(),
+            haven_p2p::webpolicy::mark_web_device_name("Chrome"),
+            9,
+        )
+        .unwrap(),
+    ];
+    assert!(alice.set_my_device_roster(list.clone(), creds.clone()));
+    assert!(web.ingest_device_roster(alice.my_bundle(), list, creds));
+    assert!(alice.export_key_handoff(tablet_hex).is_empty(), "a removed device gets nothing");
+    assert!(web.import_key_handoff(from_tablet_before).is_empty(), "and what it sealed earlier is refused");
 }

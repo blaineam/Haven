@@ -9,6 +9,10 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Fixed
+
+- **Release builds: the Linux Flatpak bundle builds again when Flathub has a newer runtime than the build image.** Updating the image's GNOME runtime failed with "Invalid cross-device link", which held back the whole GitHub Release for 2.2.2. The build now copies the image's Flatpak installation into the container's writable layer first. A release rebuilt by hand from a branch also pins the Flatpak manifest to the release tag rather than the branch name.
+
 ## 2.2.2 (2026-11-22)
 
 ### Fixed

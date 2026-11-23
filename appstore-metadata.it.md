@@ -40,6 +40,8 @@ Novità della 2.0: il tuo relay fa il lavoro pesante con foto e video, così il 
 • Un dispositivo appena collegato mostra subito i post recenti degli altri: gli altri tuoi dispositivi gli passano le chiavi che hanno.
 • Un dispositivo rimosso ora viene avvisato, e un browser rimosso si cancella da solo.
 • Corretto: la scansione del codice di un dispositivo poteva fallire e continuare a fallire per minuti.
+• I video che condividi sono molto più leggeri (15 minuti restano sotto i 300 MB) e i video HDR vengono convertiti per essere visti correttamente da tutti.
+• Un browser collegato mostra prima i tuoi post più recenti invece di scaricare tutta la cronologia.
 
 ## whats_new_macos
 2.2.2 — Un browser collegato ora mostra tutto.
@@ -47,6 +49,8 @@ Novità della 2.0: il tuo relay fa il lavoro pesante con foto e video, così il 
 • Un dispositivo appena collegato mostra subito i post recenti degli altri: gli altri tuoi dispositivi gli passano le chiavi che hanno.
 • Un dispositivo rimosso ora viene avvisato, e un browser rimosso si cancella da solo.
 • Corretto: la scansione del codice di un dispositivo poteva fallire e continuare a fallire per minuti.
+• I video che condividi sono molto più leggeri (15 minuti restano sotto i 300 MB) e i video HDR vengono convertiti per essere visti correttamente da tutti.
+• Un browser collegato mostra prima i tuoi post più recenti invece di scaricare tutta la cronologia.
 
 ## whats_new_windows
 2.2.2 — Un browser collegato ora mostra tutto.
@@ -55,6 +59,8 @@ Novità della 2.0: il tuo relay fa il lavoro pesante con foto e video, così il 
 • Corretto: i codici QR erano disegnati troppo piccoli per essere scansionati e le foto profilo impostate da un telefono non comparivano.
 • Il recupero da un relay è molto più veloce.
 • Corretto: la scansione del codice di un dispositivo poteva fallire e continuare a fallire per minuti.
+• I video che condividi sono molto più leggeri (15 minuti restano sotto i 300 MB).
+• Un browser collegato mostra prima i tuoi post più recenti invece di scaricare tutta la cronologia.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

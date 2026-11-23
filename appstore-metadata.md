@@ -38,6 +38,8 @@ New in 2.0: your relay does the heavy lifting for photos and videos, so your pho
 • A newly linked device shows other people's recent posts right away: your other devices hand it the keys they hold.
 • Removing a device now tells it, and a removed browser erases itself.
 • Fixed: scanning a device's code could fail and keep failing for minutes.
+• Videos you share are much smaller (15 minutes is under 300 MB), and HDR video is converted so it looks right for everyone.
+• A linked browser shows your newest posts first instead of downloading your whole history.
 
 ## whats_new_macos
 2.2.2 — A linked browser now shows everything.
@@ -45,6 +47,8 @@ New in 2.0: your relay does the heavy lifting for photos and videos, so your pho
 • A newly linked device shows other people's recent posts right away: your other devices hand it the keys they hold.
 • Removing a device now tells it, and a removed browser erases itself.
 • Fixed: scanning a device's code could fail and keep failing for minutes.
+• Videos you share are much smaller (15 minutes is under 300 MB), and HDR video is converted so it looks right for everyone.
+• A linked browser shows your newest posts first instead of downloading your whole history.
 
 ## whats_new_windows
 2.2.2 — A linked browser now shows everything.
@@ -53,6 +57,8 @@ New in 2.0: your relay does the heavy lifting for photos and videos, so your pho
 • Fixed: QR codes were drawn too small to scan, and profile pictures set on a phone did not show.
 • Catching up from a relay is much faster.
 • Fixed: scanning a device's code could fail and keep failing for minutes.
+• Videos you share are much smaller (15 minutes is under 300 MB).
+• A linked browser shows your newest posts first instead of downloading your whole history.
 
 ## whats_new_previous
 2.0.2 — Optimized for iPhone Duo. Opened flat on a dual-screen phone, and on iPad, the feed and profile now sit in a centered column, so photos and videos are no longer huge and you scroll less.

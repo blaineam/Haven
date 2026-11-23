@@ -2,3 +2,4 @@
 • Ein verknüpfter Browser liest jetzt alle deine Kreise und Nachrichten. Den Schalter „Webbrowser“ pro Kreis gibt es nicht mehr; entferne einen Browser unter Einstellungen → Geräte.
 • Ein neu verknüpftes Gerät zeigt die neueren Beiträge anderer sofort.
 • Behoben: Das Scannen eines Gerätecodes konnte minutenlang fehlschlagen.
+• Geteilte Videos sind deutlich kleiner; HDR wird umgewandelt.

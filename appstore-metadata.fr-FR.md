@@ -40,6 +40,8 @@ Nouveau en 2.0 : votre relay prend en charge photos et vidéos pour que votre t�
 • Un appareil tout juste lié affiche aussitôt les publications récentes des autres : vos autres appareils lui transmettent les clés qu'ils détiennent.
 • Un appareil retiré en est maintenant informé, et un navigateur retiré s'efface lui-même.
 • Corrigé : scanner le code d'un appareil pouvait échouer et continuer d'échouer pendant plusieurs minutes.
+• Les vidéos que vous partagez sont bien plus légères (15 minutes font moins de 300 Mo), et les vidéos HDR sont converties pour s’afficher correctement chez tout le monde.
+• Un navigateur lié affiche d’abord vos publications les plus récentes au lieu de télécharger tout votre historique.
 
 ## whats_new_macos
 2.2.2 — Un navigateur lié affiche désormais tout.
@@ -47,6 +49,8 @@ Nouveau en 2.0 : votre relay prend en charge photos et vidéos pour que votre t�
 • Un appareil tout juste lié affiche aussitôt les publications récentes des autres : vos autres appareils lui transmettent les clés qu'ils détiennent.
 • Un appareil retiré en est maintenant informé, et un navigateur retiré s'efface lui-même.
 • Corrigé : scanner le code d'un appareil pouvait échouer et continuer d'échouer pendant plusieurs minutes.
+• Les vidéos que vous partagez sont bien plus légères (15 minutes font moins de 300 Mo), et les vidéos HDR sont converties pour s’afficher correctement chez tout le monde.
+• Un navigateur lié affiche d’abord vos publications les plus récentes au lieu de télécharger tout votre historique.
 
 ## whats_new_windows
 2.2.2 — Un navigateur lié affiche désormais tout.
@@ -55,6 +59,8 @@ Nouveau en 2.0 : votre relay prend en charge photos et vidéos pour que votre t�
 • Corrigé : les codes QR étaient affichés trop petits pour être scannés, et les photos de profil définies sur un téléphone n'apparaissaient pas.
 • Le rattrapage depuis un relais est beaucoup plus rapide.
 • Corrigé : scanner le code d'un appareil pouvait échouer et continuer d'échouer pendant plusieurs minutes.
+• Les vidéos que vous partagez sont bien plus légères (15 minutes font moins de 300 Mo).
+• Un navigateur lié affiche d’abord vos publications les plus récentes au lieu de télécharger tout votre historique.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

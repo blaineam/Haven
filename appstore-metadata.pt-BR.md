@@ -40,6 +40,8 @@ Novo no 2.0: seu relay faz o trabalho pesado com fotos e vídeos para o celular 
 • Um dispositivo recém-vinculado mostra na hora as publicações recentes das outras pessoas: seus outros dispositivos passam a ele as chaves que têm.
 • Ao remover um dispositivo, ele agora é avisado, e um navegador removido apaga a si mesmo.
 • Corrigido: escanear o código de um dispositivo podia falhar e continuar falhando por minutos.
+• Os vídeos que você compartilha ficaram muito menores (15 minutos ficam abaixo de 300 MB), e vídeos em HDR são convertidos para aparecerem corretamente para todos.
+• Um navegador vinculado mostra primeiro suas publicações mais recentes em vez de baixar todo o seu histórico.
 
 ## whats_new_macos
 2.2.2 — Um navegador vinculado agora mostra tudo.
@@ -47,6 +49,8 @@ Novo no 2.0: seu relay faz o trabalho pesado com fotos e vídeos para o celular 
 • Um dispositivo recém-vinculado mostra na hora as publicações recentes das outras pessoas: seus outros dispositivos passam a ele as chaves que têm.
 • Ao remover um dispositivo, ele agora é avisado, e um navegador removido apaga a si mesmo.
 • Corrigido: escanear o código de um dispositivo podia falhar e continuar falhando por minutos.
+• Os vídeos que você compartilha ficaram muito menores (15 minutos ficam abaixo de 300 MB), e vídeos em HDR são convertidos para aparecerem corretamente para todos.
+• Um navegador vinculado mostra primeiro suas publicações mais recentes em vez de baixar todo o seu histórico.
 
 ## whats_new_windows
 2.2.2 — Um navegador vinculado agora mostra tudo.
@@ -55,6 +59,8 @@ Novo no 2.0: seu relay faz o trabalho pesado com fotos e vídeos para o celular 
 • Corrigido: os códigos QR eram desenhados pequenos demais para escanear, e as fotos de perfil definidas em um telefone não apareciam.
 • Colocar-se em dia a partir de um relay ficou muito mais rápido.
 • Corrigido: escanear o código de um dispositivo podia falhar e continuar falhando por minutos.
+• Os vídeos que você compartilha ficaram muito menores (15 minutos ficam abaixo de 300 MB).
+• Um navegador vinculado mostra primeiro suas publicações mais recentes em vez de baixar todo o seu histórico.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

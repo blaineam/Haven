@@ -9,6 +9,8 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+## 2.2.2 (2026-11-22)
+
 ### Fixed
 - **A browser finds its relay again after the relay's address changes.** A relay behind a free
   tunnel gets a new hostname every time it restarts. Apps ask the relay's node where it went; a
@@ -64,8 +66,6 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   of full-size media and every thumbnail as soon as it was linked, like an app with a disk. Now
   a picture, video or thumbnail is fetched when the post it belongs to is scrolled to. Posts
   themselves (text and who posted) still arrive as before, newest shown first, a page at a time.
-
-## 2.2.2 (2026-11-21)
 
 ### Fixed
 - **QR codes were drawn the size of an icon.** In the desktop app (Linux, Windows) and the web

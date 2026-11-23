@@ -2,3 +2,4 @@
 • Um navegador vinculado agora lê todos os seus círculos e mensagens. A opção “Navegadores web” por círculo deixou de existir; remova um navegador em Ajustes → Dispositivos.
 • Um dispositivo recém-vinculado mostra na hora as publicações recentes das outras pessoas.
 • Corrigido: escanear o código de um dispositivo podia falhar por minutos.
+• Vídeos muito menores; o HDR é convertido.

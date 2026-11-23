@@ -40,6 +40,8 @@ Neu in 2.0: Dein Relay übernimmt die schwere Arbeit bei Fotos und Videos, damit
 • Ein neu verknüpftes Gerät zeigt die neueren Beiträge anderer sofort: Deine anderen Geräte geben ihm die Schlüssel, die sie haben.
 • Ein entferntes Gerät erfährt das jetzt, und ein entfernter Browser löscht sich selbst.
 • Behoben: Das Scannen eines Gerätecodes konnte fehlschlagen und minutenlang weiter fehlschlagen.
+• Geteilte Videos sind deutlich kleiner (15 Minuten bleiben unter 300 MB), und HDR-Videos werden umgewandelt, damit sie bei allen richtig aussehen.
+• Ein verknüpfter Browser zeigt zuerst deine neuesten Beiträge, statt deinen ganzen Verlauf zu laden.
 
 ## whats_new_macos
 2.2.2 – Ein verknüpfter Browser zeigt jetzt alles.
@@ -47,6 +49,8 @@ Neu in 2.0: Dein Relay übernimmt die schwere Arbeit bei Fotos und Videos, damit
 • Ein neu verknüpftes Gerät zeigt die neueren Beiträge anderer sofort: Deine anderen Geräte geben ihm die Schlüssel, die sie haben.
 • Ein entferntes Gerät erfährt das jetzt, und ein entfernter Browser löscht sich selbst.
 • Behoben: Das Scannen eines Gerätecodes konnte fehlschlagen und minutenlang weiter fehlschlagen.
+• Geteilte Videos sind deutlich kleiner (15 Minuten bleiben unter 300 MB), und HDR-Videos werden umgewandelt, damit sie bei allen richtig aussehen.
+• Ein verknüpfter Browser zeigt zuerst deine neuesten Beiträge, statt deinen ganzen Verlauf zu laden.
 
 ## whats_new_windows
 2.2.2 – Ein verknüpfter Browser zeigt jetzt alles.
@@ -55,6 +59,8 @@ Neu in 2.0: Dein Relay übernimmt die schwere Arbeit bei Fotos und Videos, damit
 • Behoben: QR-Codes wurden zu klein zum Scannen dargestellt, und auf einem Telefon gesetzte Profilbilder erschienen nicht.
 • Das Nachladen von einem Relay ist deutlich schneller.
 • Behoben: Das Scannen eines Gerätecodes konnte fehlschlagen und minutenlang weiter fehlschlagen.
+• Geteilte Videos sind deutlich kleiner (15 Minuten bleiben unter 300 MB).
+• Ein verknüpfter Browser zeigt zuerst deine neuesten Beiträge, statt deinen ganzen Verlauf zu laden.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

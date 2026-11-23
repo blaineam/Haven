@@ -40,6 +40,8 @@ Novedad en 2.0: tu relay hace el trabajo pesado con fotos y vídeos para que tu 
 • Un dispositivo recién vinculado muestra enseguida las publicaciones recientes de los demás: tus otros dispositivos le pasan las claves que tienen.
 • Al quitar un dispositivo, ahora se le avisa, y un navegador quitado se borra a sí mismo.
 • Corregido: escanear el código de un dispositivo podía fallar y seguir fallando durante minutos.
+• Los vídeos que compartes ocupan mucho menos (15 minutos son menos de 300 MB), y el vídeo HDR se convierte para que se vea bien para todos.
+• Un navegador vinculado muestra primero tus publicaciones más recientes en lugar de descargar todo tu historial.
 
 ## whats_new_macos
 2.2.2 — Un navegador vinculado ahora lo muestra todo.
@@ -47,6 +49,8 @@ Novedad en 2.0: tu relay hace el trabajo pesado con fotos y vídeos para que tu 
 • Un dispositivo recién vinculado muestra enseguida las publicaciones recientes de los demás: tus otros dispositivos le pasan las claves que tienen.
 • Al quitar un dispositivo, ahora se le avisa, y un navegador quitado se borra a sí mismo.
 • Corregido: escanear el código de un dispositivo podía fallar y seguir fallando durante minutos.
+• Los vídeos que compartes ocupan mucho menos (15 minutos son menos de 300 MB), y el vídeo HDR se convierte para que se vea bien para todos.
+• Un navegador vinculado muestra primero tus publicaciones más recientes en lugar de descargar todo tu historial.
 
 ## whats_new_windows
 2.2.2 — Un navegador vinculado ahora lo muestra todo.
@@ -55,6 +59,8 @@ Novedad en 2.0: tu relay hace el trabajo pesado con fotos y vídeos para que tu 
 • Corregido: los códigos QR se dibujaban demasiado pequeños para escanearlos y las fotos de perfil puestas desde un teléfono no aparecían.
 • Ponerse al día desde un relay es mucho más rápido.
 • Corregido: escanear el código de un dispositivo podía fallar y seguir fallando durante minutos.
+• Los vídeos que compartes ocupan mucho menos (15 minutos son menos de 300 MB).
+• Un navegador vinculado muestra primero tus publicaciones más recientes en lugar de descargar todo tu historial.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

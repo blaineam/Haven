@@ -2,3 +2,4 @@
 • Un browser collegato ora legge tutte le tue cerchie e i tuoi messaggi. L'interruttore «Browser web» per cerchia non c'è più; rimuovi un browser in Impostazioni → Dispositivi.
 • Un dispositivo appena collegato mostra subito i post recenti degli altri.
 • Corretto: la scansione del codice di un dispositivo poteva fallire per minuti.
+• Video molto più leggeri; l’HDR viene convertito.

@@ -15782,30 +15782,41 @@ mod net_tests {
     fn stage1_a_deep_branch_is_final_and_a_shallow_fork_still_resolves_by_hash() {
         let _clk = clock_guard();
         let (acct_a, acct_b, dev_a, dev_b) = ([71u8; 32], [72u8; 32], [81u8; 32], [82u8; 32]);
-        let (insts, cid) = mls_capable_fleet(&[acct_a, acct_b], &[dev_a, dev_b], 0);
-        let (a, b) = (&insts[0], &insts[1]);
-        flip_and_join(&insts, &cid);
-        s1_update(a, &[a, b], &cid); // epoch 2 — the fork point
-        let (stale_a, early_b) = (a.export_state(), b.export_state());
-        s1_update(a, &[a, b], &cid); // epoch 3 — the commit the fleet took
-        let commit_at = |s: &Arc<HavenSocial>, epoch: u64| -> Vec<([u8; 32], Vec<u8>)> {
-            s1_commits(s, &cid)
+        fn commit_at(s: &Arc<HavenSocial>, cid: &str, epoch: u64) -> Vec<([u8; 32], Vec<u8>)> {
+            s1_commits(s, cid)
                 .into_iter()
                 .filter(|(_, b)| treekem::Commit::from_bytes(b).map(|c| c.epoch == epoch).unwrap_or(false))
                 .collect()
-        };
-        let real3 = commit_at(a, 3)[0].0;
-        // A stale relaunch of the committer authors its own epoch-3 Update on the epoch-2 tip. Repeat
-        // until one out-hashes the real one (each try is a coin flip; the inputs are random).
-        let rival = (0..64)
+        }
+        // A fleet at epoch 3, B's state as saved at the fork point (epoch 2), and a late epoch-3
+        // commit — authored by a stale relaunch of the committer on the epoch-2 tip — that
+        // out-hashes the one the fleet took. Each stale try is a coin weighted by where the real
+        // commit's hash fell: a real hash near the top loses to almost nothing, so 64 tries on ONE
+        // fleet fail about once in 65 runs (it did, in a release gate). A fleet whose real commit
+        // cannot be beaten in 64 tries is thrown away and another is built; eight such fleets in a
+        // row is (1/65)^8.
+        let (insts, cid, early_b, real3, rival) = (0..8)
             .find_map(|_| {
-                let stale = s1_relaunch(acct_a, dev_a, stale_a.clone());
-                stale.profile_seed_drop_version(b.my_bundle(), card(b, "stale"));
-                stale.state.lock().unwrap().circles.iter_mut().find(|c| c.id == cid).unwrap().rotated_at = 1;
-                let _ = stale.sync_envelopes(cid.clone());
-                commit_at(&stale, 3).into_iter().find(|(h, _)| *h > real3)
+                let (insts, cid) = mls_capable_fleet(&[acct_a, acct_b], &[dev_a, dev_b], 0);
+                flip_and_join(&insts, &cid);
+                let (a, b) = (&insts[0], &insts[1]);
+                s1_update(a, &[a, b], &cid); // epoch 2 — the fork point
+                let (stale_a, early_b) = (a.export_state(), b.export_state());
+                s1_update(a, &[a, b], &cid); // epoch 3 — the commit the fleet took
+                let real3 = commit_at(a, &cid, 3)[0].0;
+                let rival = (0..64).find_map(|_| {
+                    let stale = s1_relaunch(acct_a, dev_a, stale_a.clone());
+                    stale.profile_seed_drop_version(b.my_bundle(), card(b, "stale"));
+                    stale.state.lock().unwrap().circles.iter_mut().find(|c| c.id == cid).unwrap().rotated_at = 1;
+                    let _ = stale.sync_envelopes(cid.clone());
+                    let authored = commit_at(&stale, &cid, 3);
+                    assert_eq!(authored.len(), 1, "the stale committer authors exactly one epoch-3 commit on the epoch-2 tip");
+                    authored.into_iter().find(|(h, _)| *h > real3)
+                })?;
+                Some((insts, cid, early_b, real3, rival))
             })
             .expect("a late epoch-3 commit with the larger hash");
+        let (a, b) = (&insts[0], &insts[1]);
         assert_ne!(rival.0, real3);
 
         // A device that still holds its epoch-2 state (B, as saved before epoch 3) and now sees both.

@@ -36,11 +36,13 @@ class MediaReoptimizeTest {
     }
 
     @Test fun ourOwnEncoderOutputReadsAtTarget() {
-        // THE LOOP GUARD. 1080p H.264 at the real measured output rate (~4.7 Mbps overall, video +
-        // passthrough audio) must judge as ALREADY AT TARGET, or every scan re-offers what the last
-        // run just produced.
+        // THE LOOP GUARD. 1080p H.264 at what the encoder is asked for (video + audio) plus the 10%
+        // an averaging encoder and the container can add must judge as ALREADY AT TARGET, or every
+        // scan re-offers what the last run just produced. Taken from [MediaTargets], not a literal,
+        // so the guard follows the target: a hard-coded 4.7 Mbps here outlived the 4.5 Mbps target.
         val seconds = 60.0
-        val bytes = (4_700_000L * seconds / 8).toLong()
+        val overall = ((MediaTargets.VIDEO_BITRATE + MediaTargets.VIDEO_AUDIO_BITRATE) * 1.10).toLong()
+        val bytes = (overall * seconds / 8).toLong()
         val s = MediaOptimizationTarget.judgeVideo(bytes, 1920, 1080, "video/avc", seconds)
         assertNotNull(s)
         assertNull("encoder output must re-probe as at target: ${s!!.aboveTargetReason}", s.aboveTargetReason)

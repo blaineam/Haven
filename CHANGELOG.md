@@ -12,6 +12,8 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 ## 2.2.2 (2026-11-22)
 
 ### Fixed
+
+- **Two tests that could fail a release gate with nothing wrong (tests only).** The Android check that the video encoder's own output is not offered for re-optimizing again still assumed the old 4.5 Mbps target, so it failed once the target became 2.4 Mbps; it now takes its figure from the target. A core keying test that needs a late commit to out-hash an earlier one tried 64 times against one fixed commit, which fails about one run in 65 when that commit's hash is high; it now builds a new fleet and tries again.
 - **A browser finds its relay again after the relay's address changes.** A relay behind a free
   tunnel gets a new hostname every time it restarts. Apps ask the relay's node where it went; a
   browser had no way to, because HTTPS to the old hostname was the only thing it could do with

@@ -36,7 +36,7 @@ Each platform keeps **one** constants block, so the three can be diffed at a gla
 | Video long edge | 1920 | ✅ | ✅ | ✅ |
 | Video bitrate | **2.4 Mbps, explicit** (15 min ≈ 285 MB with audio; 300 MB is the ceiling the owner set) | ✅ | ✅ | ✅ |
 | Dynamic range | **SDR, Rec. 709** (HDR sources are tone-mapped) | ✅ composition + tags | ✅ decoder request, Android 12+ | ✅ canvas is SDR |
-| Size guarantee | measured after encoding; over 2.65 Mbps overall is encoded again, lower | ✅ | ❌ aims only | ❌ aims only |
+| Size guarantee | measured after encoding; over 2.65 Mbps overall is encoded again, lower | ✅ | ✅ up to two retries, the last at 720p (`transcodeVideoToTarget`) | ❌ aims only |
 | Video codec | H.264 | ✅ | ✅ | ❌ VP8/9 (WebM) |
 | Faststart (`moov` first) | required | ✅ | ✅ (muxer already does it) | ❌ n/a to WebM |
 | Rotation | upright on arrival | ✅ baked into pixels | ✅ MP4 display matrix | decoder-handled |

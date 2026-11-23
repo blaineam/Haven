@@ -1409,7 +1409,7 @@ fun readVideoBytes(
         // Transcode reads the source directly (MediaExtractor), NOT the capped raw read below — so a
         // large 4K original that would blow the cap is shrunk first, then checked against it. On any
         // failure it returns null and we fall through to the always-on metadata strip.
-        transcodeVideo(context, uri, maxBytes)?.let { encoded ->
+        transcodeVideoToTarget(context, uri, maxBytes, seconds)?.let { encoded ->
             // "Optimize" must never make a file BIGGER. [MediaTargets.VIDEO_BITRATE] is a target,
             // not a ceiling on the source: a clip that was already leaner than 4.5 Mbps — a short
             // screen recording, a 720p clip someone else already compressed, anything re-shared —
@@ -1454,7 +1454,60 @@ fun readVideoBytes(
  * managed heap, so this doesn't reintroduce the large-media OOM the sealed store works so hard to
  * avoid. A wall-clock stall guard turns a wedged codec into a fallback rather than a hang.
  */
-private fun transcodeVideo(context: Context, uri: Uri, maxBytes: Int): ByteArray? {
+/**
+ * [transcodeVideo], held to a size. `KEY_BIT_RATE` is a wish: the encoder averages towards it and
+ * may overshoot by half again (hardware and software encoders differ). So the result is MEASURED —
+ * bytes over the clip's length — and when it is over [MediaTargets.VIDEO_OVERALL_CEILING] the clip
+ * is encoded again asking for proportionally less, and the third and last time at 720p as well.
+ * The smallest result is kept. This is what makes
+ * "a 15-minute video is under 300 MB" true on Android rather than hoped for, and what lets
+ * re-optimize see its own output as done (see [MediaOptimizationTarget]). Apple's `VideoEncoder`
+ * does the same.
+ *
+ * A clip whose length cannot be read is encoded once, as before: there is nothing to measure against.
+ */
+private fun transcodeVideoToTarget(context: Context, uri: Uri, maxBytes: Int, seconds: Double?): ByteArray? {
+    var ask = MediaTargets.VIDEO_BITRATE
+    var best: ByteArray? = null
+    for (attempt in 1..MediaTargets.VIDEO_ENCODE_ATTEMPTS) {
+        // The last attempt also shrinks the frame — see [MediaTargets.VIDEO_LAST_RESORT_LONG_EDGE].
+        val last = attempt == MediaTargets.VIDEO_ENCODE_ATTEMPTS
+        val encoded = transcodeVideo(context, uri, maxBytes, ask,
+            if (last) MediaTargets.VIDEO_LAST_RESORT_LONG_EDGE else MediaTargets.VIDEO_LONG_EDGE,
+            if (last) MediaTargets.VIDEO_LAST_RESORT_SHORT_EDGE else MediaTargets.VIDEO_SHORT_EDGE) ?: break
+        if (best == null || encoded.size < best.size) best = encoded
+        if (seconds == null || seconds <= 0.0) break
+        val overall = encoded.size * 8.0 / seconds
+        if (overall <= MediaTargets.VIDEO_OVERALL_CEILING) break
+        val next = nextVideoBitrateAsk(ask, overall)
+        android.util.Log.i("LocalMedia",
+            "video transcode: attempt $attempt came out at ${(overall / 1000).toInt()} kbps overall " +
+                "(asked ${ask / 1000}); ceiling ${MediaTargets.VIDEO_OVERALL_CEILING / 1000}" +
+                if (attempt < MediaTargets.VIDEO_ENCODE_ATTEMPTS) ", asking ${next / 1000}" + (if (attempt + 1 == MediaTargets.VIDEO_ENCODE_ATTEMPTS) " at 720p" else "") else ", keeping the smallest")
+        // At the floor already: asking again changes nothing, but the smaller frame still can.
+        if (next >= ask && attempt + 1 < MediaTargets.VIDEO_ENCODE_ATTEMPTS) continue
+        ask = next
+    }
+    return best
+}
+
+/**
+ * What to ask the encoder for after it produced [overallBps] from an ask of [askedBps]: the ask
+ * scaled by how far over the ceiling it landed, less 5% so the next try lands under rather than on
+ * it, never below [MediaTargets.VIDEO_BITRATE_FLOOR]. Pure, so the arithmetic is tested on the JVM.
+ */
+internal fun nextVideoBitrateAsk(askedBps: Int, overallBps: Double): Int {
+    if (overallBps <= MediaTargets.VIDEO_OVERALL_CEILING) return askedBps
+    val scaled = askedBps * (MediaTargets.VIDEO_OVERALL_CEILING / overallBps) * 0.95
+    return scaled.toInt().coerceIn(MediaTargets.VIDEO_BITRATE_FLOOR.coerceAtMost(askedBps), askedBps)
+}
+
+private fun transcodeVideo(
+    context: Context, uri: Uri, maxBytes: Int,
+    videoBitrate: Int = MediaTargets.VIDEO_BITRATE,
+    longEdge: Int = MediaTargets.VIDEO_LONG_EDGE,
+    shortEdge: Int = MediaTargets.VIDEO_SHORT_EDGE,
+): ByteArray? {
     val out = File.createTempFile("xcode", ".mp4", context.cacheDir)
     var extractor: android.media.MediaExtractor? = null
     var audioEx: android.media.MediaExtractor? = null
@@ -1489,7 +1542,7 @@ private fun transcodeVideo(context: Context, uri: Uri, maxBytes: Int): ByteArray
         val srcLong = max(srcW, srcH).toDouble()
         val srcShort = min(srcW, srcH).toDouble()
         val scale = minOf(1.0,
-            MediaTargets.VIDEO_LONG_EDGE / srcLong, MediaTargets.VIDEO_SHORT_EDGE / srcShort)
+            longEdge / srcLong, shortEdge / srcShort)
         val dstW = even((srcW * scale).toInt())
         val dstH = even((srcH * scale).toInt())
 
@@ -1502,7 +1555,7 @@ private fun transcodeVideo(context: Context, uri: Uri, maxBytes: Int): ByteArray
         // Still never INFLATE a source that was already leaner than the target — re-encoding a
         // 1 Mbps clip up to the target would spend bytes to lose quality.
         val srcBitrate = if (srcFormat.containsKey(MediaFormat.KEY_BIT_RATE)) srcFormat.getInteger(MediaFormat.KEY_BIT_RATE) else Int.MAX_VALUE
-        val bitrate = MediaTargets.VIDEO_BITRATE.coerceAtMost(srcBitrate)
+        val bitrate = videoBitrate.coerceAtMost(srcBitrate)
         val fps = if (srcFormat.containsKey(MediaFormat.KEY_FRAME_RATE))
             srcFormat.getInteger(MediaFormat.KEY_FRAME_RATE).coerceIn(MediaTargets.VIDEO_FPS_MIN, MediaTargets.VIDEO_FPS_MAX)
         else MediaTargets.VIDEO_FPS_DEFAULT

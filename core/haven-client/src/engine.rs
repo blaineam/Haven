@@ -1409,13 +1409,17 @@ impl Engine {
     fn append_app_activity(&self, title: &str, body: &str, deep_link: Option<&str>) {
         let snapshot = {
             let mut rows = self.app_activity.lock();
+            // Strictly after the newest row already here. Two rows written in one millisecond
+            // used to share an id (`app-<ms>`) and a timestamp, so the list had two rows a UI
+            // could not tell apart and their order was whichever the id tie-break gave.
+            let at = now_ms().max(rows.first().map_or(0, |r| r.created_at.saturating_add(1)));
             rows.insert(0, ActivityRow {
-                id: format!("app-{}", now_ms()),
+                id: format!("app-{at}"),
                 kind: "app".into(),
                 circle_id: String::new(),
                 actor_name: title.to_string(),
                 snippet: body.to_string(),
-                created_at: now_ms(),
+                created_at: at,
                 emoji: None,
                 link: deep_link.map(str::to_string),
             });

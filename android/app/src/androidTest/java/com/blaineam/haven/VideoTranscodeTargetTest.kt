@@ -2,6 +2,7 @@ package com.blaineam.haven
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.blaineam.haven.core.MediaOptimizationTarget
 import com.blaineam.haven.core.MediaTargets
 import com.blaineam.haven.core.readVideoBytes
 import org.junit.Assert.assertEquals
@@ -135,12 +136,12 @@ class VideoTranscodeTargetTest {
             kotlin.math.abs(before.ms - after.ms) < 500)
         assertTrue("output must be smaller than a 12 Mbps original, got $after",
             after.bytes < before.bytes)
-        // The encoder averages TOWARDS the target and the container adds overhead, so allow real
-        // headroom rather than asserting the nominal rate. The old path pinned itself at 8 Mbps;
-        // anything comfortably under that is the change working.
-        assertTrue("overall rate ${after.bitrate / 1000} kbps should be near the " +
-            "${MediaTargets.VIDEO_BITRATE / 1000} kbps target, well under the old 8000",
-            after.bitrate < MediaTargets.VIDEO_BITRATE * 1.6)
+        // The encoder averages TOWARDS its ask, so the transcode measures the result and encodes
+        // again for less until it is under the overall ceiling. What comes out must therefore read
+        // as at target to the re-optimize probe — not merely "well under the old 8 Mbps".
+        assertTrue("overall rate ${after.bitrate / 1000} kbps must be under the " +
+            "${MediaOptimizationTarget.videoBitrateCeiling / 1000} kbps re-optimize line",
+            after.bitrate <= MediaOptimizationTarget.videoBitrateCeiling)
         assertTrue("transcoded output must be faststart (moov before mdat)", isFaststart(dst))
 
         src.delete(); dst.delete()
@@ -197,15 +198,16 @@ class VideoTranscodeTargetTest {
      * "Optimize" must never make a file bigger.
      *
      * [MediaTargets.VIDEO_BITRATE] is a target, not a ceiling on the source. A clip that is already
-     * leaner than 4.5 Mbps would otherwise be re-encoded UP to it — paying bytes AND a generation of
+     * leaner than the target would otherwise be re-encoded UP to it — paying bytes AND a generation of
      * quality for the privilege. This was caught by measuring, not by reading the code: the rotation
      * fixture went in at 0.48 MB and came out at 0.59 MB.
      */
     @Test
     fun anAlreadyLeanClipIsNotInflatedByOptimizing() {
         val src = File(ctx.cacheDir, "lean-src.mp4")
-        // 720p asking for 1.5 Mbps — comfortably under the 4.5 Mbps target.
-        makeSourceVideo(src, 1280, 720, frames = 60, srcBitrate = 1_500_000, rotation = 0)
+        // 360p — small enough to be under the target on an encoder that does not follow the rate it
+        // is asked for (the emulator's wrote 2.4 Mbps at 720p whether asked for 1.5 or 0.8).
+        makeSourceVideo(src, 640, 360, frames = 60, srcBitrate = 500_000, rotation = 0)
         val before = shapeOf(src)
         log("LEAN BEFORE $before")
         assertTrue("fixture must actually be leaner than the target, was ${before.bitrate / 1000} kbps",

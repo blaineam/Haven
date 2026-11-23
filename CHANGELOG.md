@@ -13,7 +13,11 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
-- **Two tests that could fail a release gate with nothing wrong (tests only).** The Android check that the video encoder's own output is not offered for re-optimizing again still assumed the old 4.5 Mbps target, so it failed once the target became 2.4 Mbps; it now takes its figure from the target. A core keying test that needs a late commit to out-hash an earlier one tried 64 times against one fixed commit, which fails about one run in 65 when that commit's hash is high; it now builds a new fleet and tries again.
+- **A shared video can no longer come out well over its size on Android.** Android asked its encoder for 2.4 Mbps and kept whatever came back; an encoder that overshoots (measured on the emulator's: 3.96 Mbps) produced clips two thirds larger than intended, and "Re-optimize media I already shared" then judged its own output as still too big. The app now measures the finished clip and encodes it again asking for less, up to two more times, the last at 720p, until it is under 2.65 Mbps overall, the same rule the Apple apps follow. The 720p step matters: the emulator's encoder wrote the same bytes whatever rate it was asked for, and only a smaller frame brought a 12 Mbps 1080p clip down (to 2.2 Mbps). Found by the on-device tests in the release gate. Tests: `VideoTranscodeTargetTest`, `MediaReoptimizeInstrumentedTest` (device), `anOvershootingEncodeIsAskedForProportionallyLess`, `anEncodeAtTheOverallCeilingReadsAtTarget`, `ourOwnEncoderOutputReadsAtTarget` (JVM).
+
+- **Two activity rows written in the same millisecond shared an id (desktop, browser).** The app's own activity rows were named after the clock, so two written at once had the same id and timestamp and their order was arbitrary. Each row is now stamped strictly after the one before it. Test: `the_app_activity_log_is_persisted_bounded_and_reloaded`.
+
+- **A test that could fail a release gate with nothing wrong (tests only).** A core keying test that needs a late commit to out-hash an earlier one tried 64 times against one fixed commit, which fails about one run in 65 when that commit's hash is high; it now builds a new fleet and tries again.
 - **A browser finds its relay again after the relay's address changes.** A relay behind a free
   tunnel gets a new hostname every time it restarts. Apps ask the relay's node where it went; a
   browser had no way to, because HTTPS to the old hostname was the only thing it could do with

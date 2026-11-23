@@ -89,7 +89,7 @@ class MediaReoptimizeInstrumentedTest {
         // target; whatever comes back, it must not be kept unless it is genuinely smaller. This is
         // the case that made a 0.48 MB fixture come out at 0.59 MB.
         val src = File(ctx.cacheDir, "ro-lean.mp4")
-        TestVideoFixture.make(src, 1280, 720, frames = 60, srcBitrate = 1_500_000, rotation = 0)
+        TestVideoFixture.make(src, 1280, 720, frames = 60, srcBitrate = 800_000, rotation = 0)
         val before = MediaOptimizationTarget.probeVideoFile(src)!!
         val out = readVideoBytes(ctx, android.net.Uri.fromFile(src),
             MediaTargets.MAX_VIDEO_BYTES, forceOptimize = true)!!

@@ -49,6 +49,28 @@ class MediaReoptimizeTest {
         assertFalse(s.aboveTarget)
     }
 
+    @Test fun anEncodeAtTheOverallCeilingReadsAtTarget() {
+        // The transcode stops retrying once it is under VIDEO_OVERALL_CEILING, so that figure must
+        // itself judge as at target — or a clip the encoder accepted is offered again.
+        val seconds = 60.0
+        val bytes = (MediaTargets.VIDEO_OVERALL_CEILING * seconds / 8).toLong()
+        val s = MediaOptimizationTarget.judgeVideo(bytes, 1920, 1080, "video/avc", seconds)
+        assertNull(s!!.aboveTargetReason)
+        assertTrue(MediaTargets.VIDEO_OVERALL_CEILING < MediaOptimizationTarget.videoBitrateCeiling)
+    }
+
+    @Test fun anOvershootingEncodeIsAskedForProportionallyLess() {
+        // Measured on the emulator's encoder: asked 2.4 Mbps, produced 3.956 Mbps overall.
+        val next = nextVideoBitrateAsk(MediaTargets.VIDEO_BITRATE, 3_956_000.0)
+        assertTrue("must ask for less, was $next", next < MediaTargets.VIDEO_BITRATE)
+        // An encoder that overshoots by the same ratio again lands under the ceiling.
+        val again = next * (3_956_000.0 / MediaTargets.VIDEO_BITRATE)
+        assertTrue("the retry should land under the ceiling, would be $again", again <= MediaTargets.VIDEO_OVERALL_CEILING)
+        // Under the ceiling: nothing changes. Hopelessly over: never below the floor.
+        assertEquals(MediaTargets.VIDEO_BITRATE, nextVideoBitrateAsk(MediaTargets.VIDEO_BITRATE, 2_500_000.0))
+        assertEquals(MediaTargets.VIDEO_BITRATE_FLOOR, nextVideoBitrateAsk(MediaTargets.VIDEO_BITRATE, 90_000_000.0))
+    }
+
     @Test fun theOldEightMbpsAndroidPathIsAboveTarget() {
         // The exact disease MediaTargets was written to cure: the old "4 bits/pixel clamped to 2–8
         // Mbps" formula pinned every optimized 1080p clip to its 8 Mbps ceiling.

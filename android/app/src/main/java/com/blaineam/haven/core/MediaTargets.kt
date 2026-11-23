@@ -55,6 +55,29 @@ object MediaTargets {
      */
     const val VIDEO_BITRATE = 2_400_000
 
+    /**
+     * The most a finished clip may cost overall (video + audio + container), in bits per second.
+     * [VIDEO_BITRATE] is what the encoder is ASKED for; `MediaCodec` averages towards it and some
+     * encoders land well over (measured: 3.96 Mbps out of a 2.4 Mbps ask on the emulator's
+     * encoder). The transcode measures what it produced and encodes again, asking for less, until
+     * the result is under this. Same figure as Apple's `VideoEncoderTargets.overallCeiling`.
+     */
+    const val VIDEO_OVERALL_CEILING = 2_650_000
+
+    /** Encodes one clip may take to get under [VIDEO_OVERALL_CEILING]: the first and two retries. */
+    const val VIDEO_ENCODE_ATTEMPTS = 3
+
+    /**
+     * The last attempt's frame: 720p. Some encoders do not follow the rate they are asked for at
+     * all (the emulator's produced the same bytes asked for 2.4, 1.5 and 1.0 Mbps); fewer pixels is
+     * the one lever every encoder obeys. Apple's last attempt drops to 720p for the same reason.
+     */
+    const val VIDEO_LAST_RESORT_LONG_EDGE = 1280
+    const val VIDEO_LAST_RESORT_SHORT_EDGE = 720
+
+    /** A retry never asks the encoder for less than this; below it 1080p falls apart. */
+    const val VIDEO_BITRATE_FLOOR = 600_000
+
     /** Never inflate a source that was already leaner than the target — see `transcodeVideo`. */
     const val VIDEO_I_FRAME_INTERVAL_SEC = 2
     const val VIDEO_FPS_DEFAULT = 30

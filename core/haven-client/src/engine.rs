@@ -249,6 +249,8 @@ struct DynState {
     /// Media a browser's page has put on screen ([`Engine::media_want`]). In a browser the
     /// background sweep fetches these and nothing else.
     web_media_wanted: std::collections::HashSet<String>,
+    /// Browser only: per wanted ref, how many times the sweep has asked and when it may next.
+    web_media_retry: HashMap<String, (u32, u64)>,
     /// Camera-state ordering (frame 22): the stamp of the last one sent, and the newest applied
     /// from each peer — see [`Engine::camera_state_is_current`].
     camera_stamp_sent: u64,
@@ -1009,6 +1011,7 @@ impl Engine {
                 .map(|t| t.lines().filter(|l| !l.is_empty()).map(str::to_string).collect())
                 .unwrap_or_default(),
             media_unopenable: HashSet::new(),
+            web_media_retry: HashMap::new(),
             media_upload_progress: crate::fs::read_to_string(paths.root.join("media-upload-progress.txt"))
                 .map(|t| {
                     t.lines()
@@ -1140,6 +1143,7 @@ impl Engine {
                 .map(|t| t.lines().filter(|l| !l.is_empty()).map(str::to_string).collect())
                 .unwrap_or_default(),
             media_unopenable: HashSet::new(),
+            web_media_retry: HashMap::new(),
             media_upload_progress: crate::fs::read_to_string(paths.root.join("media-upload-progress.txt"))
                 .map(|t| {
                     t.lines()
@@ -7561,6 +7565,8 @@ impl Engine {
             return;
         }
         log::info!("key hand-off: {} circle(s) gained keys", gained.len());
+        // A photo tried before its key arrived was set aside as unopenable for the session.
+        self.retry_media_after_new_keys();
         // A linked browser gets what it could not open from the history hand-off, re-sealed
         // under a key it holds. Forgetting the mailbox marks here made it fetch every envelope
         // of those circles a second time.
@@ -10479,6 +10485,22 @@ impl Engine {
         }
     }
 
+    /// How long a browser waits before asking again for media that did not arrive: 20 s,
+    /// doubling to half an hour.
+    pub(crate) fn web_media_retry_delay_ms(tries: u32) -> u64 {
+        (20_000u64 << tries.min(7)).min(30 * 60 * 1000)
+    }
+
+    /// Keys arrived: media that would not open, or was backing off, is worth asking for now.
+    pub(crate) fn retry_media_after_new_keys(self: &Arc<Self>) {
+        {
+            let mut st = self.dyn_state.lock();
+            st.media_unopenable.clear();
+            st.web_media_retry.clear();
+        }
+        self.request_missing_media();
+    }
+
     pub fn request_missing_media(self: &Arc<Self>) {
         self.clone().verify_held_media(6);   // held != readable; see verify_held_media
         let my_hex = self.node_id_hex();
@@ -10497,6 +10519,7 @@ impl Engine {
         const BACKFILL_LAZY_MS: u64 = 7 * 24 * 60 * 60 * 1000;
         let mut missing: Vec<(String, String, bool)> = vec![]; // (ref, circleId, fresh)
         let mut thumbs: Vec<(String, String)> = vec![]; // declared `thumb:` companions, missing
+        let web = self.is_web_device();
         for c in self.social.circles() {
             let feed = self.social.feed(c.id.clone(), now_ms(), None);
             for item in feed {
@@ -10521,7 +10544,11 @@ impl Engine {
                         thumbs.push((t, c.id.clone()));
                     }
                 }
-                if !backfill {
+                // A browser's list is cut to what its page put on screen (below), so an old post
+                // belongs in it too. Leaving backfill out gave every photo more than a week old
+                // exactly ONE attempt, when its tile first appeared: if the relay's address or a
+                // key had not arrived yet, it never loaded.
+                if !backfill || web {
                     for r in item.media {
                         if !LocalMedia::is_synthetic(&r) && !self.media.has(&r) && !self.evicted_contains(&r) && !missing.iter().any(|(rr, _, _)| rr == &r) {
                             missing.push((r, c.id.clone(), fresh));
@@ -10542,11 +10569,23 @@ impl Engine {
         // IN A BROWSER, ONLY WHAT THE PAGE PUT ON SCREEN (`media_want`). Everything above describes
         // an app with a disk; a browser that prefetched it downloaded an account's recent history
         // the moment it was linked.
-        if self.is_web_device() {
+        if web {
             let (missing_all, thumbs_all) = (missing.len(), thumbs.len());
-            let st = self.dyn_state.lock();
+            let mut st = self.dyn_state.lock();
             missing.retain(|(r, _, _)| st.web_media_wanted.contains(r));
             thumbs.retain(|(t, _)| st.web_media_wanted.contains(t));
+            // A ref that keeps missing is asked for less and less often.
+            missing.retain(|(r, _, fresh)| {
+                if *fresh {
+                    return true;
+                }
+                let (n, due) = st.web_media_retry.get(r).copied().unwrap_or((0, 0));
+                if now < due {
+                    return false;
+                }
+                st.web_media_retry.insert(r.clone(), (n + 1, now + Self::web_media_retry_delay_ms(n)));
+                true
+            });
             drop(st);
             if missing_all + thumbs_all > 0 {
                 log::debug!(

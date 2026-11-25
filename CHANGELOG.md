@@ -11,6 +11,11 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **A linked browser (and any newly linked device) can open friends' photos and videos from the relay.** A photo is encrypted with its sender's circle key, but opening it only ever tried your own account's keys. A device linked after the photo was sent has no other way in, so it opened none of a friend's media, even media sent under a key it had just been given. Every key the device holds is now tried. Haven deletes keys older than the last four per sender, so media from before that (about a month or more) still cannot be opened this way.
+- **In the browser, a photo that missed once is asked for again.** For posts more than a week old, the background retry skipped full photos and videos, so each got a single attempt as it scrolled into view. If the relay's address or a key had not arrived yet, it never loaded. It is now retried with growing pauses, and at once when new keys arrive.
+- **Tests: the relay "stop hosting" tests no longer pick a port another program is already serving on.** A full QA run failed once because of it.
+- **iPhone: "Sending history to your new device" goes away once the sending is done.** The banner stayed, the screen was kept on and Haven kept checking until the new device said it had read everything. A browser reads a little at a time as you scroll back, so that could be weeks. A finished send now stops all three; anything asked for later is still sent.
+
 - **Release builds: the Linux Flatpak bundle builds again when Flathub has a newer runtime than the build image.** Updating the image's GNOME runtime failed with "Invalid cross-device link", which held back the whole GitHub Release for 2.2.2. The build now copies the image's Flatpak installation into the container's writable layer first. A release rebuilt by hand from a branch also pins the Flatpak manifest to the release tag rather than the branch name.
 
 ## 2.2.2 (2026-11-22)

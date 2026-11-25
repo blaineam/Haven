@@ -22,8 +22,17 @@ use haven_p2p::identity::Identity;
 /// start moved the relay off its fixed port", "port … is already served by another listener").
 static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+///
+/// "Free on 127.0.0.1" is not enough: the kernel will hand out a loopback port that some other
+/// process is serving on 0.0.0.0, and the relay rightly refuses to share it (seen in a full gate).
+/// So a candidate is taken only if nobody answers on it once we have let it go.
 fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    loop {
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        if !accepting(port) {
+            return port;
+        }
+    }
 }
 
 /// Is anything still accepting on `port`? (A refused connect = nobody.)

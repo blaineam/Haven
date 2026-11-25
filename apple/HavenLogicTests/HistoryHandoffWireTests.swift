@@ -206,4 +206,19 @@ final class HistoryHandoffWireTests: XCTestCase {
                                          from: Data(#"{"v":1,"run":"1","source":"s","forRequest":7,"pages":0,"complete":false}"#.utf8))
         XCTAssertNil(m.cancelled)
     }
+
+    /// A finished run is not "sending", however long its record is kept waiting for the other
+    /// device to say it has read it all (a browser reads on only as its reader scrolls back).
+    func testAFinishedSendStopsShowingAsSending() {
+        let linger = HistoryHandoffWire.sendingLingerMs
+        func sending(_ unfinished: Bool, _ asked: Bool, _ last: UInt64, _ now: UInt64) -> Bool {
+            HistoryHandoffWire.stillSending(hasUnfinishedRun: unfinished, mediaAsked: asked, lastSentAt: last, now: now)
+        }
+        XCTAssertTrue(sending(true, false, 0, 10_000_000), "pages still to go")
+        XCTAssertTrue(sending(false, true, 0, 10_000_000), "media asked for and not yet up")
+        XCTAssertTrue(sending(false, false, 10_000_000, 10_000_000 + linger - 1))
+        XCTAssertFalse(sending(false, false, 10_000_000, 10_000_000 + linger))
+        XCTAssertFalse(sending(false, false, 0, 1), "nothing sent since launch")
+        XCTAssertFalse(sending(false, false, 10_000, 9_000), "a clock that stepped back is not sending")
+    }
 }

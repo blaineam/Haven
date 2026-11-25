@@ -2152,6 +2152,19 @@ impl Circle {
     fn current_key(&self) -> Option<[u8; 32]> {
         self.my_epoch_keys.get(&self.my_epoch).copied()
     }
+    /// Every epoch key of this circle that may open a media blob's epoch entry: my own, and every
+    /// author's that I hold. A blob is wrapped under ITS SEALER's current key, so trying only my own
+    /// opened a friend's media through the recipient list alone, which a device linked after the
+    /// blob was sealed is not on: a new browser could open none of a friend's photos or videos,
+    /// even ones sealed under a key it had just been handed.
+    fn media_epoch_keys(&self) -> impl Iterator<Item = [u8; 32]> + '_ {
+        self.current_key()
+            .into_iter()
+            .chain(self.my_epoch_keys.values().copied())
+            .chain(self.my_epoch_keys_alt.values().flatten().copied())
+            .chain(self.peer_epoch_keys.values().copied())
+            .chain(self.peer_epoch_keys_alt.values().flatten().copied())
+    }
     /// Called where the sender-keys lane is about to key content (no tree is live): make sure the
     /// current sender-keys epoch still HAS its key. A circle a tree keyed for four or more epochs
     /// has pruned every sender key, including the one `my_epoch` names; parking it back then found
@@ -9263,9 +9276,7 @@ have_seed={} have_device={} members={}",
             // EPOCH entry first. It needs no sender resolution and no place on the recipient list, so it
             // is the path that works for a member who joined after this blob was sealed — and for one
             // whose device roster cannot resolve the sealer, which otherwise fails below at the `?`.
-            let mut epoch_keys: Vec<[u8; 32]> = Vec::new();
-            if let Some(k) = st.circles[idx].current_key() { epoch_keys.push(k); }
-            epoch_keys.extend(st.circles[idx].my_epoch_keys.values().copied());
+            let epoch_keys: Vec<[u8; 32]> = st.circles[idx].media_epoch_keys().collect();
             // C6: the sender may be a member's ACCOUNT, mine, or an authorized DEVICE (seed-drop signs media
             // under the device in a fully-capable circle). Resolve a device sender via the verified roster.
             // Unresolvable ⇒ only the epoch entry can open it (an empty sender list).
@@ -9311,8 +9322,7 @@ have_seed={} have_device={} members={}",
                 // EPOCH entry first, across every circle's keys — see `open_circle_media`.
                 let mut epoch_keys: Vec<[u8; 32]> = Vec::new();
                 for c in st.circles.iter() {
-                    if let Some(k) = c.current_key() { epoch_keys.push(k); }
-                    epoch_keys.extend(c.my_epoch_keys.values().copied());
+                    epoch_keys.extend(c.media_epoch_keys());
                 }
                 let sender_hex = env.sender_hex();
                 let me_hex = hex(&st.me().node_id_bytes());

@@ -127,7 +127,7 @@ final class HistoryHandoff: ObservableObject {
     }
 
     private func refreshActive() {
-        let active = hasOutstandingWork
+        let active = isMoving
         if active != transferActive {
             transferActive = active
             NearbyTransport.handoffBoost = active
@@ -145,9 +145,9 @@ final class HistoryHandoff: ObservableObject {
     private var driver: Task<Void, Never>?
     func startDriver() {
         refreshActive()   // assert the screen hold now, not after the loop's first pass
-        guard driver == nil, hasOutstandingWork else { return }
+        guard driver == nil, isMoving else { return }
         driver = Task { @MainActor in
-            while !Task.isCancelled, HistoryHandoff.shared.hasOutstandingWork {
+            while !Task.isCancelled, HistoryHandoff.shared.isMoving {
                 #if os(iOS)
                 if UIApplication.shared.applicationState == .background, bgTask == .invalid { break }
                 #endif
@@ -197,17 +197,21 @@ final class HistoryHandoff: ObservableObject {
             // + what landed since the pull last wrote `want` (it holds its own copy until it returns).
             st.mediaDone = w.mediaDone + liveLanded.count
             st.mediaTotal = w.mediaTotal
-        } else if let s = allServes.values.first(where: { !$0.complete }) ?? allServes.values.first {
-            // Posts from the run's counters; media from what the pages named vs. what went out. Once the
-            // posts are across this still counts media up, instead of an indeterminate bar with no numbers.
+        } else if isStillSending {
             st.phase = .sending
-            st.done = s.servedEvents
-            st.total = s.totalEvents
-            let m = sourceMedia(for: s)
-            st.mediaDone = m.sent.count
-            st.mediaTotal = m.refs.count
-        } else if needsPending || HistoryHandoffWire.nowMs() &- lastSendingAt < 120_000 {
-            st.phase = .sending   // posts are across; media is still going until the target says done
+            if let s = allServes.values.first(where: { !$0.complete }) ?? allServes.values.first {
+                // Posts from the run's counters; media from what the pages named vs. what went out. Once
+                // the posts are across this still counts media up, instead of a bar with no numbers.
+                st.done = s.servedEvents
+                st.total = s.totalEvents
+                // Media is counted only when the other device is taking it from here: a browser reads
+                // its photos from the relay, and "0 of 4,000 photos" would never move.
+                let m = sourceMedia(for: s)
+                if needsPending || !m.sent.isEmpty {
+                    st.mediaDone = m.sent.count
+                    st.mediaTotal = m.refs.count
+                }
+            }
         } else if let b = ledger.banner {
             st.phase = .cancelled
             st.cancelledRemotely = b == .byOtherDevice
@@ -911,9 +915,21 @@ final class HistoryHandoff: ObservableObject {
     /// marked its request done) — not just while it is actively sending. Otherwise, after a relaunch,
     /// it looked idle, stopped refreshing its manifest, and the target read it as asleep and never
     /// asked it directly: each side waiting for the other to move first.
+    ///
+    /// This is NOT "keep the screen on and loop": that is [`isMoving`]. A linked browser may not
+    /// mark its request done for weeks.
     var hasOutstandingWork: Bool {
         isWaiting || !serves.isEmpty || needsPending
             || HistoryHandoffWire.nowMs() &- lastSendingAt < 120_000
+    }
+
+    /// History is on its way, in either direction: worth holding the screen and running the loop.
+    private var isMoving: Bool { isWaiting || isStillSending }
+
+    private var isStillSending: Bool {
+        HistoryHandoffWire.stillSending(hasUnfinishedRun: serves.values.contains { !$0.complete },
+                                        mediaAsked: needsPending, lastSentAt: lastSendingAt,
+                                        now: HistoryHandoffWire.nowMs())
     }
 
     /// Serve every open request from my other devices, until `deadline`. True if anything was

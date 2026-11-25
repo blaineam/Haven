@@ -1004,6 +1004,10 @@ async fn the_legacy_device_enrollment_hands_a_credential_to_a_second_device_of_t
 /// A seedless device linked to `p`, rebuilt from its persisted state the way a relaunch does (so
 /// its engine is on the real account, not the linking placeholder).
 async fn linked_seedless(p: &Arc<Engine>) -> Arc<Engine> {
+    linked_seedless_named(p, "Tab").await
+}
+
+async fn linked_seedless_named(p: &Arc<Engine>, name: &str) -> Arc<Engine> {
     let paths = crate::covtest_util::tmp_paths();
     let s = Engine::new_seedless(paths.clone()).expect("a linking device builds");
     let ticket = haven_ffi::enroll::enroll_ticket_parse(p.mint_enroll_ticket().unwrap()).unwrap();
@@ -1024,11 +1028,11 @@ async fn linked_seedless(p: &Arc<Engine>) -> Arc<Engine> {
         let r = s.roster.lock();
         (r.device_bundle(), r.device_node_hex())
     };
-    let req = haven_ffi::enroll::enroll_build_request(ticket.secret.clone(), dev_bundle.clone(), "Tab".into(), now).unwrap();
+    let req = haven_ffi::enroll::enroll_build_request(ticket.secret.clone(), dev_bundle.clone(), name.into(), now).unwrap();
     p.handle_seedless_enroll_request(None, &req);
     p.approve_enroll(dev_hex).expect("approved");
     let grant = haven_ffi::enroll::enroll_assemble_grant(
-        p.seed.unwrap().to_vec(), ticket.secret.clone(), dev_bundle, "Tab".into(), now,
+        p.seed.unwrap().to_vec(), ticket.secret.clone(), dev_bundle, name.into(), now,
         p.social.my_device_roster_wire(), vec![],
     )
     .unwrap();
@@ -1184,4 +1188,47 @@ async fn a_call_frame_is_left_on_the_relays_live_lane_for_the_recipient() {
         }
     })
     .await;
+}
+
+/// A browser asks for a photo as its tile appears. When that one attempt misses (the relay's
+/// address or a key not here yet) the sweep has to ask again, however old the post is: it used to
+/// leave out everything older than a week.
+#[tokio::test]
+async fn a_browser_asks_again_for_an_old_photo_that_missed_the_first_time() {
+    let stub = Stub::start().await;
+    let (p, _) = new_engine(176);
+    wire_to(&p, &stub).await;
+    let web = linked_seedless_named(&p, &haven_p2p::webpolicy::mark_web_device_name("Chrome")).await;
+    assert!(web.is_web_device());
+    wire_to(&web, &stub).await;
+
+    let r = p.add_local_media(DEFAULT_CIRCLE, b"\xFF\xD8\xFF an old photo", false);
+    let month_ago = now_ms() - 30 * 24 * 3_600_000;
+    p.social
+        .post(DEFAULT_CIRCLE.into(), "old".into(), vec![r.clone()], None, None, false, false, month_ago)
+        .unwrap();
+    crate::engine::cov_engine_tests::deliver(&p, &web, DEFAULT_CIRCLE);
+    assert!(web.social.feed(DEFAULT_CIRCLE.into(), now_ms(), None).iter().any(|i| i.media.contains(&r)), "the browser has the post");
+
+    // On screen before the relay can serve it: the one eager attempt misses.
+    assert!(!web.fetch_media_healing(DEFAULT_CIRCLE, &r).await);
+    web.media_want(DEFAULT_CIRCLE, vec![r.clone()]);
+    bounded("the first attempt", async { crate::rt::sleep(std::time::Duration::from_millis(300)).await }).await;
+    assert!(!web.media_present(&r));
+
+    assert!(p.upload_media(DEFAULT_CIRCLE, &r).await);
+    web.request_missing_media();
+    bounded("the sweep fetches it", async {
+        while !web.media_present(&r) {
+            crate::rt::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+}
+
+#[test]
+fn a_browsers_media_retries_back_off() {
+    let d = Engine::web_media_retry_delay_ms;
+    assert_eq!((d(0), d(1), d(3)), (20_000, 40_000, 160_000));
+    assert_eq!((d(7), d(500)), (1_800_000, 1_800_000));
 }

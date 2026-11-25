@@ -136,6 +136,20 @@ five minutes, and the device that approved it sends them straight away. That nee
 devices to be running a build that has this, at the same time as the browser.
 `web-client/smoke/friend.mjs` proves it with the friend's app closed (`FRIEND_OFFLINE=1`).
 
+### Photos and videos
+
+A browser reads media from the relay as it scrolls into view. Each blob is encrypted once, to the
+devices that existed when it was sent and to its sender's circle key at that moment. A browser
+linked later is on no old device list, so the circle key is its way in. It has the keys its
+account's other devices still hold (D25): the last four per sender. Rotation is weekly and on
+membership changes, so in a quiet circle that reaches back about a month, and in a busy one less.
+
+**Media older than that does not open in a browser today.** The keys are deleted on every device,
+and the only other way into those blobs is the account key, which a browser never holds. The
+browser has the older posts (they arrive re-encrypted in the history hand-off) but not their
+photos: it does not ask the source to send media again.
+Regression test: `a_newly_linked_browser_opens_a_friends_media_under_every_key_still_held`.
+
 ## What a browser cannot do
 
 | Limit | Effect |

@@ -303,3 +303,45 @@ fn a_hand_off_is_only_between_authorized_devices_of_one_account() {
     assert!(alice.export_key_handoff(tablet_hex).is_empty(), "a removed device gets nothing");
     assert!(web.import_key_handoff(from_tablet_before).is_empty(), "and what it sealed earlier is refused");
 }
+
+/// A photo is wrapped under its SEALER's circle key. A browser linked after it was sealed is on no
+/// recipient list, so that key (handed over by my own device) is its only way in. Opening used to
+/// try only my own keys: the browser could open none of a friend's media straight from the relay.
+/// It now opens everything under a key that still exists; older keys are deleted on every device.
+#[test]
+fn a_newly_linked_browser_opens_a_friends_media_under_every_key_still_held() {
+    let _clk = super::net_tests::clock_guard();
+    let f = fleet(true);
+    let Fleet { alice, bob, cid, .. } = &f;
+    assert!(!alice.register_device(alice.my_device_bundle(), "Alice's phone".into(), 0).is_empty());
+    post(bob, cid, "hello", 2_000);
+    settle(&f);
+    let mut sealed = Vec::new();
+    for n in 0..8u8 {
+        sealed.push(bob.seal_circle_media(cid.clone(), vec![n; 64]).unwrap());
+        bob.rotate_circle(cid.clone());
+        post(bob, cid, &format!("after rotation {n}"), 3_000 + u64::from(n));
+        settle(&f);
+    }
+    let latest = bob.seal_circle_media(cid.clone(), vec![99; 64]).unwrap();
+    settle(&f);
+    let browser = linked_while_bob_is_away(&f, TABLET, &haven_p2p::webpolicy::mark_web_device_name("Safari"));
+    sync(bob, alice, cid);
+    browser.import_key_handoff(alice.export_key_handoff(browser.my_device_node_hex()));
+    sync(bob, &browser, cid);
+    let opens = |e: &HavenSocial, b: &Vec<u8>| e.open_circle_media(cid.clone(), b.clone()).is_some();
+    let phone: Vec<bool> = sealed.iter().map(|b| opens(alice, b)).collect();
+    let web: Vec<bool> = sealed.iter().map(|b| opens(&browser, b)).collect();
+    assert!(phone.iter().all(|o| *o) && opens(alice, &latest), "the account's phone opens everything: {phone:?}");
+    assert!(opens(&browser, &latest), "the newest photo opens");
+    // Oldest first, one rotation apart; four epochs are kept (the current one and three before).
+    assert_eq!(web, [false, false, false, false, false, true, true, true]);
+    // The file path (large videos) takes the same keys.
+    let dir = std::env::temp_dir().join(format!("haven-media-keys-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (src, out) = (dir.join("sealed"), dir.join("plain"));
+    std::fs::write(&src, &latest).unwrap();
+    assert!(browser.open_circle_media_file(cid.clone(), src.display().to_string(), out.display().to_string()));
+    assert_eq!(std::fs::read(&out).unwrap(), vec![99; 64]);
+    let _ = std::fs::remove_dir_all(&dir);
+}

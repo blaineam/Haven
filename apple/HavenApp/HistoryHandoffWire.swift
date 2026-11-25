@@ -64,6 +64,17 @@ enum HistoryHandoffWire {
 
     static func nowMs() -> UInt64 { UInt64(Date().timeIntervalSince1970 * 1000) }
 
+    /// After the last thing went up, the sending banner stays this long and then goes.
+    static let sendingLingerMs: UInt64 = 120 * 1000
+
+    /// Is this device still sending history? A run whose pages are all up is NOT, even though its
+    /// record is kept until the other device says it has read everything: a linked browser reads a
+    /// few pages and reads on only as its reader scrolls back, so that word may be weeks away, and
+    /// the banner sat on the phone the whole time asking to be kept open.
+    static func stillSending(hasUnfinishedRun: Bool, mediaAsked: Bool, lastSentAt: UInt64, now: UInt64) -> Bool {
+        hasUnfinishedRun || mediaAsked || (lastSentAt > 0 && now >= lastSentAt && now - lastSentAt < sendingLingerMs)
+    }
+
     /// Tag byte of a sealed event envelope (core `TAG_EPOCH_EVENT`) — what progress counts.
     static let eventTag: UInt8 = 0x02
     static func eventCount(_ envelopes: [Data]) -> Int { envelopes.reduce(0) { $0 + ($1.first == eventTag ? 1 : 0) } }

@@ -10,6 +10,8 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 ## Unreleased
 
 ### Fixed
+- **CI: the website deploys again.** Publishing now runs after the upload as its own job; in one
+  job GitHub could not yet find the file it had just been given.
 - **Tests: the cross-device suite rebuilds a half-deleted build cache.** The system's `/tmp`
   cleanup removed files and left folders, so Xcode thought a package was present and the suite
   stopped before its first step.

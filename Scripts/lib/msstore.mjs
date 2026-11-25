@@ -99,9 +99,9 @@ export async function deletePendingSubmission(api, appId, submissionId) {
 // Create a new submission (clones the last published one as the starting point).
 // Throws if a pending submission already exists — clear it first (see above).
 export async function createSubmission(api, appId) {
-  // isMinimalResponse=true: exact parity with msstore-cli's create — worth it on its own,
-  // and tested as a possible dodge of the clone's listings validation.
-  return api.post(`/applications/${enc(appId)}/submissions?isMinimalResponse=true`, {});
+  // With NO body. Since 2026-11 a body of `{}` is refused ("The size of Listings must be 1 or
+  // more"), with or without ?isMinimalResponse=true.
+  return api.post(`/applications/${enc(appId)}/submissions`);
 }
 
 export async function getSubmission(api, appId, submissionId) {
@@ -126,7 +126,7 @@ export async function updateSubmission(api, appId, submissionId, submission) {
 
 // Commit a submission → sends it to certification.
 export async function commitSubmission(api, appId, submissionId) {
-  return api.post(`/applications/${enc(appId)}/submissions/${enc(submissionId)}/commit`, {});
+  return api.post(`/applications/${enc(appId)}/submissions/${enc(submissionId)}/commit`);
 }
 
 // Poll a submission's status: { status, statusDetails }.

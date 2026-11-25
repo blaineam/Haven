@@ -22,10 +22,10 @@
 //   4. msstore submission update <app> <json>                      listings + package, together
 //   5. msstore submission publish <app> ; msstore submission poll <app>
 
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join, resolve } from 'node:path';
-import { loadMetadata, toMsListing } from './lib/metadata.mjs';
+import { loadMetadata, sectionsOf, toMsListing } from './lib/metadata.mjs';
 import { msCode } from './lib/locales.mjs';
 
 const arg = (name, dflt = null) => { const i = process.argv.indexOf(`--${name}`); return i === -1 ? dflt : (process.argv[i + 1] ?? true); };
@@ -65,6 +65,9 @@ for (const f of metaFiles) {
   const m = f.match(/^appstore-metadata(?:\.([A-Za-z-]+))?\.md$/);
   const locale = m[1] || 'en-US';
   const fields = await loadMetadata(join(root, f));
+  // The Store's release notes are `## whats_new_windows` where a file has one: `## whats_new` is
+  // App Store copy and names only Apple's devices (as in ms-store-listings-import.mjs).
+  fields.whats_new = sectionsOf(readFileSync(join(root, f), 'utf8')).whats_new_windows || fields.whats_new;
   const { listing, warnings } = toMsListing(fields);
   warnings.forEach((w) => log(`⚠ ${w}`));
   if (!Object.keys(listing).length) { log(`⚠ ${f}: nothing to push — skipped`); continue; }

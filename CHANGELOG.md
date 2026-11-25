@@ -12,6 +12,8 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 ### Fixed
 - **CI: the desktop workflow's Flatpak build works again** when Flathub has a newer runtime than
   the build image. It now takes the same step the release build already did.
+- **Microsoft Store tooling:** the command-line submit now sends the Windows release notes, not the
+  App Store's. A new submission is created with no body, which is what the Store accepts today.
 
 ## 2.2.3 (2026-11-25)
 

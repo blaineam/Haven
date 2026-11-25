@@ -218,8 +218,15 @@ try {
   await hide.evaluate((n) => n.remove());
   await page.waitForTimeout(15000);   // several passes of the engine's background media sweep
   if (await invoke(page, "media_present", { reference: buried.media[0] })) throw new Error("the page downloaded media nobody had scrolled to");
+  // To THAT post: older posts lie under it (the history from before the link), so the bottom of
+  // the feed is somewhere past it. Until the feed has drawn its card, scroll on to draw more.
   await until("the picture once the reader scrolls down to it", async () => {
-    await page.evaluate(() => { for (const v of document.querySelectorAll(".view")) v.scrollTop = v.scrollHeight; window.scrollTo(0, document.body.scrollHeight); });
+    await page.evaluate((body) => {
+      const card = [...document.querySelectorAll("[data-post]")].find((c) => c.textContent.includes(body));
+      if (card) return card.scrollIntoView({ block: "center" });
+      for (const v of document.querySelectorAll(".view")) v.scrollTop = v.scrollHeight;
+      window.scrollTo(0, document.body.scrollHeight);
+    }, "picture far down the feed");
     return invoke(page, "media_present", { reference: buried.media[0] });
   }, 120000);
   step("media is fetched when the reader scrolls to it, not before");

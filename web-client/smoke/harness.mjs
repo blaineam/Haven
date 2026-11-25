@@ -121,16 +121,39 @@ export function startPeer(bin, args = ["127.0.0.1:0"], env = {}) {
  *  for again. Only a navigation TIMEOUT is retried; every other failure is the test's to report. */
 function retryStalledLoads(page, tries = 4, timeout = 15000) {
   const goto = page.goto.bind(page);
+  let going = 0;
   page.goto = async (url, options = {}) => {
-    for (let n = 1; ; n++) {
-      try {
-        return await goto(url, { timeout, ...options });
-      } catch (e) {
-        if (BROWSER !== "webkit" || n >= tries || e.name !== "TimeoutError") throw e;
-        console.log(`   (the page load stalled; asking again, ${n} of ${tries - 1})`);
+    going++;
+    try {
+      for (let n = 1; ; n++) {
+        try {
+          return await goto(url, { timeout, ...options });
+        } catch (e) {
+          if (BROWSER !== "webkit" || n >= tries || e.name !== "TimeoutError") throw e;
+          console.log(`   (the page load stalled; asking again, ${n} of ${tries - 1})`);
+        }
       }
+    } finally {
+      going--;
     }
   };
+  if (BROWSER !== "webkit") return;
+  // The same stall in a load the PAGE starts (it reloads itself while linking): the new page is
+  // left without one of its own files for good. Seen as `strings.js` from the harness's own file
+  // server, asked 3 s in and still unanswered 201 s later. Reload, as a person would.
+  const waiting = new Map();
+  let reloads = 0;
+  page.on("request", (r) => {
+    if (!["document", "script", "stylesheet"].includes(r.resourceType())) return;
+    waiting.set(r, setTimeout(() => {
+      if (going || page.isClosed() || ++reloads > 5) return;
+      console.log(`   (a file of the page never arrived: ${new URL(r.url()).pathname}; reloading)`);
+      page.reload({ timeout }).catch(() => {});
+    }, timeout));
+  });
+  for (const done of ["requestfinished", "requestfailed"]) {
+    page.on(done, (r) => { clearTimeout(waiting.get(r)); waiting.delete(r); });
+  }
 }
 
 /** Open a page in headless Chromium and wait until `ready()` is true in it. */
@@ -146,6 +169,18 @@ export async function openPage(url, { ready = () => window.havenReady === true, 
       if (/^\/(k|l|t)\//.test(u.pathname)) {
         const sent = r.request().postDataBuffer()?.length ?? 0;
         console.log(`   [page http] ${r.request().method()} ${u.host}${u.pathname.slice(0, 120)} body=${sent} -> ${r.status()}`);
+      }
+    });
+  }
+  if (process.env.SMOKE_PENDING) {
+    // What the page has asked for and not been answered, printed if the run fails.
+    const t0 = Date.now(), pending = new Map();
+    page.on("request", (r) => pending.set(r, Date.now()));
+    for (const done of ["requestfinished", "requestfailed"]) page.on(done, (r) => pending.delete(r));
+    process.on("exit", (code) => {
+      if (!code) return;
+      for (const [r, at] of pending) {
+        console.log(`   [pending] ${r.method()} ${r.resourceType()}${r.isNavigationRequest() ? " (navigation)" : ""} ${r.url().slice(0, 110)} asked ${((Date.now() - at) / 1000).toFixed(0)}s ago, at +${((at - t0) / 1000).toFixed(0)}s`);
       }
     });
   }

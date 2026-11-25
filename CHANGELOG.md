@@ -22,7 +22,8 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   against an in-process relay that serves ranges: a whole blob and a two-chunk one, opened by a
   linked device that holds no account key.
 - **Tests: a stalled page load in the Safari-engine test browser is asked for again.** On macOS it
-  sometimes never sends one of a page's requests, with any web server.
+  sometimes never sends one of a page's requests, with any web server. That
+  includes loads the page starts itself, and the scroll check now scrolls to the post it means.
 - **CI: the website deploys again.** Publishing now runs after the upload as its own job; in one
   job GitHub could not yet find the file it had just been given.
 - **Tests: the cross-device suite rebuilds a half-deleted build cache.** The system's `/tmp`

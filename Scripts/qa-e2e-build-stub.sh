@@ -15,6 +15,9 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DD="${MATRIX_DD:-/tmp/matrix-haven-mac-stub}"
 LOG="${DD}-build.log"
 
+source "$ROOT/Scripts/lib/haven-dd.sh"
+haven_dd_prune "$DD"
+
 cd "$ROOT/apple"
 xcodegen generate >/dev/null
 

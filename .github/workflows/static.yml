@@ -30,11 +30,10 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Single deploy job since we're just deploying
-  deploy:
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+  # Two jobs, GitHub's own shape for Pages. As one job, the deploy step asked for the artifact
+  # within a second of the upload and was told there was none (two runs in a row, 2026-11-25,
+  # while the API listed it a moment later).
+  build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -86,6 +85,14 @@ jobs:
         uses: actions/upload-pages-artifact@v3
         with:
           path: '_site'
+
+  deploy:
+    needs: build
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v5

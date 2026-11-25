@@ -35,32 +35,24 @@ privado,criptografado,família,amigos,mensagens,seguro,offline,chamadas,sem anú
 Novo no 2.0: seu relay faz o trabalho pesado com fotos e vídeos para o celular não esquentar, e você sempre vê quem uma publicação alcança. Continua grátis.
 
 ## whats_new
-2.2.2 — Um navegador vinculado agora mostra tudo.
-• Um navegador que você vincula em haven.wemiller.com/app agora lê todos os seus círculos e mensagens, como qualquer dispositivo vinculado. A opção “Navegadores web” por círculo deixou de existir: aprovar o navegador é a única aprovação. Um navegador é mais fraco que o app, então remova-o em Ajustes → Dispositivos quando terminar.
-• Um dispositivo recém-vinculado mostra na hora as publicações recentes das outras pessoas: seus outros dispositivos passam a ele as chaves que têm.
-• Ao remover um dispositivo, ele agora é avisado, e um navegador removido apaga a si mesmo.
-• Corrigido: escanear o código de um dispositivo podia falhar e continuar falhando por minutos.
-• Os vídeos que você compartilha ficaram muito menores (15 minutos ficam abaixo de 300 MB), e vídeos em HDR são convertidos para aparecerem corretamente para todos.
-• Um navegador vinculado mostra primeiro suas publicações mais recentes em vez de baixar todo o seu histórico.
+2.2.3 — Fotos e vídeos agora carregam em um navegador vinculado.
+• Um navegador vinculado em haven.wemiller.com/app agora abre fotos e vídeos antigos. Depois de atualizar, abra o Haven uma vez no iPhone ou no Mac e mantenha-o aberto enquanto ele envia o acesso ao navegador (um navegador vinculado antes pede sozinho). Depois, o navegador os carrega do seu relay conforme você rola.
+• Fotos e vídeos recentes de amigos agora abrem em um navegador ou aparelho recém-vinculado.
+• Uma foto que não carregou no navegador é tentada de novo.
+• Corrigido: o aviso de envio do histórico para o novo aparelho continuava na tela depois do envio.
 
 ## whats_new_macos
-2.2.2 — Um navegador vinculado agora mostra tudo.
-• Um navegador que você vincula em haven.wemiller.com/app agora lê todos os seus círculos e mensagens, como qualquer dispositivo vinculado. A opção “Navegadores web” por círculo deixou de existir: aprovar o navegador é a única aprovação. Um navegador é mais fraco que o app, então remova-o em Ajustes → Dispositivos quando terminar.
-• Um dispositivo recém-vinculado mostra na hora as publicações recentes das outras pessoas: seus outros dispositivos passam a ele as chaves que têm.
-• Ao remover um dispositivo, ele agora é avisado, e um navegador removido apaga a si mesmo.
-• Corrigido: escanear o código de um dispositivo podia falhar e continuar falhando por minutos.
-• Os vídeos que você compartilha ficaram muito menores (15 minutos ficam abaixo de 300 MB), e vídeos em HDR são convertidos para aparecerem corretamente para todos.
-• Um navegador vinculado mostra primeiro suas publicações mais recentes em vez de baixar todo o seu histórico.
+2.2.3 — Fotos e vídeos agora carregam em um navegador vinculado.
+• Um navegador vinculado em haven.wemiller.com/app agora abre fotos e vídeos antigos. Depois de atualizar, abra o Haven uma vez no iPhone ou no Mac e mantenha-o aberto enquanto ele envia o acesso ao navegador (um navegador vinculado antes pede sozinho). Depois, o navegador os carrega do seu relay conforme você rola.
+• Fotos e vídeos recentes de amigos agora abrem em um navegador ou aparelho recém-vinculado.
+• Uma foto que não carregou no navegador é tentada de novo.
+• Corrigido: o aviso de envio do histórico para o novo aparelho continuava na tela depois do envio.
 
 ## whats_new_windows
-2.2.2 — Um navegador vinculado agora mostra tudo.
-• Um navegador que você vincula em haven.wemiller.com/app agora lê todos os seus círculos e mensagens, como qualquer dispositivo vinculado. A opção “Navegadores web” por círculo deixou de existir: aprovar o navegador é a única aprovação. Um navegador é mais fraco que o app, então remova-o em Ajustes → Dispositivos quando terminar.
-• Um dispositivo recém-vinculado mostra na hora as publicações recentes das outras pessoas: seus outros dispositivos passam a ele as chaves que têm.
-• Corrigido: os códigos QR eram desenhados pequenos demais para escanear, e as fotos de perfil definidas em um telefone não apareciam.
-• Colocar-se em dia a partir de um relay ficou muito mais rápido.
-• Corrigido: escanear o código de um dispositivo podia falhar e continuar falhando por minutos.
-• Os vídeos que você compartilha ficaram muito menores (15 minutos ficam abaixo de 300 MB).
-• Um navegador vinculado mostra primeiro suas publicações mais recentes em vez de baixar todo o seu histórico.
+2.2.3 — Fotos e vídeos agora carregam em um navegador vinculado.
+• Um navegador vinculado em haven.wemiller.com/app agora abre fotos e vídeos antigos. Depois de atualizar, abra o Haven uma vez neste computador, no iPhone ou no Mac e mantenha-o aberto enquanto ele envia o acesso ao navegador (um navegador vinculado antes pede sozinho). Depois, o navegador os carrega do seu relay conforme você rola.
+• Fotos e vídeos recentes de amigos agora abrem em um navegador ou aparelho recém-vinculado.
+• Uma foto que não carregou no navegador é tentada de novo.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

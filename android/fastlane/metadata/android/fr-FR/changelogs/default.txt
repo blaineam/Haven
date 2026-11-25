@@ -1,5 +1,4 @@
-2.2.2 — Un navigateur lié affiche désormais tout.
-• Un navigateur lié lit désormais tous vos cercles et messages. Le réglage « Navigateurs web » par cercle disparaît ; retirez un navigateur dans Réglages → Appareils.
-• Un appareil tout juste lié affiche aussitôt les publications récentes des autres.
-• Corrigé : scanner le code d'un appareil pouvait échouer pendant plusieurs minutes.
-• Vidéos bien plus légères ; le HDR est converti.
+2.2.3 — Photos dans un navigateur associé.
+• Les photos et vidéos récentes de vos amis s’ouvrent sur un navigateur ou appareil nouvellement associé.
+• Les photos non chargées dans le navigateur sont réessayées.
+• Les anciennes photos s’y ouvrent après une ouverture de Haven sur un iPhone, Mac ou ordinateur à jour de votre compte. Cette app ne peut pas encore envoyer cet accès.

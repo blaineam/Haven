@@ -7,7 +7,7 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
-## Unreleased
+## 2.2.3 (2026-11-25)
 
 ### Added
 - **A linked browser can open older photos and videos.** After linking, your iPhone, Mac or
@@ -18,6 +18,9 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   far less. Older relays still work, with more data used on the sending device.
 
 ### Fixed
+- **Tests: the iPhone's half of the per-item keys runs end to end in the app's own test host**,
+  against an in-process relay that serves ranges: a whole blob and a two-chunk one, opened by a
+  linked device that holds no account key.
 - **Tests: a stalled page load in the Safari-engine test browser is asked for again.** On macOS it
   sometimes never sends one of a page's requests, with any web server.
 - **CI: the website deploys again.** Publishing now runs after the upload as its own job; in one

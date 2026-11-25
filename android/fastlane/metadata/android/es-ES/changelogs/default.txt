@@ -1,5 +1,4 @@
-2.2.2 — Un navegador vinculado ahora lo muestra todo.
-• Un navegador vinculado ahora lee todos tus círculos y mensajes. El interruptor «Navegadores web» de cada círculo desaparece; quita un navegador en Ajustes → Dispositivos.
-• Un dispositivo recién vinculado muestra enseguida las publicaciones recientes de los demás.
-• Corregido: escanear el código de un dispositivo podía fallar durante minutos.
-• Los vídeos ocupan mucho menos; el HDR se convierte.
+2.2.3 — Fotos en un navegador vinculado.
+• Las fotos y videos recientes de tus amigos ya se abren en navegadores y dispositivos recién vinculados.
+• Las fotos que no cargaron en el navegador se reintentan.
+• Las fotos antiguas se abren en el navegador tras abrir Haven una vez en un iPhone, Mac o equipo actualizado de tu cuenta. Esta app aún no puede enviar ese acceso.

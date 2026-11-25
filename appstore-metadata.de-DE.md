@@ -35,32 +35,24 @@ privat,verschlüsselt,Familie,Freunde,sicher,Messenger,offline,Anrufe,ohne Werbu
 Neu in 2.0: Dein Relay übernimmt die schwere Arbeit bei Fotos und Videos, damit dein Handy kühl bleibt – und du siehst immer genau, wen ein Beitrag erreicht. Kostenlos.
 
 ## whats_new
-2.2.2 – Ein verknüpfter Browser zeigt jetzt alles.
-• Ein Browser, den du unter haven.wemiller.com/app verknüpfst, liest jetzt alle deine Kreise und Nachrichten, wie jedes verknüpfte Gerät. Den Schalter „Webbrowser“ pro Kreis gibt es nicht mehr: Deine Bestätigung des Browsers ist die einzige Freigabe. Ein Browser ist schwächer als die App, entferne ihn also unter Einstellungen → Geräte, wenn du fertig bist.
-• Ein neu verknüpftes Gerät zeigt die neueren Beiträge anderer sofort: Deine anderen Geräte geben ihm die Schlüssel, die sie haben.
-• Ein entferntes Gerät erfährt das jetzt, und ein entfernter Browser löscht sich selbst.
-• Behoben: Das Scannen eines Gerätecodes konnte fehlschlagen und minutenlang weiter fehlschlagen.
-• Geteilte Videos sind deutlich kleiner (15 Minuten bleiben unter 300 MB), und HDR-Videos werden umgewandelt, damit sie bei allen richtig aussehen.
-• Ein verknüpfter Browser zeigt zuerst deine neuesten Beiträge, statt deinen ganzen Verlauf zu laden.
+2.2.3 – Fotos und Videos laden jetzt in einem verknüpften Browser.
+• Ein unter haven.wemiller.com/app verknüpfter Browser kann jetzt auch ältere Fotos und Videos öffnen. Öffne Haven nach dem Update einmal auf deinem iPhone oder Mac und lass es geöffnet, während es dem Browser den Zugriff sendet (ein früher verknüpfter Browser fragt selbst). Danach lädt der Browser sie beim Scrollen von deinem Relay.
+• Neuere Fotos und Videos von Freunden öffnen sich jetzt auf einem neu verknüpften Browser oder Gerät.
+• Ein Foto, das im Browser nicht geladen wurde, wird erneut versucht.
+• Behoben: „Verlauf wird an dein neues Gerät gesendet“ blieb nach dem Senden stehen.
 
 ## whats_new_macos
-2.2.2 – Ein verknüpfter Browser zeigt jetzt alles.
-• Ein Browser, den du unter haven.wemiller.com/app verknüpfst, liest jetzt alle deine Kreise und Nachrichten, wie jedes verknüpfte Gerät. Den Schalter „Webbrowser“ pro Kreis gibt es nicht mehr: Deine Bestätigung des Browsers ist die einzige Freigabe. Ein Browser ist schwächer als die App, entferne ihn also unter Einstellungen → Geräte, wenn du fertig bist.
-• Ein neu verknüpftes Gerät zeigt die neueren Beiträge anderer sofort: Deine anderen Geräte geben ihm die Schlüssel, die sie haben.
-• Ein entferntes Gerät erfährt das jetzt, und ein entfernter Browser löscht sich selbst.
-• Behoben: Das Scannen eines Gerätecodes konnte fehlschlagen und minutenlang weiter fehlschlagen.
-• Geteilte Videos sind deutlich kleiner (15 Minuten bleiben unter 300 MB), und HDR-Videos werden umgewandelt, damit sie bei allen richtig aussehen.
-• Ein verknüpfter Browser zeigt zuerst deine neuesten Beiträge, statt deinen ganzen Verlauf zu laden.
+2.2.3 – Fotos und Videos laden jetzt in einem verknüpften Browser.
+• Ein unter haven.wemiller.com/app verknüpfter Browser kann jetzt auch ältere Fotos und Videos öffnen. Öffne Haven nach dem Update einmal auf deinem iPhone oder Mac und lass es geöffnet, während es dem Browser den Zugriff sendet (ein früher verknüpfter Browser fragt selbst). Danach lädt der Browser sie beim Scrollen von deinem Relay.
+• Neuere Fotos und Videos von Freunden öffnen sich jetzt auf einem neu verknüpften Browser oder Gerät.
+• Ein Foto, das im Browser nicht geladen wurde, wird erneut versucht.
+• Behoben: „Verlauf wird an dein neues Gerät gesendet“ blieb nach dem Senden stehen.
 
 ## whats_new_windows
-2.2.2 – Ein verknüpfter Browser zeigt jetzt alles.
-• Ein Browser, den du unter haven.wemiller.com/app verknüpfst, liest jetzt alle deine Kreise und Nachrichten, wie jedes verknüpfte Gerät. Den Schalter „Webbrowser“ pro Kreis gibt es nicht mehr: Deine Bestätigung des Browsers ist die einzige Freigabe. Ein Browser ist schwächer als die App, entferne ihn also unter Einstellungen → Geräte, wenn du fertig bist.
-• Ein neu verknüpftes Gerät zeigt die neueren Beiträge anderer sofort: Deine anderen Geräte geben ihm die Schlüssel, die sie haben.
-• Behoben: QR-Codes wurden zu klein zum Scannen dargestellt, und auf einem Telefon gesetzte Profilbilder erschienen nicht.
-• Das Nachladen von einem Relay ist deutlich schneller.
-• Behoben: Das Scannen eines Gerätecodes konnte fehlschlagen und minutenlang weiter fehlschlagen.
-• Geteilte Videos sind deutlich kleiner (15 Minuten bleiben unter 300 MB).
-• Ein verknüpfter Browser zeigt zuerst deine neuesten Beiträge, statt deinen ganzen Verlauf zu laden.
+2.2.3 – Fotos und Videos laden jetzt in einem verknüpften Browser.
+• Ein unter haven.wemiller.com/app verknüpfter Browser kann jetzt auch ältere Fotos und Videos öffnen. Öffne Haven nach dem Update einmal auf diesem Computer, deinem iPhone oder Mac und lass es geöffnet, während es dem Browser den Zugriff sendet (ein früher verknüpfter Browser fragt selbst). Danach lädt der Browser sie beim Scrollen von deinem Relay.
+• Neuere Fotos und Videos von Freunden öffnen sich jetzt auf einem neu verknüpften Browser oder Gerät.
+• Ein Foto, das im Browser nicht geladen wurde, wird erneut versucht.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

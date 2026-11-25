@@ -1,5 +1,4 @@
-2.2.2 – Ein verknüpfter Browser zeigt jetzt alles.
-• Ein verknüpfter Browser liest jetzt alle deine Kreise und Nachrichten. Den Schalter „Webbrowser“ pro Kreis gibt es nicht mehr; entferne einen Browser unter Einstellungen → Geräte.
-• Ein neu verknüpftes Gerät zeigt die neueren Beiträge anderer sofort.
-• Behoben: Das Scannen eines Gerätecodes konnte minutenlang fehlschlagen.
-• Geteilte Videos sind deutlich kleiner; HDR wird umgewandelt.
+2.2.3 – Fotos im verknüpften Browser.
+• Neuere Fotos und Videos von Freunden öffnen sich auf neu verknüpften Browsern und Geräten.
+• Nicht geladene Fotos im Browser werden erneut versucht.
+• Ältere Fotos öffnen sich im Browser, nachdem Haven auf einem aktualisierten iPhone, Mac oder Computer deines Kontos einmal offen war. Diese App kann den Zugriff noch nicht senden.

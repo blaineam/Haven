@@ -26,6 +26,12 @@ final class FakeWire: @unchecked Sendable {
     private var log: [Request] = []
     private var _refuse = false
     private var _unreachable = false
+    private var _dropMedia = false
+    /// Fail only media reads (the account lane still answers): a blob nobody could be asked for.
+    var dropMedia: Bool { get { lock.withLock { _dropMedia } } set { lock.withLock { _dropMedia = newValue } } }
+    private var _ranged: [(path: String, bytes: Int)] = []
+    /// Every relay GET answered partially (`Range: bytes=-N`, which haven-relay honors), with its size.
+    var rangedReads: [(path: String, bytes: Int)] { lock.withLock { _ranged } }
 
     /// Answer every relay request 403 (the relay is up but does not know this device).
     var refuse: Bool { get { lock.withLock { _refuse } } set { lock.withLock { _refuse = newValue } } }
@@ -47,7 +53,7 @@ final class FakeWire: @unchecked Sendable {
         reset()
     }
     func reset() {
-        lock.withLock { relay = [:]; relay2 = [:]; bucketKV = [:]; log = []; _refuse = false; _unreachable = false; down2 = false; refusing2 = false }
+        lock.withLock { relay = [:]; relay2 = [:]; bucketKV = [:]; log = []; _refuse = false; _unreachable = false; down2 = false; refusing2 = false; _ranged = []; _dropMedia = false }
     }
 
     // MARK: Inspecting and seeding the stores
@@ -96,7 +102,15 @@ final class FakeWire: @unchecked Sendable {
                     let key = String(path.dropFirst(3))
                     switch method {
                     case "PUT": if second { relay2[key] = body ?? Data() } else { relay[key] = body ?? Data() }; return ans(200)
-                    case "GET": if let d = (second ? relay2 : relay)[key] { return ans(200, d) }; return ans(404)
+                    case "GET":
+                        if _dropMedia, key.hasPrefix("haven/media/") { return nil }
+                        guard let d = (second ? relay2 : relay)[key] else { return ans(404) }
+                        if let range = req.value(forHTTPHeaderField: "Range"), range.hasPrefix("bytes=-"),
+                           let n = Int(range.dropFirst(7)), n > 0, n < d.count {
+                            _ranged.append((key, n))
+                            return ans(206, Data(d.suffix(n)))
+                        }
+                        return ans(200, d)
                     case "HEAD": return ans((second ? relay2 : relay)[key] != nil ? 200 : 404)
                     default: return ans(405)
                     }

@@ -1,5 +1,4 @@
-2.2.2 — A linked browser now shows everything.
-• A browser you link now reads all your circles and messages. The per-circle “Web browsers” switch is gone; remove a browser in Settings → Devices.
-• A newly linked device shows other people's recent posts right away.
-• Fixed: scanning a device's code could keep failing for minutes.
-• Videos you share are much smaller (15 minutes is under 300 MB), and HDR video is converted so it looks right for everyone.
+2.2.3 — Photos in a linked browser.
+• Friends’ recent photos and videos now open in a newly linked browser or device.
+• A photo that failed to load in the browser is tried again.
+• Older photos open in a linked browser after an updated iPhone, Mac or computer on your account has Haven open once. This app can’t send that access yet.

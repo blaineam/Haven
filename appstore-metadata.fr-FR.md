@@ -35,32 +35,24 @@ privé,chiffré,famille,amis,cercle,sécurisé,messagerie,hors ligne,stories,app
 Nouveau en 2.0 : votre relay prend en charge photos et vidéos pour que votre téléphone reste frais, et vous voyez toujours qui atteint chaque publication. Gratuit.
 
 ## whats_new
-2.2.2 — Un navigateur lié affiche désormais tout.
-• Un navigateur que vous liez sur haven.wemiller.com/app lit désormais tous vos cercles et messages, comme tout appareil lié. Le réglage « Navigateurs web » par cercle disparaît : approuver le navigateur est la seule approbation. Un navigateur est plus fragile que l'app, retirez-le donc dans Réglages → Appareils quand vous avez fini.
-• Un appareil tout juste lié affiche aussitôt les publications récentes des autres : vos autres appareils lui transmettent les clés qu'ils détiennent.
-• Un appareil retiré en est maintenant informé, et un navigateur retiré s'efface lui-même.
-• Corrigé : scanner le code d'un appareil pouvait échouer et continuer d'échouer pendant plusieurs minutes.
-• Les vidéos que vous partagez sont bien plus légères (15 minutes font moins de 300 Mo), et les vidéos HDR sont converties pour s’afficher correctement chez tout le monde.
-• Un navigateur lié affiche d’abord vos publications les plus récentes au lieu de télécharger tout votre historique.
+2.2.3 — Les photos et vidéos se chargent désormais dans un navigateur associé.
+• Un navigateur associé sur haven.wemiller.com/app peut maintenant ouvrir les anciennes photos et vidéos. Après la mise à jour, ouvrez Haven une fois sur votre iPhone ou votre Mac et laissez-le ouvert pendant qu’il envoie l’accès au navigateur (un navigateur déjà associé le demande de lui-même). Le navigateur les charge ensuite depuis votre relais au fil du défilement.
+• Les photos et vidéos récentes de vos amis s’ouvrent désormais sur un navigateur ou un appareil nouvellement associé.
+• Une photo qui n’a pas pu se charger dans le navigateur est réessayée.
+• Corrigé : le message d’envoi de l’historique vers votre nouvel appareil restait affiché une fois l’envoi terminé.
 
 ## whats_new_macos
-2.2.2 — Un navigateur lié affiche désormais tout.
-• Un navigateur que vous liez sur haven.wemiller.com/app lit désormais tous vos cercles et messages, comme tout appareil lié. Le réglage « Navigateurs web » par cercle disparaît : approuver le navigateur est la seule approbation. Un navigateur est plus fragile que l'app, retirez-le donc dans Réglages → Appareils quand vous avez fini.
-• Un appareil tout juste lié affiche aussitôt les publications récentes des autres : vos autres appareils lui transmettent les clés qu'ils détiennent.
-• Un appareil retiré en est maintenant informé, et un navigateur retiré s'efface lui-même.
-• Corrigé : scanner le code d'un appareil pouvait échouer et continuer d'échouer pendant plusieurs minutes.
-• Les vidéos que vous partagez sont bien plus légères (15 minutes font moins de 300 Mo), et les vidéos HDR sont converties pour s’afficher correctement chez tout le monde.
-• Un navigateur lié affiche d’abord vos publications les plus récentes au lieu de télécharger tout votre historique.
+2.2.3 — Les photos et vidéos se chargent désormais dans un navigateur associé.
+• Un navigateur associé sur haven.wemiller.com/app peut maintenant ouvrir les anciennes photos et vidéos. Après la mise à jour, ouvrez Haven une fois sur votre iPhone ou votre Mac et laissez-le ouvert pendant qu’il envoie l’accès au navigateur (un navigateur déjà associé le demande de lui-même). Le navigateur les charge ensuite depuis votre relais au fil du défilement.
+• Les photos et vidéos récentes de vos amis s’ouvrent désormais sur un navigateur ou un appareil nouvellement associé.
+• Une photo qui n’a pas pu se charger dans le navigateur est réessayée.
+• Corrigé : le message d’envoi de l’historique vers votre nouvel appareil restait affiché une fois l’envoi terminé.
 
 ## whats_new_windows
-2.2.2 — Un navigateur lié affiche désormais tout.
-• Un navigateur que vous liez sur haven.wemiller.com/app lit désormais tous vos cercles et messages, comme tout appareil lié. Le réglage « Navigateurs web » par cercle disparaît : approuver le navigateur est la seule approbation. Un navigateur est plus fragile que l'app, retirez-le donc dans Réglages → Appareils quand vous avez fini.
-• Un appareil tout juste lié affiche aussitôt les publications récentes des autres : vos autres appareils lui transmettent les clés qu'ils détiennent.
-• Corrigé : les codes QR étaient affichés trop petits pour être scannés, et les photos de profil définies sur un téléphone n'apparaissaient pas.
-• Le rattrapage depuis un relais est beaucoup plus rapide.
-• Corrigé : scanner le code d'un appareil pouvait échouer et continuer d'échouer pendant plusieurs minutes.
-• Les vidéos que vous partagez sont bien plus légères (15 minutes font moins de 300 Mo).
-• Un navigateur lié affiche d’abord vos publications les plus récentes au lieu de télécharger tout votre historique.
+2.2.3 — Les photos et vidéos se chargent désormais dans un navigateur associé.
+• Un navigateur associé sur haven.wemiller.com/app peut maintenant ouvrir les anciennes photos et vidéos. Après la mise à jour, ouvrez Haven une fois sur cet ordinateur, votre iPhone ou votre Mac et laissez-le ouvert pendant qu’il envoie l’accès au navigateur (un navigateur déjà associé le demande de lui-même). Le navigateur les charge ensuite depuis votre relais au fil du défilement.
+• Les photos et vidéos récentes de vos amis s’ouvrent désormais sur un navigateur ou un appareil nouvellement associé.
+• Une photo qui n’a pas pu se charger dans le navigateur est réessayée.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

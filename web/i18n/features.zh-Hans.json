@@ -52,7 +52,7 @@
   "no-central-server-end.772017": "没有中心服务器，端到端加密 <span class=\"badge ok\">整个产品的基石</span>",
   "no-central-server.6cba5f": "没有中心服务器",
   "no-internet-no-problem.471b6c": "没有网络？没关系。只要你的人就在身边，Haven 就能通过蓝牙和本地 Wi-Fi 在手机之间直接传递动态、消息和邀请——露营地、飞机上、地下室、停电时，都没问题。",
-  "on-a-computer-where.51d7cd": "在无法安装任何东西的电脑上，可以用浏览器打开 Haven。页面会显示一个代码：用手机上的 Haven 扫描它，并在手机上批准这个浏览器，你的圈子就会出现。之后浏览器会自己与圈子的 Relay 通信，手机可以放回口袋。",
+  "on-a-computer-where.51d7cd": "在无法安装任何东西的电脑上，可以用浏览器打开 Haven。页面会显示一个代码：用手机上的 Haven 扫描它，并在手机上批准这个浏览器，你的圈子就会出现。首次使用时，请在手机发送历史记录和较早照片的访问权限期间保持 Haven 打开。之后浏览器会自己与圈子的 Relay 通信，手机可以放回口袋。",
   "on-apple-devices-this.e648ae": "在 Apple 设备上，这靠的是 MultipeerConnectivity（蓝牙 + 本地 Wi-Fi）；在 Android 上则是 Nearby Connections API。<b>mesh relay</b> 中转让一台已联网的手机，替只能通过本地 mesh 联系上的朋友把封装好的消息转发出去——全程依然只有密文，端到端加密。",
   "one-rust-core-p2pcore.9cd254": "一个 Rust 核心（<code>p2pcore</code>）负责身份、混合后量子加密、圈子和社交引擎，所有平台共用同一套。传输层会自动选择最佳路径：<b>nearby</b>（蓝牙/Wi-Fi）→ <b>direct</b>（带 NAT 打洞的 iroh QUIC）→ <b>relay</b>（只有在本地方式都不通时才用）。在传输层之上，一切都只是无法解读的加密字节。",
   "operating-costs.d2d6be": "运营成本",

@@ -32,6 +32,7 @@ final class HandoffWireTests: XCTestCase {
     override func setUp() async throws {
         _ = await Harness.feed()
         wire.install()
+        MediaKeysSender.shared.reset()
         SharedStore.clearAllHttpUrlBad()
         let r = RelayMailboxStore.shared
         r.add(circleId: "default", nodeHex: relayHex)
@@ -39,6 +40,7 @@ final class HandoffWireTests: XCTestCase {
         HistoryHandoff.shared.reset()
     }
     override func tearDown() async throws {
+        MediaKeysSender.shared.reset()
         HistoryHandoff.shared.reset()
         let r = RelayMailboxStore.shared
         r.eraseNow(relayHex); r.dropErased(relayHex); r.unforget(relayHex)
@@ -97,6 +99,104 @@ final class HandoffWireTests: XCTestCase {
         HistoryHandoff.shared.reset()
         XCTAssertEqual(HistoryHandoff.shared.status.phase, .idle, "…until the run is forgotten")
         XCTAssertFalse(HistoryHandoff.shared.transferActive)
+    }
+
+    /// DECISIONS D27, the iPhone's half end to end: a friend's media from before a linked device
+    /// existed, one blob whole and one in two chunks on the relay. The app reads only their ends,
+    /// sends the keys, and a device WITHOUT the account key opens both with them.
+    func testThisDeviceSendsALinkedDeviceTheKeysToOlderMedia() async throws {
+        let store = await Harness.feed()
+        let seed = try XCTUnwrap(AccountStore.storedSeed())
+        let acct = AccountStore.currentNodeHex()
+        let me = DeviceKeyStore.deviceNodeHex().lowercased()
+        let tag = UUID().uuidString.prefix(8).lowercased()
+        let friend = Peer(byte: 0xD7, name: "Old photos")
+        await friend.befriend(store)
+
+        let small = Data(repeating: 7, count: 150_000)
+        let large = Data((0..<300_000).map { UInt8(truncatingIfNeeded: $0) })
+        let smallRef = "img_d27small\(tag)", largeRef = "vid_d27large\(tag)", goneRef = "img_d27gone\(tag)"
+        let sealedSmall = try friend.engine.sealCircleMedia(circleId: "default", data: small)
+        let sealedLarge = try friend.engine.sealCircleMedia(circleId: "default", data: large)
+        wire.putRelay("haven/media/\(smallRef)", sealedSmall)
+        // Two chunks, the second far shorter than the tail: the entries run back into the first.
+        let cut = sealedLarge.count - 900
+        let manifestBody = try JSONSerialization.data(withJSONObject:
+            ["v": 1, "chunks": 2, "total": sealedLarge.count, "sizes": [cut, 900]])
+        wire.putRelay("haven/media/\(largeRef)", SharedStore.manifestMagic + manifestBody)
+        wire.putRelay("haven/media/\(largeRef).p/0", Data(sealedLarge.prefix(cut)))
+        wire.putRelay("haven/media/\(largeRef).p/1", Data(sealedLarge.suffix(900)))
+        let longAgo = HistoryHandoffWire.nowMs() - 90 * 24 * 3_600_000
+        await friend.post("before the browser \(tag)", into: store, createdAt: longAgo,
+                          media: [smallRef, largeRef, goneRef])
+
+        // The linked device: enrolled in the account's roster, holding no account key.
+        let deviceByte: UInt8 = 0x73
+        let sib = try Sibling(seed: seed, deviceByte: deviceByte, adopting: await store.ownRosterWire())
+        _ = await store.ingestOwnDeviceRoster(sib.roster)
+        let accountBundle = try XCTUnwrap(store.myPublicBundle())
+        let browser = try HavenSocial.newSeedless(accountPublicBundle: accountBundle,
+                                                  deviceSeed: Data((0..<32).map { UInt8($0) &+ deviceByte }))
+        browser.createCircle(id: "default", name: "Your circle")
+        XCTAssertNil(browser.openCircleMedia(circleId: "default", sealed: sealedSmall), "no way in before the keys")
+
+        let at = HistoryHandoffWire.nowMs()
+        let ask = HistoryHandoffWire.KeysRequest(device: sib.deviceHex.lowercased(), at: at)
+        wire.putRelay(HistoryHandoffWire.keysRequestKey(acct, sib.deviceHex), try JSONEncoder().encode(ask))
+        let manifestKey = HistoryHandoffWire.keysManifestKey(acct, sib.deviceHex, me)
+        var progress: HistoryHandoffWire.KeysManifest?
+        for _ in 0..<20 where progress?.complete != true {
+            _ = await MediaKeysSender.shared.serve(until: Date().addingTimeInterval(120))
+            progress = try wire.relayData(manifestKey).map { try JSONDecoder().decode(HistoryHandoffWire.KeysManifest.self, from: $0) }
+        }
+        let m = try XCTUnwrap(progress)
+        XCTAssertTrue(m.complete)
+        XCTAssertEqual(m.forRequest, at)
+        XCTAssertEqual(m.done, m.total)
+        XCTAssertGreaterThanOrEqual(m.missing, 1, "the blob no relay holds is counted, not waited for")
+
+        var received: UInt32 = 0
+        for n in 0..<m.batches {
+            let grant = try XCTUnwrap(wire.relayData(HistoryHandoffWire.keysBatchKey(acct, sib.deviceHex, me, m.run, n)))
+            received += browser.receiveItemKeys(grant: grant)
+        }
+        XCTAssertGreaterThanOrEqual(received, 2)
+        XCTAssertEqual(browser.openCircleMedia(circleId: "default", sealed: sealedSmall), small)
+        XCTAssertEqual(browser.openCircleMedia(circleId: "default", sealed: sealedLarge), large)
+
+        // Only the ends were read: ranged GETs, and never a whole blob or chunk of either.
+        let mine = wire.rangedReads.filter { $0.path.contains(tag) }
+        XCTAssertTrue(mine.contains { $0.path == "haven/media/\(smallRef)" }, "\(mine)")
+        XCTAssertTrue(mine.contains { $0.path == "haven/media/\(largeRef).p/0" }, "\(mine)")
+        XCTAssertTrue(mine.allSatisfy { $0.bytes <= HistoryHandoffWire.keyTailBytes })
+
+        XCTAssertTrue(MediaKeysSender.shared.hasJobs == false, "a sent job asks for no more background time")
+        var done = ask
+        done.done = true
+        wire.putRelay(HistoryHandoffWire.keysRequestKey(acct, sib.deviceHex), try JSONEncoder().encode(done))
+        let again = await MediaKeysSender.shared.serve(until: Date().addingTimeInterval(30))
+        XCTAssertFalse(again)
+
+        // A relay that cannot be reached is not one that holds nothing: the job waits, and
+        // "Cancel transfer" then stops it for good.
+        wire.dropMedia = true
+        wire.removeRelay(prefix: manifestKey)
+        let second = HistoryHandoffWire.KeysRequest(device: sib.deviceHex.lowercased(), at: at + 1)
+        wire.putRelay(HistoryHandoffWire.keysRequestKey(acct, sib.deviceHex), try JSONEncoder().encode(second))
+        _ = await MediaKeysSender.shared.serve(until: Date().addingTimeInterval(60))
+        // (The failed read also parks that relay's address, so no progress goes up either.)
+        XCTAssertTrue(MediaKeysSender.shared.hasJobs, "the job is kept for a later pass")
+        XCTAssertEqual(MediaKeysSender.shared.progress?.done, 0, "nothing was given up on")
+        XCTAssertTrue(wire.relayKeys(prefix: HistoryHandoffWire.lane(acct) + "media-keys/")
+            .allSatisfy { $0.contains("/\(m.run)/") }, "no batch for the waiting job")
+        MediaKeysSender.shared.cancel()
+        XCTAssertFalse(MediaKeysSender.shared.hasJobs)
+        wire.dropMedia = false
+        SharedStore.clearAllHttpUrlBad()
+        wire.removeRelay(prefix: manifestKey)
+        let afterCancel = await MediaKeysSender.shared.serve(until: Date().addingTimeInterval(30))
+        XCTAssertFalse(afterCancel)
+        XCTAssertNil(wire.relayData(manifestKey))
     }
 
     func testAnAskCancelledByTheNewDeviceIsDroppedByTheSource() async throws {

@@ -7,6 +7,12 @@ by dated waves (a batch of work committed together and rolled into the next buil
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## Unreleased
+
+### Fixed
+- **CI: the desktop workflow's Flatpak build works again** when Flathub has a newer runtime than
+  the build image. It now takes the same step the release build already did.
+
 ## 2.2.3 (2026-11-25)
 
 ### Added

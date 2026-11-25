@@ -7558,6 +7558,25 @@ final class FeedStore: ObservableObject {
         return self.engine === engine ? page : nil
     }
 
+    // Per-item media keys (DECISIONS D27): what a linked browser needs to open older media.
+
+    func historyMediaRefs() async -> [MediaRefFfi] {
+        guard let engine else { return [] }
+        return await engine.run { $0.historyMediaRefs(nowMs: HistoryHandoffWire.nowMs()) }
+    }
+
+    /// The key entry from a sealed blob's closing bytes (or all of it); nil when mine is not there.
+    func itemKey(fromTail tail: Data) async -> Data? {
+        guard let engine else { return nil }
+        return await engine.run { $0.itemKeyFromTail(tail: tail) }
+    }
+
+    /// Entries signed by my account and sealed to one of my devices; nil when it cannot be sealed.
+    func sealItemKeys(device: String, entries: [Data]) async -> Data? {
+        guard let engine else { return nil }
+        return await engine.run { $0.sealItemKeys(deviceNodeHex: device, entries: entries) }
+    }
+
     /// My account-signed device roster wire (the one the relay verifies), for a handoff request.
     func ownRosterWire() async -> Data? {
         guard let engine else { return nil }

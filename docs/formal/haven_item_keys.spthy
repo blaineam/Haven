@@ -1,0 +1,139 @@
+/*
+  Haven per-item media keys — handing a linked browser the content key of one old blob.
+  Symbolic model (Tamarin). docs/DECISIONS.md D27.
+
+  A browser never holds the account key, and the circle keys that open old media are deleted
+  everywhere. A device that holds the account key unwraps one blob's content key from the entry
+  sealed to the account and sends it to the browser. This model checks what bounds that message.
+
+  Code: core/haven-p2p/src/social.rs (content_key_from_tail, seal_item_key_grant,
+  open_item_key_grant), core/haven-ffi/src/lib.rs (seal_item_keys, receive_item_keys),
+  core/haven-client/src/mediakeys.rs, apple/HavenApp/MediaKeys.swift.
+
+  Run:  tamarin-prover --auto-sources --prove docs/formal/haven_item_keys.spthy
+        tamarin-prover --auto-sources --prove -DCLEAR_GRANT docs/formal/haven_item_keys.spthy
+        tamarin-prover --auto-sources --prove -DANY_SIGNER docs/formal/haven_item_keys.spthy
+
+  What is modelled
+   - An ACCOUNT has a signing key and a key blobs are sealed to, held only by its seed-holding
+     device. Its browser pins the account's public signing key at enrollment.
+   - A DEVICE has its own encryption key. The sender takes it from the account's own signed
+     roster (modelled as the fact !Mine, which only the enrollment step creates).
+   - A BLOB is a body under a fresh content key, with that key wrapped to the account.
+   - A GRANT names the device it is for, the blob and the content key. AS BUILT it is signed by
+     the account and the whole of it is sealed to that device.
+   - -DCLEAR_GRANT models a grant that is signed but not sealed (what putting the keys inside a
+     history page would have been: the page's container is not encrypted). K1 is falsified.
+   - -DANY_SIGNER models a browser that takes a grant without checking who signed it. K2 is
+     falsified.
+   - The adversary controls the network and the relay, and may take everything a linked device
+     holds (RevealDevice) or the account's keys (RevealAccount).
+
+  Not modelled: the sender's signature on the blob (a blob opened by its content key is bound to
+  the signed post by its content ref, as one opened by a circle key is), and sizes and timing.
+*/
+
+theory HavenItemKeys
+begin
+
+builtins: signing, asymmetric-encryption, symmetric-encryption, hashing
+
+restriction Eq:   "All x y #i. Eq(x, y)@i ==> x = y"
+restriction Once: "All t #i #j. Once(t)@i & Once(t)@j ==> #i = #j"
+
+rule Account:
+  [ Fr(~ask), Fr(~aek) ]
+  --[ Once(<'acct', $A>) ]->
+  [ !Acct($A, ~ask, ~aek), !Pin($A, pk(~ask)), !AcctSealTo($A, pk(~aek)), Out(<pk(~ask), pk(~aek)>) ]
+
+rule RevealAccount:
+  [ !Acct(A, ask, aek) ] --[ RevealAccount(A) ]-> [ Out(<ask, aek>) ]
+
+rule Enroll:             /* the seed holder approves a device: it is in the account's own roster */
+  [ !Acct($A, ask, aek), Fr(~dek) ]
+  --[ Once(<'dev', $D>) ]->
+  [ !Dev($D, $A, ~dek), !Mine($A, $D, pk(~dek)), Out(pk(~dek)) ]
+
+rule RevealDevice:       /* EVERYTHING a linked device holds: a compromised browser */
+  [ !Dev(D, A, dek) ] --[ RevealDevice(D) ]-> [ Out(dek) ]
+
+/* A blob sealed to the account (by a friend or by the account's own phone): public. */
+rule SealBlob:
+  let blob = <senc(~body, ~ck), aenc(~ck, apk)> in
+  [ !AcctSealTo($A, apk), Fr(~body), Fr(~ck) ]
+  --[ Blob($A, h(blob), ~ck) ]->
+  [ !Stored($A, blob), Out(blob) ]
+
+/* The seed holder unwraps one stored blob's key and sends it to one of its own devices. */
+#ifdef CLEAR_GRANT
+/* NOT BUILT: signed, readable by whoever carries it. */
+rule Grant:
+  let blob = <c, aenc(ck, pk(aek))>
+      body = <'grant', $D, h(blob), ck> in
+  [ !Acct($A, ask, aek), !Stored($A, blob), !Mine($A, $D, depk) ]
+  --[ Granted($A, $D, h(blob), ck) ]->
+  [ Out(<body, sign(body, ask)>) ]
+#else
+rule Grant:              /* AS BUILT: signed by the account, sealed to that device */
+  let blob = <c, aenc(ck, pk(aek))>
+      body = <'grant', $D, h(blob), ck> in
+  [ !Acct($A, ask, aek), !Stored($A, blob), !Mine($A, $D, depk) ]
+  --[ Granted($A, $D, h(blob), ck) ]->
+  [ Out(aenc(<body, sign(body, ask)>, depk)) ]
+#endif
+
+#ifdef ANY_SIGNER
+/* NOT BUILT: the device takes any grant sealed to it. */
+rule Ingest:
+  let body = <'grant', $D, id, ck> in
+  [ In(aenc(<body, sg>, pk(dek))), !Dev($D, A, dek) ]
+  --[ Ingested($D, A, id, ck) ]->
+  [ ]
+#endif
+
+#ifdef CLEAR_GRANT
+rule Ingest:             /* the same signature check on the unsealed form */
+  let body = <'grant', $D, id, ck> in
+  [ In(<body, sg>), !Dev($D, A, dek), !Pin(A, pka) ]
+  --[ Eq(verify(sg, body, pka), true), Ingested($D, A, id, ck) ]->
+  [ ]
+#endif
+
+#ifdef not ANY_SIGNER & not CLEAR_GRANT
+rule Ingest:             /* AS BUILT: signed by the pinned account key, and naming this device */
+  let body = <'grant', $D, id, ck> in
+  [ In(aenc(<body, sg>, pk(dek))), !Dev($D, A, dek), !Pin(A, pka) ]
+  --[ Eq(verify(sg, body, pka), true), Ingested($D, A, id, ck) ]->
+  [ ]
+#endif
+
+/* ---- Sanity -------------------------------------------------------------------------------- */
+
+lemma executable_ingest:
+  exists-trace
+  "Ex D A id ck #i #b. Ingested(D, A, id, ck)@i & Blob(A, id, ck)@b
+     & not (Ex B #r. RevealAccount(B)@r) & not (Ex E #r. RevealDevice(E)@r)"
+
+/* ---- Properties ---------------------------------------------------------------------------- */
+
+/* K1 — a blob's content key is learned only from the account, or from a device the account
+   granted THAT key to. The relay and the network carry grants and learn nothing from them. */
+lemma K1_a_content_key_is_read_only_by_whom_it_was_granted_to:
+  "All A id ck #b #k. Blob(A, id, ck)@b & K(ck)@k ==>
+      (Ex #r. RevealAccount(A)@r)
+    | (Ex D #g #r. Granted(A, D, id, ck)@g & RevealDevice(D)@r)"
+
+/* K2 — only the account can give a device a key: whatever a device takes in, its account sent
+   exactly that to exactly that device, unless the account's keys leaked. */
+lemma K2_only_the_account_can_plant_a_key:
+  "All D A id ck #i. Ingested(D, A, id, ck)@i ==>
+      (Ex #g. Granted(A, D, id, ck)@g) | (Ex #r. RevealAccount(A)@r)"
+
+/* K3 — a grant opens only what it names. A blob the account never granted to anyone keeps its
+   key however many linked devices are taken, with everything they were ever granted. */
+lemma K3_an_ungranted_blob_survives_every_linked_device:
+  "All A id ck #b #k. Blob(A, id, ck)@b & K(ck)@k
+      & not (Ex D #g. Granted(A, D, id, ck)@g)
+    ==> (Ex #r. RevealAccount(A)@r)"
+
+end

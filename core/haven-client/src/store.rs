@@ -291,6 +291,12 @@ pub struct Prefs {
     pub history_want: Option<crate::engine::historyhandoff::Want>,
     #[serde(default)]
     pub history_serves: std::collections::HashMap<String, crate::engine::historyhandoff::Serve>,
+    /// Per-item media keys (`engine::mediakeys`): this device's own ask, and the jobs it is
+    /// working through for my other devices.
+    #[serde(default)]
+    pub media_key_want: Option<crate::engine::mediakeys::KeyWant>,
+    #[serde(default)]
+    pub media_key_jobs: std::collections::HashMap<String, crate::engine::mediakeys::KeyJob>,
     /// Offline friend invites (docs/OFFLINE-FRIEND-INVITES.md): tickets I issued, so the
     /// mailbox pass can poll for parked acceptances and approvals can write grants. Mirrors
     /// iOS FriendInviteStore.issued (there: UserDefaults haven.friendInvites.issued).

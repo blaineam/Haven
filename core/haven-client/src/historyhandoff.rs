@@ -332,7 +332,7 @@ pub fn is_backlog_key(key: &str) -> bool {
 }
 
 impl Engine {
-    async fn lane_list(self: &Arc<Self>, prefix: &str) -> Vec<String> {
+    pub(super) async fn lane_list(self: &Arc<Self>, prefix: &str) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         for t in self.gather_self_sync_transports().await {
             for k in self.self_sync_list(&t, prefix).await {
@@ -344,7 +344,7 @@ impl Engine {
         out
     }
 
-    async fn lane_get(self: &Arc<Self>, key: &str) -> Option<Vec<u8>> {
+    pub(super) async fn lane_get(self: &Arc<Self>, key: &str) -> Option<Vec<u8>> {
         for t in self.gather_self_sync_transports().await {
             if let Some(b) = self.self_sync_fetch(&t, key).await {
                 return Some(b);
@@ -353,7 +353,7 @@ impl Engine {
         None
     }
 
-    async fn lane_put(self: &Arc<Self>, key: &str, data: &[u8]) -> bool {
+    pub(super) async fn lane_put(self: &Arc<Self>, key: &str, data: &[u8]) -> bool {
         let mut ok = false;
         for t in self.gather_self_sync_transports().await {
             if self.self_sync_put(&t, key, data).await {

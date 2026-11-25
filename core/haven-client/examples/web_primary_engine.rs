@@ -13,7 +13,8 @@
 //! no TURN, no push. Prints `ORIGIN=` (the relay's front door — the page is at `<origin>/app/`),
 //! `ACCOUNT=`, `TICKET=`; approves every enrollment request made with one of its tickets
 //! (`ENROLLED <device>`); posts each line it reads on stdin (`!img <caption>` attaches a tiny PNG,
-//! `!ticket` mints another ticket as `TICKET<n>=`, `!pair <code>` answers a `haven-pair:` code); and prints `FEED <me|other> <body>[ [media N]]`
+//! `!oldimg <caption>` posts a picture dated 90 days ago and rotates the circle's keys past it
+//! (`OLD ready=<bool>`), `!ticket` mints another ticket as `TICKET<n>=`, `!pair <code>` answers a `haven-pair:` code); and prints `FEED <me|other> <body>[ [media N]]`
 //! for every post once it holds the post's attachments.
 
 use std::collections::HashSet;
@@ -243,6 +244,22 @@ async fn run() -> AnyResult<()> {
                     Ok(()) => println!("PAIRED"),
                     Err(e) => println!("PAIRFAIL {e}"),
                 }
+                continue;
+            }
+            // `!oldimg <caption>`: a picture from before any circle key a new browser is handed.
+            if let Some(caption) = line.strip_prefix("!oldimg ") {
+                let mut img = image::RgbImage::new(31, 17);
+                for (x, y, px) in img.enumerate_pixels_mut() {
+                    *px = image::Rgb([(x * 7) as u8, (y * 13) as u8, 200]);
+                }
+                let mut png = Vec::new();
+                image::DynamicImage::ImageRgb8(img)
+                    .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+                    .map_err(|e| format!("png: {e}"))?;
+                let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &png);
+                let reference = haven_client::commands::add_media(Eng(&engine), CIRCLE.into(), b64, false)
+                    .map_err(|e| format!("add_media: {e}"))?;
+                println!("OLD ready={}", engine.harness_post_before_the_keys(CIRCLE, caption, reference).await);
                 continue;
             }
             // `!newimg <caption>` attaches a picture nobody holds yet (media is addressed by its

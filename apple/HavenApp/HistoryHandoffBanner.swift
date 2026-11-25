@@ -65,6 +65,8 @@ struct HistoryHandoffProgress: View {
             return "\(min(status.done, max(status.total, status.done))) of \(max(status.total, status.done)) posts and messages · \(min(status.mediaDone, status.mediaTotal)) of \(status.mediaTotal) photos and videos"
         case .noAnswer:
             return "Your other device may need a Haven update before it can send your history. Update Haven there, then try again."
+        case .sending where status.total == 0 && status.mediaTotal > 0:
+            return "\(min(status.mediaDone, status.mediaTotal)) of \(status.mediaTotal) photos and videos"
         case .sending where status.mediaTotal > 0:
             return "\(min(status.done, max(status.total, status.done))) of \(max(status.total, status.done)) posts and messages · \(min(status.mediaDone, status.mediaTotal)) of \(status.mediaTotal) photos and videos"
         case .sending where status.total > 0:

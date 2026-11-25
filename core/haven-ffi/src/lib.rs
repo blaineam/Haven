@@ -30,6 +30,7 @@ use haven_p2p::transport;
 use haven_p2p::identity::{Identity, HavenId};
 use haven_p2p::link::HavenLink;
 use haven_p2p::social::{
+    content_key_from_tail, open_bytes_with_content_key, open_item_key_grant, seal_item_key_grant, sealed_blob_id,
     open_bytes_with_epoch, seal_bytes_with_epochs,
     build_activity, build_feed, is_expired, open_bytes, open_event, seal_bytes, seal_event, Event,
     EventKind, FeedPoll, Group, SealedEnvelope, TrackRef,
@@ -127,6 +128,13 @@ pub struct CircleUpgradeOffer {
     pub name: String,
     /// True when I authored this offer (my own circle) — no confirmation needed.
     pub mine: bool,
+}
+
+/// One blob a post, comment or edit names, with the circle it was posted in.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct MediaRefFfi {
+    pub circle_id: String,
+    pub reference: String,
 }
 
 /// One page of a circle's history for OWN-DEVICE handoff (`export_history_page`): the sealed bundle,
@@ -2376,6 +2384,9 @@ struct NetState {
     /// `retire_account_key`. Consulted ONLY inside the `mls_keying`-ON author path, so with the
     /// master switch OFF this set is never read and content is byte-identical to today.
     live_lane_circles: std::collections::HashSet<String>,
+    /// Content keys of single blobs, by [`sealed_blob_id`]: handed to THIS device by my account for
+    /// media older than any circle key it can be given (DECISIONS D27). Each opens one blob.
+    item_keys: HashMap<[u8; 32], [u8; 32]>,
 }
 
 impl NetState {
@@ -6854,6 +6865,12 @@ struct PersistState {
     #[serde(default)]
     #[serde(with = "persist_bytes")]
     cached_profile: Option<Vec<u8>>,
+    /// `NetState::item_keys` as `id(32) ‖ key(32)` records. Not written while empty, so a state
+    /// without any serializes as before; an older build ignores the field.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(with = "persist_bytes")]
+    item_keys: Option<Vec<u8>>,
 }
 /// Legacy single-circle on-disk form — migrated into the default circle on load.
 #[derive(serde::Deserialize)]
@@ -7116,6 +7133,7 @@ impl HavenSocial {
                 v2_trees: std::collections::HashMap::new(),
                 mls_keying: false,
                 live_lane_circles: std::collections::HashSet::new(),
+                item_keys: HashMap::new(),
             }),
             seen_envelopes: Mutex::new(std::collections::HashMap::new()),
             saved_key_digest: Mutex::new(None),
@@ -7182,6 +7200,7 @@ impl HavenSocial {
                 v2_trees: std::collections::HashMap::new(),
                 mls_keying: false,
                 live_lane_circles: std::collections::HashSet::new(),
+                item_keys: HashMap::new(),
             }),
             seen_envelopes: Mutex::new(std::collections::HashMap::new()),
             saved_key_digest: Mutex::new(None),
@@ -9289,7 +9308,7 @@ have_seed={} have_device={} members={}",
             } else {
                 authorized_device_and_account(&st, idx, &sender_hex).map(|(bundle, _)| bundle)
             };
-            MediaOpenKeys::snapshot(&st, epoch_keys, sender_pub.into_iter().collect())
+            MediaOpenKeys::snapshot(&st, &sealed, epoch_keys, sender_pub.into_iter().collect())
         };
         keys.open(&env)
     }
@@ -9347,7 +9366,7 @@ have_seed={} have_device={} members={}",
                     };
                     senders.push(sender_pub);
                 }
-                MediaOpenKeys::snapshot(&st, epoch_keys, senders)
+                MediaOpenKeys::snapshot(&st, &sealed, epoch_keys, senders)
             };
             keys.open(&env)
         })();
@@ -9361,6 +9380,119 @@ have_seed={} have_device={} members={}",
             let _ = std::fs::remove_file(&tmp);
         }
         ok
+    }
+
+    // ── Per-item content keys (DECISIONS D27) ───────────────────────────────────────────────
+
+    /// SOURCE: this blob's own content key, from the last bytes of the sealed blob (or all of it),
+    /// as `id(32) ‖ key(32)` — one entry of [`Self::seal_item_keys`]. Only a device holding the
+    /// account key has an answer. `None` when the entry sealed to me is not within these bytes: ask
+    /// again with a longer tail.
+    pub fn item_key_from_tail(&self, tail: Vec<u8>) -> Option<Vec<u8>> {
+        let seed = self.state.lock().unwrap().me_secret.as_ref().map(|m| m.secret_seed())?;
+        let key = content_key_from_tail(&Identity::from_seed(&seed), &tail)?;
+        let id = sealed_blob_id(&tail)?;
+        Some(id.iter().chain(key.iter()).copied().collect())
+    }
+
+    /// SOURCE: entries from [`Self::item_key_from_tail`], signed by my account and sealed to ONE
+    /// authorized device of mine, ready for the account lane. `None` without the account key, for a
+    /// device my signed roster does not list, or for a malformed entry.
+    pub fn seal_item_keys(&self, device_node_hex: String, entries: Vec<Vec<u8>>) -> Option<Vec<u8>> {
+        let target = decode_hex32(&device_node_hex).ok()?;
+        let keys: Vec<([u8; 32], [u8; 32])> = entries
+            .iter()
+            .map(|e| {
+                (e.len() == 64).then(|| (e[..32].try_into().expect("32"), e[32..].try_into().expect("32")))
+            })
+            .collect::<Option<_>>()?;
+        if keys.is_empty() {
+            return None;
+        }
+        let (seed, device) = {
+            let st = self.state.lock().unwrap();
+            let seed = st.me_secret.as_ref()?.secret_seed();
+            let mine = st.device_lists.get(&st.me().node_id_bytes())?;
+            let device = mine
+                .credentials
+                .iter()
+                .find(|c| c.device_id() == target && mine.list.is_authorized(&target))?
+                .device
+                .clone();
+            (seed, device)
+        };
+        seal_item_key_grant(&Identity::from_seed(&seed), &device, &keys).ok()
+    }
+
+    /// TARGET: take in a key grant. Only one signed by MY account and sealed to THIS device is
+    /// read. Returns how many keys were new.
+    pub fn receive_item_keys(&self, grant: Vec<u8>) -> u32 {
+        let (device_seed, account) = {
+            let st = self.state.lock().unwrap();
+            let Some(device) = st.device.as_ref() else { return 0 };
+            (device.secret_seed(), st.me().clone())
+        };
+        let Some(keys) = open_item_key_grant(&Identity::from_seed(&device_seed), &account, &grant) else {
+            return 0;
+        };
+        let mut st = self.state.lock().unwrap();
+        let mut added = 0;
+        for (id, key) in keys {
+            if st.item_keys.len() >= MAX_ITEM_KEYS && !st.item_keys.contains_key(&id) {
+                break;
+            }
+            if st.item_keys.insert(id, key) != Some(key) {
+                added += 1;
+            }
+        }
+        added
+    }
+
+    /// SOURCE: every blob the posts, comments and edits of all my circles name, newest first,
+    /// each once, variant markers resolved to the blobs they pair. Leaves out what was unsent by
+    /// its author and what the author's own timer has expired: neither is handed on.
+    pub fn history_media_refs(&self, now_ms: u64) -> Vec<MediaRefFfi> {
+        let mut named: Vec<(u64, String, String)> = Vec::new();
+        {
+            let st = self.state.lock().unwrap();
+            for c in &st.circles {
+                let unsent: HashSet<(&str, &str)> = c
+                    .events
+                    .iter()
+                    .filter_map(|e| match &e.kind {
+                        EventKind::Unsend { target } => Some((e.author.as_str(), target.as_str())),
+                        _ => None,
+                    })
+                    .collect();
+                for e in &c.events {
+                    if unsent.contains(&(e.author.as_str(), e.id.as_str())) {
+                        continue;
+                    }
+                    if let EventKind::Post { retention_secs, .. } = &e.kind {
+                        if is_expired(e.created_at, *retention_secs, None, now_ms) {
+                            continue;
+                        }
+                    }
+                    for entry in event_media_refs(&e.kind) {
+                        for r in blob_refs_of(entry) {
+                            named.push((e.created_at, c.id.clone(), r.to_string()));
+                        }
+                    }
+                }
+            }
+        }
+        named.sort_by(|a, b| b.0.cmp(&a.0));
+        let mut seen: HashSet<String> = HashSet::new();
+        named
+            .into_iter()
+            .filter(|(_, _, r)| seen.insert(r.clone()))
+            .map(|(_, circle_id, reference)| MediaRefFfi { circle_id, reference })
+            .collect()
+    }
+
+    /// How many per-item keys this device holds.
+    pub fn item_key_count(&self) -> u64 {
+        self.state.lock().unwrap().item_keys.len() as u64
     }
 
     /// True when key / tree state was authored since the last `export_state` — an epoch rotation, a
@@ -9453,6 +9585,11 @@ impl HavenSocial {
             }).collect(),
             seedless_roster_wire: st.seedless_roster_wire.clone(),
             cached_profile: st.cached_profile.clone(),
+            item_keys: (!st.item_keys.is_empty()).then(|| {
+                let mut v: Vec<(&[u8; 32], &[u8; 32])> = st.item_keys.iter().collect();
+                v.sort();
+                v.into_iter().flat_map(|(id, key)| id.iter().chain(key.iter()).copied()).collect()
+            }),
             shadow_trees: {
                 let mut v: Vec<PersistShadow> =
                     st.shadow_trees.iter().map(|(c, t)| PersistShadow::from_tree(c, t)).collect();
@@ -10193,6 +10330,13 @@ impl HavenSocial {
             if let Some(card) = ps.cached_profile {
                 st.cached_profile = Some(card);
             }
+            for rec in ps.item_keys.unwrap_or_default().chunks_exact(64) {
+                if st.item_keys.len() >= MAX_ITEM_KEYS {
+                    break;
+                }
+                let (id, key) = rec.split_at(32);
+                st.item_keys.insert(id.try_into().expect("32"), key.try_into().expect("32"));
+            }
             // A restored buffer may already be openable with the keys/rosters we just loaded.
             drain_all_pending(&mut st);
         } else if let Ok(old) = serde_json::from_slice::<LegacyPersistState>(data) {
@@ -10898,11 +11042,30 @@ impl HavenSocial {
     }
 }
 
+/// The blobs one media-list entry names: both halves of a variant marker, else the entry itself
+/// (Apple `HistoryHandoffWire.blobRefs`).
+fn blob_refs_of(entry: &str) -> Vec<&str> {
+    for marker in ["poster:", "thumb:", "preview:", "orig:"] {
+        if let Some(rest) = entry.strip_prefix(marker) {
+            return match rest.rsplit_once(':') {
+                Some((a, b)) if !a.is_empty() && !b.is_empty() => vec![a, b],
+                _ => Vec::new(),
+            };
+        }
+    }
+    if entry.is_empty() { Vec::new() } else { vec![entry] }
+}
+
+/// The most per-item keys a device keeps (64 bytes each): far above a large library, and a bound.
+const MAX_ITEM_KEYS: usize = 200_000;
+
 /// What opening a circle-sealed blob needs, copied out from under the engine lock so the decrypt
 /// itself — the whole blob, up to hundreds of MB for a video — runs with the lock released.
 /// `Identity` is not `Clone`; its seed rebuilds it exactly (`from_seed` is its only constructor),
 /// and only when the epoch entry fails — the same order the locked version tried them in.
 struct MediaOpenKeys {
+    /// This blob's own content key, when my account handed it to this device.
+    item_key: Option<[u8; 32]>,
     /// Epoch keys to try on the envelope's epoch entry, in order.
     epoch_keys: Vec<[u8; 32]>,
     /// Resolved sender bundles to try on the per-recipient (legacy) entry, in order.
@@ -10912,8 +11075,9 @@ struct MediaOpenKeys {
 }
 
 impl MediaOpenKeys {
-    fn snapshot(st: &NetState, epoch_keys: Vec<[u8; 32]>, senders: Vec<HavenId>) -> Self {
+    fn snapshot(st: &NetState, sealed: &[u8], epoch_keys: Vec<[u8; 32]>, senders: Vec<HavenId>) -> Self {
         Self {
+            item_key: sealed_blob_id(sealed).and_then(|id| st.item_keys.get(&id).copied()),
             epoch_keys,
             device_seed: st.device.as_ref().map(|d| d.secret_seed()),
             account_seed: st.me_secret.as_ref().map(|m| m.secret_seed()),
@@ -10922,6 +11086,9 @@ impl MediaOpenKeys {
     }
 
     fn open(&self, env: &SealedEnvelope) -> Option<Vec<u8>> {
+        if let Some(p) = self.item_key.and_then(|k| open_bytes_with_content_key(&k, env)) {
+            return Some(p);
+        }
         for k in &self.epoch_keys {
             if let Some(p) = open_bytes_with_epoch(k, env) {
                 return Some(p);

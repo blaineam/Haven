@@ -2183,6 +2183,114 @@ enum SharedStore {
         } catch { qaCount(base, "getFail"); return .failure(error) }
     }
 
+    /// GET the closing bytes of one key. A relay that honors `Range` sends those (`partial`); an
+    /// older one sends the whole body.
+    private static func httpGetTail(_ base: String, _ token: String, _ key: String) async
+        -> Result<(data: Data, partial: Bool)?, Error> {
+        guard !HavenNet.httpOffline else { return .failure(URLError(.notConnectedToInternet)) }
+        guard let url = httpKeyURL(base, key) else { return .failure(URLError(.badURL)) }
+        guard let auth = httpAuth(token, "GET", key, Data()) else { return .failure(URLError(.userAuthenticationRequired)) }
+        var req = URLRequest(url: url, timeoutInterval: 20)
+        req.setValue(auth, forHTTPHeaderField: "Authorization")
+        req.setValue("bytes=-\(HistoryHandoffWire.keyTailBytes)", forHTTPHeaderField: "Range")
+        do {
+            let (data, resp) = try await HavenHTTP.session.data(for: req)
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            switch code {
+            case 200...299: qaCount(base, "getOk"); return .success((data, code == 206))
+            case 404: qaCount(base, "getMiss"); return .success(nil)
+            case 401, 403:
+                qaCount(base, "getRefused")
+                if code == 401 { noteUnverified(base) }
+                return .failure(RelayForbidden())
+            default: qaCount(base, "getFail"); return .failure(URLError(.badServerResponse))
+            }
+        } catch { qaCount(base, "getFail"); return .failure(error) }
+    }
+
+    // MARK: - Per-item media keys (DECISIONS D27)
+
+    /// What looking for one blob's content key came to.
+    enum ItemKeyLookup {
+        case found(Data)
+        /// Every destination answered and none gave a key for it.
+        case missing
+        /// Something did not answer: try again later rather than give the blob up.
+        case unreachable
+    }
+
+    /// One blob's content key, from whichever destination holds the blob, reading as little of it
+    /// as the destination allows. `unwrap` is the engine: the key `id ‖ key` from a blob's closing
+    /// bytes (or all of it), nil when my entry is not within them.
+    static func findItemKey(ref: String, circleId: String,
+                            unwrap: @escaping (Data) async -> Data?) async -> ItemKeyLookup {
+        let sources = await mediaSources(circleIds: [circleId])
+        // A relay whose address is parked as failing was left out above: not having asked it is
+        // not the same as it not holding the blob.
+        var unanswered = sources.isEmpty || mediaDests(circleId).contains { node in
+            guard let http = RelayMailboxStore.shared.httpInterface(node) else { return false }
+            return http.urls.allSatisfy { httpUrlBad($0) }
+        }
+        for source in sources {
+            if case .http(let base, let token, _) = source {
+                switch await itemKeyOverHttp(base, token, ref: ref, unwrap: unwrap) {
+                case .success(let entry?): return .found(entry)
+                case .success(nil): continue
+                case .failure(let error):
+                    if !(error is RelayForbidden) { markHttpUrlBad(base) }
+                    unanswered = true
+                }
+            } else {
+                guard let head = await fetch(source, key(ref)) else { continue }
+                var sealed = head
+                if let count = parseManifest(head) {
+                    guard let last = await fetch(source, chunkKey(ref, count - 1)) else { continue }
+                    let before = count > 1 ? await fetch(source, chunkKey(ref, count - 2)) : nil
+                    sealed = HistoryHandoffWire.joinTail(before: before, last: last)
+                }
+                if let entry = await unwrap(sealed) { return .found(entry) }
+            }
+        }
+        return unanswered ? .unreachable : .missing
+    }
+
+    private static func itemKeyOverHttp(_ base: String, _ token: String, ref: String,
+                                        unwrap: (Data) async -> Data?) async -> Result<Data?, Error> {
+        do {
+            guard let first = try await httpGetTail(base, token, key(ref)).get() else { return .success(nil) }
+            var tail = first.data
+            var partial = first.partial
+            let chunks = parseManifest(first.data)
+            if let count = chunks {
+                guard let last = try await httpGetTail(base, token, chunkKey(ref, count - 1)).get() else { return .success(nil) }
+                tail = last.data
+                partial = last.partial
+                if tail.count < HistoryHandoffWire.keyTailBytes, count > 1 {
+                    // A short last chunk: the entries run back into the one before it.
+                    guard let before = try await httpGetTail(base, token, chunkKey(ref, count - 2)).get() else { return .success(nil) }
+                    partial = partial || before.partial
+                    tail = HistoryHandoffWire.joinTail(before: before.data, last: tail)
+                }
+            }
+            if let entry = await unwrap(tail) { return .success(entry) }
+            guard partial else { return .success(nil) }
+            // More recipients than the tail holds, or an old JSON envelope: read it whole.
+            var whole = Data()
+            if let count = chunks {
+                for i in 0..<count {
+                    guard let c = try await httpGet(base, token, chunkKey(ref, i)).get() else { return .success(nil) }
+                    whole.append(c)
+                }
+            } else {
+                guard let all = try await httpGet(base, token, key(ref)).get() else { return .success(nil) }
+                whole = all
+            }
+            return .success(await unwrap(whole))
+        } catch {
+            return .failure(error)
+        }
+    }
+
     /// HEAD one key: does the relay hold it, without the body. haven-relay serves `HEAD /k/<key>`
     /// (signed exactly like a GET, method "HEAD") since its HTTP interface shipped. 400/405/501 — an
     /// old relay or a proxy that won't pass HEAD — is `.unsupported`, and the caller falls back to GET.

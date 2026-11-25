@@ -365,6 +365,115 @@ pub fn open_bytes_with_epoch(epoch_key: &[u8; 32], env: &SealedEnvelope) -> Opti
     None
 }
 
+// ── Per-item content keys: one old blob's key, handed to my own new device (DECISIONS D27) ───────
+//
+// A blob is never re-sealed, and the circle keys that open old ones are deleted everywhere after a
+// few rotations. A device linked later therefore cannot open older media with anything it can be
+// given — except each blob's own content key, which a device holding the account key can unwrap
+// from its recipient entry. That entry, like every recipient entry, sits at the END of the blob
+// (after the ciphertext), so the unwrapping device needs the last few kilobytes and not the file.
+
+/// How many closing bytes name a sealed blob. They lie inside the sender's signature, which covers
+/// the ciphertext and every recipient entry, so no two seals end alike.
+pub const SEALED_BLOB_ID_BYTES: usize = 256;
+
+/// The name a content key is filed under: derived from the blob's last bytes alone, so the device
+/// that unwraps the key (holding only a tail) and the device that opens the blob (holding all of
+/// it) agree without either needing the other's copy.
+pub fn sealed_blob_id(tail_or_whole: &[u8]) -> Option<[u8; 32]> {
+    let start = tail_or_whole.len().checked_sub(SEALED_BLOB_ID_BYTES)?;
+    let mut h = blake3::Hasher::new();
+    h.update(b"haven-sealed-blob-id-v1");
+    h.update(&tail_or_whole[start..]);
+    Some(*h.finalize().as_bytes())
+}
+
+fn unwrap_entry(me: &Identity, entry: &RecipientKey) -> Option<[u8; 32]> {
+    let enc = Encapsulation {
+        eph_x_pub: entry.enc.eph_x_pub.as_slice().try_into().ok()?,
+        pq_ct: entry.enc.pq_ct.clone(),
+    };
+    // ML-KEM rejects implicitly, so only the AEAD open says whether this was the right key.
+    let kek = decapsulate(me, &enc).ok()?;
+    open(&kek, &entry.wrapped).ok()?.try_into().ok()
+}
+
+/// The content key of a sealed blob, from the recipient entry addressed to `me` found in `tail`
+/// (the blob's last bytes, or all of it). `None` when no such entry is in these bytes: the caller
+/// may ask for a longer tail. A legacy JSON envelope is only readable whole.
+///
+/// The wrap is authenticated, so a returned key is the one the sealer wrapped for `me`; whether it
+/// opens a given ciphertext is settled when that ciphertext is opened (AEAD again).
+pub fn content_key_from_tail(me: &Identity, tail: &[u8]) -> Option<[u8; 32]> {
+    let mine = me.public().node_id_bytes();
+    if tail.first() == Some(&b'{') {
+        let env = SealedEnvelope::from_bytes(tail).ok()?;
+        return env.recipients.iter().filter(|r| r.member == mine).find_map(|r| unwrap_entry(me, r));
+    }
+    // postcard writes a 32-byte `member` as the length 32 and then the bytes.
+    let mut needle = [0u8; 33];
+    needle[0] = 32;
+    needle[1..].copy_from_slice(&mine);
+    tail.windows(needle.len())
+        .enumerate()
+        .filter(|(_, w)| *w == needle)
+        .find_map(|(at, _)| {
+            let (entry, _) = postcard::take_from_bytes::<RecipientKey>(&tail[at..]).ok()?;
+            unwrap_entry(me, &entry)
+        })
+}
+
+/// Open a blob with its own content key. Like the epoch path, this proves the bytes were sealed
+/// under that key; callers bind them to the signed post through the content ref.
+pub fn open_bytes_with_content_key(content_key: &[u8; 32], env: &SealedEnvelope) -> Option<Vec<u8>> {
+    open(content_key, &env.ciphertext).ok()
+}
+
+/// Marks the inside of a key grant, so no other sealed bytes are ever read as one.
+const KEY_GRANT_MAGIC: &[u8; 5] = b"HVMK1";
+
+/// One blob's `(sealed_blob_id, content key)`.
+pub type ItemKey = ([u8; 32], [u8; 32]);
+
+/// Content keys for ONE device of my own account: signed by the account, sealed to that device
+/// alone. The relay that carries it learns its size.
+pub fn seal_item_key_grant(account: &Identity, device: &HavenId, keys: &[ItemKey]) -> Result<Vec<u8>> {
+    let mut plain = Vec::with_capacity(KEY_GRANT_MAGIC.len() + 32 + keys.len() * 64);
+    plain.extend_from_slice(KEY_GRANT_MAGIC);
+    plain.extend_from_slice(&device.node_id_bytes());
+    for (id, key) in keys {
+        plain.extend_from_slice(id);
+        plain.extend_from_slice(key);
+    }
+    Ok(seal_bytes(account, &Group::new("item-keys", vec![device.clone()]), &plain)?.to_bytes())
+}
+
+/// The keys in a grant sealed to `device`. `None` unless `account` signed it, it is addressed to
+/// exactly this device, and its inside is a well-formed grant.
+pub fn open_item_key_grant(device: &Identity, account: &HavenId, grant: &[u8]) -> Option<Vec<ItemKey>> {
+    let env = SealedEnvelope::from_bytes(grant).ok()?;
+    if env.sender != account.node_id_bytes() {
+        return None;
+    }
+    let plain = open_bytes(device, account, &env).ok()?;
+    let rest = plain.strip_prefix(KEY_GRANT_MAGIC.as_slice())?;
+    let (target, rest) = rest.split_first_chunk::<32>()?;
+    if *target != device.public().node_id_bytes() || rest.len() % 64 != 0 {
+        return None;
+    }
+    Some(
+        rest.chunks_exact(64)
+            .map(|c| {
+                let mut id = [0u8; 32];
+                let mut key = [0u8; 32];
+                id.copy_from_slice(&c[..32]);
+                key.copy_from_slice(&c[32..]);
+                (id, key)
+            })
+            .collect(),
+    )
+}
+
 /// Seal arbitrary bytes (e.g. a media blob) to every member of a group — any member
 /// can open it. Used by the shared circle store so a volunteered bucket holds blobs
 /// that are opaque to its host yet readable by the whole circle.
@@ -1312,5 +1421,109 @@ mod epoch_recipient_tests {
         let group = Group::new("default".to_string(), vec![author.public()]);
         let env = seal_bytes_with_epochs(&author, &group, &[1u8; 32], &[[1u8; 32], [2u8; 32], [2u8; 32]], b"x").expect("seals");
         assert_eq!(env.recipients.len(), group.members.len() + 2);
+    }
+}
+
+#[cfg(test)]
+mod item_key_tests {
+    use super::*;
+
+    fn id(n: u8) -> Identity {
+        Identity::from_seed(&[n; 32])
+    }
+
+    /// An old blob: sealed to a few members under an epoch key nobody holds any more.
+    fn old_blob(sealer: &Identity, members: &[&Identity], plain: &[u8]) -> Vec<u8> {
+        let group = Group::new("fam", members.iter().map(|m| m.public()).collect());
+        seal_bytes_with_epoch(sealer, &group, &[42u8; 32], plain).unwrap().to_bytes()
+    }
+
+    #[test]
+    fn the_last_kilobytes_are_enough_to_recover_the_content_key() {
+        let (friend, me) = (id(1), id(2));
+        let others: Vec<Identity> = (10..30).map(id).collect();
+        let mut members: Vec<&Identity> = vec![&friend, &me];
+        members.extend(others.iter());
+        let plain = vec![7u8; 600_000];
+        let blob = old_blob(&friend, &members, &plain);
+        let tail = &blob[blob.len() - 64 * 1024..];
+        let key = content_key_from_tail(&me, tail).expect("my entry is within the tail");
+        let env = SealedEnvelope::from_bytes(&blob).unwrap();
+        assert_eq!(open_bytes_with_content_key(&key, &env).as_deref(), Some(plain.as_slice()));
+        // The tail and the whole blob name it alike, so the two devices agree on the key's name.
+        assert_eq!(sealed_blob_id(tail), sealed_blob_id(&blob));
+        assert_eq!(content_key_from_tail(&me, &blob), Some(key));
+    }
+
+    #[test]
+    fn a_tail_without_my_entry_and_a_stranger_get_nothing() {
+        let (friend, me, stranger) = (id(1), id(2), id(3));
+        let blob = old_blob(&friend, &[&friend, &me], b"a photo");
+        assert_eq!(content_key_from_tail(&stranger, &blob), None);
+        // Too short to reach back past the signature to any recipient entry.
+        assert_eq!(content_key_from_tail(&me, &blob[blob.len() - 1_000..]), None);
+        assert_eq!(content_key_from_tail(&me, b""), None);
+        assert_eq!(sealed_blob_id(&blob[..100]), None);
+    }
+
+    #[test]
+    fn hostile_bytes_are_refused_without_a_panic() {
+        let me = id(2);
+        let mine = me.public().node_id_bytes();
+        // My id followed by lengths that run past the end.
+        for junk in [&[][..], &[0xff; 3][..], &[32, 0xff, 0xff, 0xff, 0x0f][..]] {
+            let mut tail = vec![32u8];
+            tail.extend_from_slice(&mine);
+            tail.extend_from_slice(junk);
+            assert_eq!(content_key_from_tail(&me, &tail), None);
+        }
+    }
+
+    #[test]
+    fn a_legacy_json_blob_gives_its_key_when_read_whole() {
+        let (friend, me) = (id(1), id(2));
+        let env = seal_bytes(&friend, &Group::new("fam", vec![me.public()]), b"old json photo").unwrap();
+        let json = serde_json::to_vec(&env).unwrap();
+        let key = content_key_from_tail(&me, &json).expect("whole JSON envelope");
+        assert_eq!(open_bytes_with_content_key(&key, &env).as_deref(), Some(&b"old json photo"[..]));
+    }
+
+    #[test]
+    fn one_key_opens_one_blob() {
+        let (friend, me) = (id(1), id(2));
+        let (a, b) = (old_blob(&friend, &[&me], b"first"), old_blob(&friend, &[&me], b"second"));
+        let key = content_key_from_tail(&me, &a).unwrap();
+        assert_eq!(open_bytes_with_content_key(&key, &SealedEnvelope::from_bytes(&b).unwrap()), None);
+        assert_ne!(sealed_blob_id(&a), sealed_blob_id(&b));
+    }
+
+    #[test]
+    fn a_grant_opens_only_on_the_device_it_names_and_only_from_my_account() {
+        let (account, browser, other_device, stranger) = (id(1), id(2), id(3), id(4));
+        let keys: Vec<ItemKey> = vec![([1; 32], [2; 32]), ([3; 32], [4; 32])];
+        let grant = seal_item_key_grant(&account, &browser.public(), &keys).unwrap();
+        assert_eq!(open_item_key_grant(&browser, &account.public(), &grant), Some(keys.clone()));
+        // The relay that carries it, and my other devices, cannot read it: no key bytes in clear.
+        assert!(!grant.windows(32).any(|w| w == [2u8; 32]));
+        assert_eq!(open_item_key_grant(&other_device, &account.public(), &grant), None);
+        assert_eq!(open_item_key_grant(&stranger, &account.public(), &grant), None);
+        // Signed by someone else, claiming nothing: refused.
+        let forged = seal_item_key_grant(&stranger, &browser.public(), &keys).unwrap();
+        assert_eq!(open_item_key_grant(&browser, &account.public(), &forged), None);
+        // A flipped bit anywhere breaks it.
+        for at in [10, grant.len() / 2, grant.len() - 5] {
+            let mut bad = grant.clone();
+            bad[at] ^= 1;
+            assert_eq!(open_item_key_grant(&browser, &account.public(), &bad), None, "bit at {at}");
+        }
+    }
+
+    #[test]
+    fn other_sealed_bytes_are_never_read_as_a_grant() {
+        let (account, browser) = (id(1), id(2));
+        let ordinary = seal_bytes(&account, &Group::new("fam", vec![browser.public()]), &[0u8; 133])
+            .unwrap()
+            .to_bytes();
+        assert_eq!(open_item_key_grant(&browser, &account.public(), &ordinary), None);
     }
 }

@@ -126,6 +126,14 @@ final class HistoryHandoff: ObservableObject {
         startDriver()
     }
 
+    /// `MediaKeysSender` moved: holds the screen and the loop the way a page going up does.
+    func noteSendingKeys() {
+        lastSendingAt = HistoryHandoffWire.nowMs()
+        refreshActive()
+        refreshStatus()
+        startDriver()
+    }
+
     private func refreshActive() {
         let active = isMoving
         if active != transferActive {
@@ -212,6 +220,14 @@ final class HistoryHandoff: ObservableObject {
                     st.mediaTotal = m.refs.count
                 }
             }
+            // With no posts left to send, what is going out is a browser's access to older media.
+            if !allServes.values.contains(where: { !$0.complete }), !needsPending,
+               let keys = MediaKeysSender.shared.progress {
+                st.done = 0
+                st.total = 0
+                st.mediaDone = keys.done
+                st.mediaTotal = keys.total
+            }
         } else if let b = ledger.banner {
             st.phase = .cancelled
             st.cancelledRemotely = b == .byOtherDevice
@@ -282,6 +298,7 @@ final class HistoryHandoff: ObservableObject {
         // Only the media tail was still going out (no run, no ask): just stop and say so.
         if w == nil && open.isEmpty { l.banner = .byThisDevice }
         ledger = l
+        MediaKeysSender.shared.cancel()
         stopTarget()
         stopSource(open.values, account: acct, me: me)
         Task { await publishPendingCancels() }
@@ -919,7 +936,7 @@ final class HistoryHandoff: ObservableObject {
     /// This is NOT "keep the screen on and loop": that is [`isMoving`]. A linked browser may not
     /// mark its request done for weeks.
     var hasOutstandingWork: Bool {
-        isWaiting || !serves.isEmpty || needsPending
+        isWaiting || !serves.isEmpty || needsPending || MediaKeysSender.shared.hasJobs
             || HistoryHandoffWire.nowMs() &- lastSendingAt < 120_000
     }
 
@@ -1208,11 +1225,15 @@ final class HistoryHandoff: ObservableObject {
         var moved = false
         if isWaiting { moved = await pull(until: deadline) }
         if Date() < deadline, await serve(until: deadline) { moved = true }
+        if Date() < deadline, await MediaKeysSender.shared.serve(until: deadline) {
+            moved = true
+        }
         return moved
     }
 
     /// Forget everything (identity switch / factory reset): a run belongs to one account.
     func reset() {
+        MediaKeysSender.shared.reset()
         want = nil
         receivedBanner = false
         ledger = HandoffCancelLedger()

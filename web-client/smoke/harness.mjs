@@ -115,6 +115,24 @@ export function startPeer(bin, args = ["127.0.0.1:0"], env = {}) {
   return { proc, lines, line, write: (s) => proc.stdin.write(s), kill: () => proc.kill() };
 }
 
+/** Playwright's WebKit on macOS sometimes never sends one of a page's requests, so `load` never
+ *  fires: 3 of 20 loads of a plain page from a stock Node server, none in Chromium (2026-11-25,
+ *  Playwright 1.60, macOS 27.2). Nothing of Haven's is involved, so a stalled navigation is asked
+ *  for again. Only a navigation TIMEOUT is retried; every other failure is the test's to report. */
+function retryStalledLoads(page, tries = 4, timeout = 15000) {
+  const goto = page.goto.bind(page);
+  page.goto = async (url, options = {}) => {
+    for (let n = 1; ; n++) {
+      try {
+        return await goto(url, { timeout, ...options });
+      } catch (e) {
+        if (BROWSER !== "webkit" || n >= tries || e.name !== "TimeoutError") throw e;
+        console.log(`   (the page load stalled; asking again, ${n} of ${tries - 1})`);
+      }
+    }
+  };
+}
+
 /** Open a page in headless Chromium and wait until `ready()` is true in it. */
 export async function openPage(url, { ready = () => window.havenReady === true, before } = {}) {
   const browser = await chromium.launch();
@@ -132,6 +150,7 @@ export async function openPage(url, { ready = () => window.havenReady === true, 
     });
   }
   if (before) await before(page);
+  retryStalledLoads(page);
   await page.goto(url);
   await page.waitForFunction(ready, null, { timeout: 30000 });
   return { browser, page };

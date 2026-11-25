@@ -147,6 +147,10 @@ await run(
     if (!(await page.evaluate(() => window.__HAVEN_WEB__.app().needsOnboarding()))) throw new Error("a seed code created an identity in the browser");
     step("a seed code is refused in a browser");
 
+    // History that predates every key the browser will be handed (checked after linking).
+    peer.write("!oldimg from before this browser\n");
+    await peer.line("OLD ready=true", 120000);
+
     // Default: "this is my computer" is NOT ticked — a shared-computer session.
     if (await page.locator('input[type="checkbox"]').first().isChecked()) throw new Error("'this is my computer' is ticked by default");
     await linkWith(page, ticket, false);
@@ -182,6 +186,19 @@ await run(
     await shots(page, "1-reads");
     await page.locator('.tab[data-view="you"]').click();
     step("a linked browser reads its account's circle with nobody asked, and still cannot sign for the account");
+
+    // ── Older than every key (DECISIONS D27) ─────────────────────────────────────────────────
+    // That picture was sealed before the browser existed, under a circle key rotated away six
+    // times. The browser asks for the keys to older media, the primary reads the end of the blob
+    // from the relay and sends its key, and the picture then loads from the relay.
+    const old = await until("the old post in the browser", async () => (await feed()).find((p) => p.body === "from before this browser"), 180000);
+    await until("the old picture, loaded from the relay with its own key", async () => {
+      await invoke(page, "media_want", { circleId: "", references: old.media });
+      return invoke(page, "media_present", { reference: old.media[0] });
+    }, 180000);
+    const oldUrl = await invoke(page, "media_data_url", { circleId: "", reference: old.media[0] });
+    if (!oldUrl?.startsWith("data:image/png;base64,")) throw new Error(`the old picture did not open: ${String(oldUrl).slice(0, 60)}`);
+    step("a picture older than every key the browser was given loads, with the key its phone sent for it");
 
     // Tab → primary.
     await invoke(page, "post", { circleId: "", body: "hello from the browser", media: [] });

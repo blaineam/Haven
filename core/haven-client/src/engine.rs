@@ -48,6 +48,10 @@ pub mod relayhistory;
 #[path = "historyhandoff.rs"]
 pub mod historyhandoff;
 
+/// Per-item media keys between devices of one account (DECISIONS D27).
+#[path = "mediakeys.rs"]
+pub mod mediakeys;
+
 pub const DEFAULT_CIRCLE: &str = "default";
 
 /// The push Worker — also hosts the content-free moderation ledger (`/flag`).
@@ -497,6 +501,8 @@ pub struct Engine {
     /// One history hand-off pull / serve pass at a time (`historyhandoff`).
     history_pulling: std::sync::atomic::AtomicBool,
     history_serving: std::sync::atomic::AtomicBool,
+    media_keys_pulling: std::sync::atomic::AtomicBool,
+    media_keys_serving: std::sync::atomic::AtomicBool,
     /// Relay URLs that could not list newest first (an older relay, or a host whose filesystem
     /// keeps no creation times): not asked again this session.
     no_newest_listing: StdMutex<std::collections::HashSet<String>>,
@@ -1036,6 +1042,8 @@ impl Engine {
             key_handoff_asked: StdMutex::new(0),
             history_pulling: std::sync::atomic::AtomicBool::new(false),
             history_serving: std::sync::atomic::AtomicBool::new(false),
+            media_keys_pulling: std::sync::atomic::AtomicBool::new(false),
+            media_keys_serving: std::sync::atomic::AtomicBool::new(false),
             no_newest_listing: StdMutex::new(Default::default()),
             key_handoff_answered: StdMutex::new(HashMap::new()),
             self_refused: StdMutex::new((0, 0)),
@@ -1168,6 +1176,8 @@ impl Engine {
             key_handoff_asked: StdMutex::new(0),
             history_pulling: std::sync::atomic::AtomicBool::new(false),
             history_serving: std::sync::atomic::AtomicBool::new(false),
+            media_keys_pulling: std::sync::atomic::AtomicBool::new(false),
+            media_keys_serving: std::sync::atomic::AtomicBool::new(false),
             no_newest_listing: StdMutex::new(Default::default()),
             key_handoff_answered: StdMutex::new(HashMap::new()),
             self_refused: StdMutex::new((0, 0)),
@@ -2197,8 +2207,10 @@ impl Engine {
                 // account key answers what my other devices asked for.
                 if me.wants_history_handoff() {
                     me.history_pull().await;
+                    me.media_keys_pull().await;
                 } else if beats % 3 == 1 {
                     me.history_serve().await;
+                    me.media_keys_serve().await;
                 }
                 // Scheduled posts are time-sensitive — check every heartbeat so they fire punctually
                 // regardless of the adaptive back-off below (cheap: just compares due timestamps).
@@ -5940,6 +5952,7 @@ impl Engine {
                 // my own devices can write there, so the frame carries no authority.
                 wire::HISTORY_NUDGE => {
                     me.history_serve().await;
+                    me.media_keys_serve().await;
                 }
                 wire::RELAY => me.handle_relay(&body),
                 _ => log::debug!("ignoring frame type {t} (not yet handled)"),
@@ -10841,6 +10854,37 @@ impl Engine {
         }
     }
 
+    /// GET the last [`mediakeys::TAIL_BYTES`] of one key. A relay that honors `Range` sends
+    /// those (`partial` true); an older one sends the whole body (`partial` false).
+    async fn http_get_tail(self: &Arc<Self>, base: &str, token: &str, key: &str) -> Result<Option<(Vec<u8>, bool)>, RelayErr> {
+        if crate::netgate::relay_http_offline_for(base) {
+            return Err(RelayErr::Unreachable);
+        }
+        let auth = self.http_auth(token, "GET", key, b"").ok_or(RelayErr::Unreachable)?;
+        let resp = self
+            .http
+            .get(Self::http_key_url(base, key))
+            .header("authorization", auth)
+            .header("range", format!("bytes=-{}", mediakeys::TAIL_BYTES))
+            .timeout(HTTP_GET_TIMEOUT)
+            .send()
+            .await
+            .map_err(|_| RelayErr::Unreachable)?;
+        match resp.status().as_u16() {
+            code @ 200..=299 => {
+                let body = resp.bytes().await.map_err(|_| RelayErr::Unreachable)?.to_vec();
+                Ok(Some((body, code == 206)))
+            }
+            404 => Ok(None),
+            401 => {
+                self.note_unverified(base);
+                Err(RelayErr::Forbidden)
+            }
+            403 => Err(RelayErr::Forbidden),
+            _ => Err(RelayErr::Unreachable),
+        }
+    }
+
     /// HEAD one key — held or not, no body. haven-relay serves `HEAD /k/<key>` (signed exactly like a
     /// GET, method "HEAD"); 400/405/501 (an old relay or a proxy) is `Unsupported` and the caller falls
     /// back to GET. Apple `SharedStore.httpHead` parity.
@@ -14049,6 +14093,44 @@ impl InboundListener for NodeListener {
 
 /// Test-only views into an engine, for this crate's tests and for the tests of the crates that host
 /// one (the desktop app's command and QA tests). Not compiled into a shipped build.
+/// Harness only (`examples/web_primary_engine`): a post from long ago, whose media is on the relay
+/// under circle keys this account has since rotated away from — what a browser linked today finds
+/// behind every older photo (DECISIONS D27).
+#[cfg(feature = "test-util")]
+impl Engine {
+    pub async fn harness_post_before_the_keys(self: &Arc<Self>, circle_id: &str, body: &str, reference: String) -> bool {
+        let long_ago = now_ms() - 90 * 24 * 3_600_000;
+        let posted = self
+            .social
+            .post(circle_id.into(), body.into(), vec![reference.clone()], None, None, false, false, long_ago)
+            .is_ok();
+        if !posted {
+            return false;
+        }
+        // The relay this device hosts may still be starting when the harness asks.
+        let mut uploaded = false;
+        for _ in 0..120 {
+            if self.upload_media(circle_id, &reference).await {
+                uploaded = true;
+                break;
+            }
+            crate::rt::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        if !uploaded {
+            return false;
+        }
+        // More rotations than any device keeps keys for.
+        for n in 0..6u64 {
+            self.social.rotate_circle(circle_id.into());
+            if self.social.post(circle_id.into(), format!("since then {n}"), vec![], None, None, false, false, long_ago + 1 + n).is_err() {
+                return false;
+            }
+        }
+        self.persist();
+        true
+    }
+}
+
 #[cfg(any(test, feature = "test-util"))]
 pub mod testing {
     use super::*;

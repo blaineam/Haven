@@ -27,6 +27,10 @@ struct Knobs {
     fail_contains: Vec<(String, u16)>,
     /// Every `METHOD path` seen, in order.
     log: Vec<String>,
+    /// Honor `Range: bytes=-N` as haven-relay does (off: an older relay, which sends it all).
+    ranges: bool,
+    /// `(path, bytes sent)` of every media GET answered.
+    media_sent: Vec<(String, usize)>,
 }
 
 pub(crate) struct Stub {
@@ -91,8 +95,12 @@ impl Stub {
                     let (method, path) = (first.next().unwrap_or("").to_string(), first.next().unwrap_or("").to_string());
                     let mut clen = 0usize;
                     let mut digest: Option<String> = None;
+                    let mut suffix: Option<usize> = None;
                     for l in lines {
                         let low = l.to_lowercase();
+                        if let Some(v) = low.strip_prefix("range: bytes=-") {
+                            suffix = v.trim().parse().ok();
+                        }
                         if let Some(v) = low.strip_prefix("content-length:") {
                             clen = v.trim().parse().unwrap_or(0);
                         }
@@ -148,6 +156,19 @@ impl Stub {
                             (404, String::new(), Vec::new())
                         }
                     };
+                    let (mut status, mut out) = (status, out);
+                    {
+                        let mut k = kn.lock();
+                        if k.ranges && method == "GET" && status == 200 {
+                            if let Some(n) = suffix.filter(|n| *n < out.len()) {
+                                out = out.split_off(out.len() - n);
+                                status = 206;
+                            }
+                        }
+                        if method == "GET" && path.starts_with("/k/haven/media/") {
+                            k.media_sent.push((path.clone(), out.len()));
+                        }
+                    }
                     let reply_len = if method == "HEAD" { 0 } else { out.len() };
                     let head = format!(
                         "HTTP/1.1 {status} X\r\ncontent-length: {reply_len}\r\n{extra}connection: close\r\n\r\n"
@@ -163,6 +184,12 @@ impl Stub {
         Stub { base, store, knobs }
     }
 
+    pub(crate) fn serve_ranges(&self) {
+        self.knobs.lock().ranges = true;
+    }
+    pub(crate) fn take_media_sent(&self) -> Vec<(String, usize)> {
+        std::mem::take(&mut self.knobs.lock().media_sent)
+    }
     pub(crate) fn force(&self, status: Option<u16>) {
         self.knobs.lock().force_status = status;
     }
@@ -1224,6 +1251,89 @@ async fn a_browser_asks_again_for_an_old_photo_that_missed_the_first_time() {
         }
     })
     .await;
+}
+
+/// DECISIONS D27, end to end over a relay: a photo sealed before the browser was linked, under a
+/// circle key every device has since deleted, does not open with anything the browser was handed.
+/// It asks; the account's other device reads the end of the blob from the relay and answers; the
+/// browser then loads the photo from the relay like any other.
+#[tokio::test]
+async fn a_new_browser_gets_the_keys_to_old_photos_and_loads_them_from_the_relay() {
+    let stub = Stub::start().await;
+    let (p, _) = new_engine(177);
+    wire_to(&p, &stub).await;
+    let photo = b"\xFF\xD8\xFF a photo from before the browser";
+    let r = p.add_local_media(DEFAULT_CIRCLE, photo, false);
+    let post = |body: &str, media: Vec<String>, at: u64| {
+        p.social.post(DEFAULT_CIRCLE.into(), body.into(), media, None, None, false, false, at).unwrap();
+    };
+    post("old", vec![r.clone()], now_ms() - 90 * 24 * 3_600_000);
+    assert!(p.upload_media(DEFAULT_CIRCLE, &r).await);
+    for n in 0..6u64 {
+        p.social.rotate_circle(DEFAULT_CIRCLE.into());
+        post(&format!("later {n}"), vec![], now_ms() - 1_000 + n);
+    }
+
+    let web = linked_seedless_named(&p, &haven_p2p::webpolicy::mark_web_device_name("Chrome")).await;
+    wire_to(&web, &stub).await;
+    crate::engine::cov_engine_tests::deliver(&p, &web, DEFAULT_CIRCLE);
+    let sealed = p.http_get(&stub.base, TOKEN, &Engine::media_key(&r)).await.unwrap().expect("on the relay");
+    assert!(
+        web.social.open_circle_media(DEFAULT_CIRCLE.into(), sealed.clone()).is_none(),
+        "no key the browser holds opens it"
+    );
+
+    // The browser asks, the phone's part is played by the engine that holds the account key.
+    assert!(!web.media_keys_pull().await, "nothing to read yet");
+    assert!(p.media_keys_serve().await);
+    assert!(web.media_keys_pull().await);
+    assert!(web.social.item_key_count() >= 1);
+    assert_eq!(web.social.open_circle_media(DEFAULT_CIRCLE.into(), sealed).as_deref().map(|b| !b.is_empty()), Some(true));
+    web.media_want(DEFAULT_CIRCLE, vec![r.clone()]);
+    bounded("the photo loads from the relay", async {
+        while !web.media_present(&r) {
+            crate::rt::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+
+    // Finished on both sides: the ask is marked done and the job is dropped.
+    assert!(web.prefs.lock().media_key_want.as_ref().is_some_and(|w| w.complete));
+    p.media_keys_serve().await;
+    assert!(p.prefs.lock().media_key_jobs.is_empty());
+    assert!(!p.media_keys_serve().await, "a finished ask is not answered again");
+    // A browser has no account key: it never answers an ask.
+    assert!(!web.media_keys_serve().await);
+}
+
+/// A two-chunk blob whose last chunk is tiny, on a relay that serves ranges: the entries run back
+/// into the first chunk, and the sender still downloads only the two ends, not 8 MB.
+#[tokio::test]
+async fn a_chunked_blobs_key_is_read_from_its_two_ends() {
+    let stub = Stub::start().await;
+    stub.serve_ranges();
+    let (p, _) = new_engine(178);
+    wire_to(&p, &stub).await;
+    let mut video = vec![0u8; 8 * 1024 * 1024 + 64];
+    video[..12].copy_from_slice(b"\0\0\0\x18ftypmp42");
+    let r = p.add_local_media(DEFAULT_CIRCLE, &video, true);
+    p.social
+        .post(DEFAULT_CIRCLE.into(), "old".into(), vec![r.clone()], None, None, false, false, now_ms() - 90 * 24 * 3_600_000)
+        .unwrap();
+    assert!(p.upload_media(DEFAULT_CIRCLE, &r).await);
+    assert_eq!(stub.keys_with(&format!("{r}.p/")).len(), 2, "two chunks");
+
+    let web = linked_seedless_named(&p, &haven_p2p::webpolicy::mark_web_device_name("Safari")).await;
+    wire_to(&web, &stub).await;
+    web.media_keys_pull().await;
+    stub.take_media_sent();
+    assert!(p.media_keys_serve().await);
+    let sent = stub.take_media_sent();
+    let total: usize = sent.iter().map(|(_, n)| n).sum();
+    assert_eq!(sent.len(), 3, "the manifest and the two chunk ends: {sent:?}");
+    assert!(total <= 2 * mediakeys::TAIL_BYTES + 4096, "{total} bytes: {sent:?}");
+    assert!(web.media_keys_pull().await);
+    assert_eq!(web.social.item_key_count(), 1);
 }
 
 #[test]

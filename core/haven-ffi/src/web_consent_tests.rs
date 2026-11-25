@@ -345,3 +345,64 @@ fn a_newly_linked_browser_opens_a_friends_media_under_every_key_still_held() {
     assert_eq!(std::fs::read(&out).unwrap(), vec![99; 64]);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// DECISIONS D27: media older than every circle key a new browser can be given opens with its own
+/// content key, which the account's phone unwraps from the END of each blob and sends sealed to
+/// that browser alone.
+#[test]
+fn a_new_browser_opens_old_media_with_the_item_keys_its_phone_sends() {
+    let _clk = super::net_tests::clock_guard();
+    let f = fleet(true);
+    let Fleet { alice, bob, cid, .. } = &f;
+    assert!(!alice.register_device(alice.my_device_bundle(), "Alice's phone".into(), 0).is_empty());
+    post(bob, cid, "hello", 2_000);
+    settle(&f);
+    let mut sealed = Vec::new();
+    for n in 0..8u8 {
+        // Bigger than the tail the phone reads, so a tail really is only part of the blob.
+        sealed.push(bob.seal_circle_media(cid.clone(), vec![n; 200_000]).unwrap());
+        bob.rotate_circle(cid.clone());
+        post(bob, cid, &format!("after rotation {n}"), 3_000 + u64::from(n));
+        settle(&f);
+    }
+    let browser = linked_while_bob_is_away(&f, TABLET, &haven_p2p::webpolicy::mark_web_device_name("Safari"));
+    sync(bob, alice, cid);
+    browser.import_key_handoff(alice.export_key_handoff(browser.my_device_node_hex()));
+    sync(bob, &browser, cid);
+    let opens = |e: &HavenSocial, b: &Vec<u8>| e.open_circle_media(cid.clone(), b.clone());
+    assert!(opens(&browser, &sealed[0]).is_none(), "too old for any key the browser was given");
+
+    let tail = |b: &Vec<u8>| b[b.len() - 64 * 1024..].to_vec();
+    let entries: Vec<Vec<u8>> =
+        sealed.iter().map(|b| alice.item_key_from_tail(tail(b)).expect("the phone's own entry")).collect();
+    let target = browser.my_device_node_hex();
+    // Only the account's holder can produce keys or a grant, and only for a device its roster lists.
+    assert!(browser.item_key_from_tail(tail(&sealed[0])).is_none());
+    assert!(browser.seal_item_keys(target.clone(), entries.clone()).is_none());
+    assert!(alice.seal_item_keys("ab".repeat(32), entries.clone()).is_none());
+    assert!(alice.seal_item_keys(target.clone(), vec![vec![1; 63]]).is_none());
+    let grant = alice.seal_item_keys(target, entries).expect("sealed to the browser");
+    // Another member of the circle cannot read it, and neither can the phone that sent it.
+    assert_eq!(bob.receive_item_keys(grant.clone()), 0);
+    assert_eq!(alice.receive_item_keys(grant.clone()), 0);
+
+    assert_eq!(browser.receive_item_keys(grant.clone()), 8);
+    assert_eq!(browser.receive_item_keys(grant), 0, "the same grant again adds nothing");
+    for (n, b) in sealed.iter().enumerate() {
+        assert_eq!(opens(&browser, b), Some(vec![n as u8; 200_000]), "photo {n}");
+    }
+    // The keys survive a reload of the page, and the file path (large videos) uses them too.
+    let again = HavenSocial::new_seedless(alice.my_bundle(), TABLET.to_vec()).unwrap();
+    again.import_state(browser.export_state());
+    assert_eq!(again.item_key_count(), 8);
+    assert_eq!(opens(&again, &sealed[0]), Some(vec![0; 200_000]));
+    let dir = std::env::temp_dir().join(format!("haven-item-keys-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (src, out) = (dir.join("sealed"), dir.join("plain"));
+    std::fs::write(&src, &sealed[0]).unwrap();
+    assert!(again.open_circle_media_file(cid.clone(), src.display().to_string(), out.display().to_string()));
+    assert_eq!(std::fs::read(&out).unwrap(), vec![0; 200_000]);
+    let _ = std::fs::remove_dir_all(&dir);
+    // A state that holds no item keys is written as it always was.
+    assert!(!String::from_utf8_lossy(&alice.export_state()).contains("item_keys"));
+}

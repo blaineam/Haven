@@ -221,4 +221,36 @@ final class HistoryHandoffWireTests: XCTestCase {
         XCTAssertFalse(sending(false, false, 0, 1), "nothing sent since launch")
         XCTAssertFalse(sending(false, false, 10_000, 9_000), "a clock that stepped back is not sending")
     }
+
+    // MARK: per-item media keys (D27)
+
+    /// The records the Rust target and source read and write (core `mediakeys.rs`): same keys,
+    /// same field names.
+    func testMediaKeyRecordsMatchTheCore() throws {
+        let a = String(repeating: "AB", count: 32)
+        let lane = "haven/self/" + a.lowercased() + "/"
+        XCTAssertEqual(HistoryHandoffWire.keysRequestKey(a, "CD"), lane + "media-keys-req/cd")
+        XCTAssertEqual(HistoryHandoffWire.keysManifestKey(a, "CD", "EF"), lane + "media-keys-m/cd/ef")
+        XCTAssertEqual(HistoryHandoffWire.keysBatchKey(a, "CD", "EF", "7", 3), lane + "media-keys/cd/ef/7/3")
+        // As serde writes them.
+        let ask = try JSONDecoder().decode(HistoryHandoffWire.KeysRequest.self,
+                                           from: Data(#"{"v":1,"device":"cd","at":5}"#.utf8))
+        XCTAssertEqual(ask.at, 5)
+        XCTAssertNil(ask.done)
+        let m = try JSONDecoder().decode(HistoryHandoffWire.KeysManifest.self, from: Data(
+            #"{"v":1,"run":"9","source":"ef","forRequest":5,"batches":2,"complete":false,"updatedAt":100,"total":90,"done":80,"missing":1}"#.utf8))
+        XCTAssertEqual([m.batches, m.total, m.done, m.missing], [2, 90, 80, 1])
+        XCTAssertTrue(m.isLive(now: 100))
+        XCTAssertFalse(m.isLive(now: 100 + HistoryHandoffWire.staleSourceMs))
+    }
+
+    func testTheTailOfAChunkedBlobSpansAShortLastChunk() {
+        let n = HistoryHandoffWire.keyTailBytes
+        let before = Data(repeating: 1, count: n * 2)
+        let joined = HistoryHandoffWire.joinTail(before: before, last: Data(repeating: 2, count: 100))
+        XCTAssertEqual(joined, Data(repeating: 1, count: n - 100) + Data(repeating: 2, count: 100))
+        XCTAssertEqual(HistoryHandoffWire.joinTail(before: before, last: Data(repeating: 2, count: n)).count, n)
+        XCTAssertEqual(HistoryHandoffWire.joinTail(before: nil, last: Data([2, 2])), Data([2, 2]))
+    }
+
 }

@@ -62,6 +62,61 @@ enum HistoryHandoffWire {
         func isLive(now: UInt64) -> Bool { complete || now &- (updatedAt ?? 0) < HistoryHandoffWire.staleSourceMs }
     }
 
+    // MARK: per-item media keys (docs/DECISIONS.md D27; core `mediakeys.rs` matches these)
+    //
+    //   media-keys-req/<target>                      the ask (KeysRequest)
+    //   media-keys-m/<target>/<source>               progress (KeysManifest), one per source
+    //   media-keys/<target>/<source>/<run>/<n>       the batches, signed and sealed to <target>
+
+    static func keysRequestPrefix(_ acct: String) -> String { lane(acct) + "media-keys-req/" }
+    static func keysRequestKey(_ acct: String, _ target: String) -> String {
+        keysRequestPrefix(acct) + target.lowercased()
+    }
+    static func keysManifestPrefix(_ acct: String, _ target: String) -> String {
+        lane(acct) + "media-keys-m/\(target.lowercased())/"
+    }
+    static func keysManifestKey(_ acct: String, _ target: String, _ source: String) -> String {
+        keysManifestPrefix(acct, target) + source.lowercased()
+    }
+    static func keysBatchKey(_ acct: String, _ target: String, _ source: String, _ run: String, _ n: Int) -> String {
+        lane(acct) + "media-keys/\(target.lowercased())/\(source.lowercased())/\(run)/\(n)"
+    }
+
+    /// Blobs per batch.
+    static let keyBatch = 40
+    /// The closing bytes of a blob read first: its signature and about fifty recipient entries.
+    static let keyTailBytes = 64 * 1024
+
+    struct KeysRequest: Codable {
+        var v = 1
+        var device: String
+        var at: UInt64
+        var done: Bool?
+    }
+
+    struct KeysManifest: Codable {
+        var v = 1
+        var run: String
+        var source: String
+        var forRequest: UInt64
+        var batches: Int
+        var complete: Bool
+        var updatedAt: UInt64
+        var total: Int
+        var done: Int
+        var missing: Int
+
+        func isLive(now: UInt64) -> Bool {
+            complete || now < updatedAt || now - updatedAt < HistoryHandoffWire.staleSourceMs
+        }
+    }
+
+    /// The end of a chunked blob: the end of the chunk before the last, then the last.
+    static func joinTail(before: Data?, last: Data) -> Data {
+        guard let before, last.count < keyTailBytes else { return last }
+        return Data(before.suffix(keyTailBytes - last.count)) + last
+    }
+
     static func nowMs() -> UInt64 { UInt64(Date().timeIntervalSince1970 * 1000) }
 
     /// After the last thing went up, the sending banner stays this long and then goes.

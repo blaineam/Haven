@@ -9,7 +9,17 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Added
+- **A linked browser can open older photos and videos.** After linking, your iPhone, Mac or
+  desktop app sends the browser a small key for each older item, once. Only that browser can read
+  the keys. Nothing is uploaded again, and the browser then loads photos from the relay as you
+  scroll, with your other device off. A browser you already linked asks on its own. (DECISIONS D27.)
+- **Relays can send just the end of a file** (`Range: bytes=-N`), so preparing those keys downloads
+  far less. Older relays still work, with more data used on the sending device.
+
 ### Fixed
+- **Tests: a stalled page load in the Safari-engine test browser is asked for again.** On macOS it
+  sometimes never sends one of a page's requests, with any web server.
 
 - **A linked browser (and any newly linked device) can open friends' photos and videos from the relay.** A photo is encrypted with its sender's circle key, but opening it only ever tried your own account's keys. A device linked after the photo was sent has no other way in, so it opened none of a friend's media, even media sent under a key it had just been given. Every key the device holds is now tried. Haven deletes keys older than the last four per sender, so media from before that (about a month or more) still cannot be opened this way.
 - **In the browser, a photo that missed once is asked for again.** For posts more than a week old, the background retry skipped full photos and videos, so each got a single attempt as it scrolled into view. If the relay's address or a key had not arrived yet, it never loaded. It is now retried with growing pauses, and at once when new keys arrive.

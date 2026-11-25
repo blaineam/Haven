@@ -502,7 +502,10 @@ async fn handle_conn(
 
         match route {
             Route::Get(_) => match local_get(root, &key) {
-                Some(body) => respond(&mut w, 200, "OK", keep_alive, &body).await?,
+                Some(body) => match header(&headers, "range").and_then(|v| suffix_range(&v, body.len())) {
+                    Some(from) => range_respond(&mut w, keep_alive, from, &body).await?,
+                    None => respond(&mut w, 200, "OK", keep_alive, &body).await?,
+                },
                 None => respond(&mut w, 404, "not found", keep_alive, b"").await?,
             },
             Route::Head(_) => {
@@ -800,6 +803,29 @@ async fn respond<W: tokio::io::AsyncWrite + Unpin>(w: &mut W, code: u16, reason:
     Ok(())
 }
 
+/// Where a `Range: bytes=-N` request starts in a body of `len` bytes: the one form served, for a
+/// device that needs only a blob's closing recipient entries. `None` (answer with the whole body,
+/// which HTTP allows for any range) for every other form and for an `N` that covers it all.
+fn suffix_range(value: &str, len: usize) -> Option<usize> {
+    let n: usize = value.trim().strip_prefix("bytes=-")?.parse().ok()?;
+    (n > 0 && n < len).then(|| len - n)
+}
+
+async fn range_respond<W: tokio::io::AsyncWrite + Unpin>(w: &mut W, keep_alive: bool, from: usize, whole: &[u8]) -> Result<()> {
+    let conn = if keep_alive { "keep-alive" } else { "close" };
+    let body = &whole[from..];
+    let head = format!(
+        "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {from}-{}/{}\r\nContent-Type: application/octet-stream\r\n{CORS_ANSWER}Connection: {conn}\r\n\r\n",
+        body.len(),
+        whole.len() - 1,
+        whole.len()
+    );
+    w.write_all(head.as_bytes()).await?;
+    w.write_all(body).await?;
+    w.flush().await?;
+    Ok(())
+}
+
 /// [`respond`] plus the [`LIST_DIGEST_HEADER`] — the LIST answers (200 list / 204 unchanged).
 async fn digest_respond<W: tokio::io::AsyncWrite + Unpin>(
     w: &mut W,
@@ -971,6 +997,16 @@ mod tests {
     }
 
     #[test]
+    fn only_a_suffix_range_shorter_than_the_body_is_served_partially() {
+        assert_eq!(suffix_range("bytes=-4", 10), Some(6));
+        assert_eq!(suffix_range(" bytes=-9 ", 10), Some(1));
+        for whole in ["bytes=-10", "bytes=-11", "bytes=-0", "bytes=0-3", "bytes=4-", "bytes=-4,0-1", "bytes=-x", "items=-4", ""] {
+            assert_eq!(suffix_range(whole, 10), None, "{whole:?}");
+        }
+        assert_eq!(suffix_range("bytes=-4", 0), None);
+    }
+
+    #[test]
     fn namespace_confinement() {
         let root = std::env::temp_dir();
         assert!(checked(&root, "haven/media/x").is_some());
@@ -1031,6 +1067,12 @@ mod tests {
             assert!(req("PUT", "/k/haven/media/x", &signed(m, "PUT", "/k/haven/media/x", b"hello"), b"hello").starts_with("HTTP/1.1 200"));
             let got = req("GET", "/k/haven/media/x", &signed(m, "GET", "/k/haven/media/x", b""), b"");
             assert!(got.starts_with("HTTP/1.1 200") && got.ends_with("hello"), "member reads media: {got}");
+            // A closing range: the last bytes only, and behind the same signature gate as a whole GET.
+            let ranged = format!("{}Range: bytes=-3\r\n", signed(m, "GET", "/k/haven/media/x", b""));
+            let got = req("GET", "/k/haven/media/x", &ranged, b"");
+            assert!(got.starts_with("HTTP/1.1 206") && got.ends_with("\r\n\r\nllo"), "ranged read: {got}");
+            assert!(got.contains("Content-Range: bytes 2-4/5"), "{got}");
+            assert!(req("GET", "/k/haven/media/x", "Range: bytes=-3\r\n", b"").starts_with("HTTP/1.1 401"));
             assert!(req("HEAD", "/k/haven/media/x", &signed(m, "HEAD", "/k/haven/media/x", b""), b"").starts_with("HTTP/1.1 200"));
             assert!(req("HEAD", "/k/haven/media/nope", &signed(m, "HEAD", "/k/haven/media/nope", b""), b"").starts_with("HTTP/1.1 404"));
             let l = req("GET", "/l/haven/mailbox/fam/", &signed(m, "GET", "/l/haven/mailbox/fam/", b""), b"");

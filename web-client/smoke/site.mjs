@@ -119,7 +119,10 @@ try {
   step(`a page that no relay served still shows a code (${PUBLIC ? "reachable through a public rendezvous relay" : "reachable through the relay its site names"})`);
 
   await page.locator('input[type="checkbox"]').first().check();
-  // What the account already holds before this browser exists: its history.
+  // What the account already holds before this browser exists: its history, and a picture older
+  // than every circle key the browser will be handed.
+  peer.write("!oldimg from before this browser\n");
+  await peer.line("OLD ready=true", 180000);
   for (let i = 1; i <= 3; i++) peer.write(`before the link ${i}\n`);
   await until("the primary's posts from before the link", async () => peer.lines.includes("FEED me before the link 3"));
   // A person does not scan the instant the code appears. SMOKE_PAIR_DELAY_MS leaves the page
@@ -169,6 +172,16 @@ try {
   await until("the primary to have posted", async () => peer.lines.includes("FEED me posted with nobody asked"));
   await until("that post in the browser", async () => (await feed()).some((p) => p.body === "posted with nobody asked"), 180000);
   step("linking is the only approval: the page reads the circle from its relay with nobody asked");
+
+  // That old picture was sealed before the browser existed, under a circle key rotated away six
+  // times (DECISIONS D27). The primary reads the end of the blob from the relay and sends the
+  // browser its key; the picture then crosses origins from the relay like any other.
+  const old = await until("the old post on the page", async () => (await feed()).find((p) => p.body === "from before this browser" && p.media?.length), 180000);
+  await until("the old picture, loaded from the relay with its own key", async () => {
+    await invoke(page, "media_want", { circleId: "", references: old.media });
+    return invoke(page, "media_present", { reference: old.media[0] });
+  }, 180000);
+  step("a picture older than every key the browser was given loads, with the key its phone sent for it");
 
   await invoke(page, "post", { circleId: "", body: "hello from a page on a web site", media: [] });
   await until("the page's post on the primary", async () => peer.lines.includes("FEED me hello from a page on a web site"), 180000);

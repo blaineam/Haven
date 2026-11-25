@@ -677,3 +677,43 @@ linked gets the same treatment once. Arrival order is not post order: an envelop
 (a re-seal after a key change, an imported archive) counts as new. And it does not change what
 the browser can OPEN: friends' older posts still need keys from another device (D25) or the
 hand-off pages above.
+
+## D27 — A linked browser opens older media with per-item keys from the account (2026-11-24)
+
+**What happened.** A browser linked to a real account showed old posts without their photos. A
+blob is never re-sealed. The browser is on no old recipient list, and the circle keys that open old
+blobs are pruned to the last four per sender on every device (about a month in a quiet circle). No
+key the browser could be handed (D25) opens anything older.
+
+**Decision.** A device that holds the account key sends the browser the content key of each older
+blob its posts name. The key is wrapped to the account inside the blob's own recipient list, which
+sits at the end of the blob, so the sender reads the last 64 KB of each blob from the relay (an
+`HTTP Range` suffix; a relay without it sends the whole blob), not the file. The keys go in batches
+of 40, newest blob first, on the account lane. The browser takes in every batch as it arrives and
+then loads media from the relay as the reader scrolls, like any other device. Nothing is uploaded
+again. This is a one-time job: a blob posted after the link is sealed to the browser's own device
+key.
+
+**What a grant is.** `"HVMK1" ‖ target device id ‖ n × (blob id ‖ content key)`, signed by the
+account and sealed to that one device (`seal_item_key_grant`). The blob id is a hash of the blob's
+last 256 bytes, which lie inside its sender's signature, so the sender (holding a tail) and the
+browser (holding the whole blob) name it alike. The browser accepts a grant only under its pinned
+account key and only when it names that browser. Only devices on the account's signed roster are
+sealed to. Proofs: `docs/formal/haven_item_keys.spthy` (the relay learns no key; nobody but the
+account can plant one; a grant opens nothing it does not name).
+
+**Why not simply give the browser the account key.** Removing a browser would stop meaning
+anything: it could read everything posted afterwards. With per-item keys a removed browser keeps
+what it was given, which is the history it could already read, and gets nothing new.
+
+**Why not put the keys in the history pages.** A page's container is not encrypted (only the
+envelopes inside it are), so the relay would read them. And a separate job reaches browsers that
+were linked before this existed, without a second history transfer; an app that predates it ignores
+the request.
+
+**What it costs and does not do.** The account's phone or computer has to run once with Haven
+open. It sends about 64 bytes per blob, and downloads about 64 KB per blob through a relay that
+honors ranges (whole blobs through one that does not). A blob on no reachable relay gets no key and
+is counted as missing. An account whose only other device is an Android phone has no sender
+(Android serves no hand-off, D26).
+

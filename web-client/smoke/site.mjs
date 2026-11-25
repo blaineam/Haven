@@ -7,7 +7,7 @@
 // preflight and marks its answers readable (core/haven-net/src/httprelay.rs).
 //
 //   web-client/build.sh
-//   cargo build -p haven-client --example web_primary_engine
+//   cargo build -p haven-client --features test-util --example web_primary_engine
 //   node web-client/smoke/site.mjs core/target/debug/examples/web_primary_engine
 //
 // By default the site names the primary's own relay as its rendezvous (a site may do that: the

@@ -5,7 +5,7 @@
 //! Nothing is simulated between the two engines.
 //!
 //! ```sh
-//! cargo run -p haven-client --example web_primary_engine -- web-client/dist
+//! cargo run -p haven-client --features test-util --example web_primary_engine -- web-client/dist
 //! ```
 //!
 //! Hermetic: a throwaway account in a fresh temp directory, never the OS keyring or a real data

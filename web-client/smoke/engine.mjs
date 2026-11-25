@@ -8,7 +8,7 @@
 // simulated in between.
 //
 //   web-client/build.sh
-//   cargo build -p haven-client --example web_primary_engine
+//   cargo build -p haven-client --features test-util --example web_primary_engine
 //   node web-client/smoke/engine.mjs core/target/debug/examples/web_primary_engine
 //
 // Proves: the relay serves the page; a fresh browser is offered linking and nothing else; pasting

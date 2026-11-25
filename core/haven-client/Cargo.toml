@@ -10,6 +10,12 @@ description = "The Haven client layer shared by the desktop app and the browser 
 # engine on it. Never enabled in a shipped build.
 test-util = []
 
+# The browser smokes' native peer. It calls a harness-only engine method, so a build without the
+# feature (a plain `cargo test --workspace`) skips it instead of failing on it.
+[[example]]
+name = "web_primary_engine"
+required-features = ["test-util"]
+
 # Everything here builds for every target, wasm32 included.
 [dependencies]
 serde = { version = "1", features = ["derive"] }

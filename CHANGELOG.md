@@ -10,6 +10,9 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 ## Unreleased
 
 ### Fixed
+- **Tests: the cross-device suite rebuilds a half-deleted build cache.** The system's `/tmp`
+  cleanup removed files and left folders, so Xcode thought a package was present and the suite
+  stopped before its first step.
 
 - **A linked browser (and any newly linked device) can open friends' photos and videos from the relay.** A photo is encrypted with its sender's circle key, but opening it only ever tried your own account's keys. A device linked after the photo was sent has no other way in, so it opened none of a friend's media, even media sent under a key it had just been given. Every key the device holds is now tried. Haven deletes keys older than the last four per sender, so media from before that (about a month or more) still cannot be opened this way.
 - **In the browser, a photo that missed once is asked for again.** For posts more than a week old, the background retry skipped full photos and videos, so each got a single attempt as it scrolled into view. If the relay's address or a key had not arrived yet, it never loaded. It is now retried with growing pauses, and at once when new keys arrive.

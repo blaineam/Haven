@@ -5,6 +5,7 @@
 # com.blaineam.kith prod container or the personal desktop data root.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib/haven-sim.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/lib/haven-dd.sh"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="${QA_OUT:-$ROOT/build/e2e-bootstrap-$(date +%Y%m%d-%H%M%S)}"
 mkdir -p "$OUT"
@@ -160,6 +161,8 @@ IOS_APP="${HAVEN_IOS_APP:-/tmp/haven-signed-ios-dd/Build/Products/Debug-iphonesi
 # built a day before the fix under test, which is worse than not running at all. Same freshness
 # rule as the stub: any newer apple/HavenApp or core/ source forces a rebuild.
 IOS_BIN="$IOS_APP/Haven"
+# Four dirnames up from the app is its DerivedData root (see below); drop it if /tmp ate part of it.
+haven_dd_prune "$(dirname "$(dirname "$(dirname "$(dirname "$IOS_APP")")")")"
 NEEDS_IOS=0
 if [[ ! -x "$IOS_BIN" ]]; then
   NEEDS_IOS=1

@@ -269,6 +269,7 @@ private fun MainScaffold() {
             // safeAreaInset Apple ended up with. Draws nothing when no import is running.
             androidx.compose.foundation.layout.Column {
                 ImportBanner(Modifier.align(androidx.compose.ui.Alignment.CenterHorizontally))
+                HistoryHandoffBanner()
                 if (!imeUp) NavigationBar(containerColor = HavenTheme.card) {
                 val navColors = NavigationBarItemDefaults.colors(
                     selectedIconColor = HavenTheme.pink,

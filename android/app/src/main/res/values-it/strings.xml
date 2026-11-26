@@ -804,4 +804,19 @@
     <string name="car_messages_label">Haven Messaggi</string>
     <string name="car_messages_title">Messaggi</string>
     <string name="car_messages_off">I messaggi di Android Auto sono disattivati nelle impostazioni di Haven.</string>
+
+    <!-- Transfer banner: sending history / media keys to another of my devices (Apple parity) -->
+    <string name="handoff_sending_title">Invio della cronologia al nuovo dispositivo</string>
+    <string name="handoff_cancelled_title">Trasferimento annullato</string>
+    <string name="handoff_keep_open">Tieni Haven aperto su questo telefono finché il nuovo dispositivo non ha ricevuto tutto: lo schermo resta acceso durante l’invio.</string>
+    <string name="handoff_cancel">Annulla trasferimento</string>
+    <string name="handoff_confirm_title">Interrompere il trasferimento della cronologia?</string>
+    <string name="handoff_confirm_stop">Interrompi trasferimento</string>
+    <string name="handoff_confirm_keep">Continua</string>
+    <string name="handoff_cancelled_there">L’altro dispositivo ha interrotto il trasferimento. Ciò che è già stato copiato resta.</string>
+    <string name="handoff_cancelled_here">Ciò che è già stato copiato resta; puoi ricominciare più tardi.</string>
+    <string name="handoff_dismiss">Ignora</string>
+    <string name="handoff_media_fmt">%1$d di %2$d foto e video</string>
+    <string name="handoff_posts_fmt">%1$d di %2$d post e messaggi</string>
+    <string name="handoff_both_fmt">%1$d di %2$d post e messaggi · %3$d di %4$d foto e video</string>
 </resources>

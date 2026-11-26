@@ -531,6 +531,40 @@ object SelfSyncCoordinator {
                 .isSuccess
     }
 
+    /** Every relay + the user's own S3 bucket if configured. Self-sync works with a relay OR an S3
+     *  bucket (no relay required) — matching iOS/desktop. */
+    private fun transports(): List<Transport> {
+        val out = ArrayList<Transport>()
+        for (nodeHex in HavenNet.selfSyncRelays()) out.add(RelayTransport(nodeHex))
+        StorageStore.s3Config(appContext)?.let { out.add(S3Transport(it)) }
+        return out
+    }
+
+    // MARK: the account lane (history hand-off + media keys; Apple `accountLaneList/Get/Put`)
+
+    /** Every key under [prefix] on any transport. */
+    suspend fun laneList(prefix: String): List<String> {
+        if (!initialized) return emptyList()
+        val out = LinkedHashSet<String>()
+        for (t in transports()) t.list(prefix)?.let { out.addAll(it) }
+        return out.toList()
+    }
+
+    /** The first transport's copy of [key]. */
+    suspend fun laneGet(key: String): ByteArray? {
+        if (!initialized) return null
+        for (t in transports()) t.get(key)?.let { return it }
+        return null
+    }
+
+    /** Put on every transport; true when at least one took it. */
+    suspend fun lanePut(key: String, data: ByteArray): Boolean {
+        if (!initialized) return false
+        var ok = false
+        for (t in transports()) if (t.put(key, data)) ok = true
+        return ok
+    }
+
     private suspend fun syncLocked(social: HavenSocial?): Boolean {
         val accountHex = HavenNet.accountNodeHex
         if (accountHex.isEmpty()) return false
@@ -541,11 +575,7 @@ object SelfSyncCoordinator {
         val selfSyncKey = if (seedless) (HavenNet.selfSyncKey ?: return false) else null
         val seed = if (seedless) ByteArray(0) else HavenNet.accountSeed
 
-        // Transports = every relay (existing) + the user's own S3 bucket if configured. Self-sync
-        // now works with a relay OR an S3 bucket (no relay required) — matching iOS/desktop.
-        val transports = ArrayList<Transport>()
-        for (nodeHex in HavenNet.selfSyncRelays()) transports.add(RelayTransport(nodeHex))
-        StorageStore.s3Config(appContext)?.let { transports.add(S3Transport(it)) }
+        val transports = transports()
         if (transports.isEmpty()) {
             // Permanent breadcrumb (desktop parity): the silent early return here is what made the
             // dead lane undebuggable — an empty transport list looks identical to a healthy no-op.

@@ -13,7 +13,7 @@ package com.blaineam.haven.core
  * Frame types (parity with iOS handleInbound):
  *   0 Hello · 1 Event · 3 MediaReq · 5 MediaChunk · 9 Relay · 10-13 audio call ·
  *   14 BucketConfig · 15 video · 16 SDP offer · 17 SDP answer · 18 ICE · 19 relay node · 20 presign ·
- *   31 media-wanted · 32 media-available · 33 media-resume-req
+ *   31 media-wanted · 32 media-available · 33 media-resume-req · 36 history nudge
  */
 object Wire {
     const val HELLO: Int = 0
@@ -22,6 +22,10 @@ object Wire {
     const val MEDIA_CHUNK: Int = 5
     const val RELAY: Int = 9
     const val RELAY_NODE: Int = 19   // circle relay/mailbox node id share
+    /** "A history request is waiting on the account lane" — a look-now hint between my own devices
+     *  (body: the sender's device hex). Apple `HistoryHandoff.nudgeFrame`, desktop
+     *  `wire::HISTORY_NUDGE`. */
+    const val HISTORY_NUDGE: Int = 36
     /** "Here is how to reach our relays" — the account's seed-holding device to its OWN other devices:
      *  `[hex64 account][JSON array of relay announce objects]`, sealed per device, signed by the
      *  account key. A linked browser has no other way to learn a relay's URL + token. Desktop

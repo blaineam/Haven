@@ -354,6 +354,8 @@ object QaDriver {
                 RelayHistoryResync.start()
             }
             "relay_history_cancel" -> RelayHistoryResync.cancel()
+            // The banner's "Cancel transfer" on a sending phone (Apple's op of the same name).
+            "history_cancel" -> HistoryHandoff.shared?.cancelTransfer()
             "wire_relay" -> {
                 val hex = cmd.optString("hex").lowercase()
                 val urlsArr = cmd.optJSONArray("urls")

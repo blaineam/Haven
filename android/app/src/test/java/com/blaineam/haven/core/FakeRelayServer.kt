@@ -15,7 +15,7 @@ import java.util.concurrent.TimeUnit
  * checks the signature (the tests swap `HavenNet.httpAuthSigner` for a stub), it only holds bytes.
  */
 class FakeRelayServer {
-    class Hit(val method: String, val path: String, val body: ByteArray)
+    class Hit(val method: String, val path: String, val body: ByteArray, val range: String? = null)
 
     val store = ConcurrentHashMap<String, ByteArray>()
     val hits = CopyOnWriteArrayList<Hit>()
@@ -25,6 +25,9 @@ class FakeRelayServer {
     val getStatus = ConcurrentHashMap<String, Int>()
     /** Keys whose PUT is answered with this status (and not stored). */
     val putStatus = ConcurrentHashMap<String, Int>()
+    /** Serve `Range: bytes=-N` as haven-relay does (206 when N is shorter than the body). False =
+     *  a relay older than ranges, which sends the whole body. */
+    @Volatile var honorsRange = true
     private val puts = CopyOnWriteArrayList<CountDownLatch>()
     private val getWaiters = CopyOnWriteArrayList<Pair<String, CountDownLatch>>()
     private lateinit var server: HttpServer
@@ -54,7 +57,8 @@ class FakeRelayServer {
     private fun handle(ex: HttpExchange) {
         val body = ex.requestBody.readBytes()
         val path = ex.requestURI.rawPath
-        hits += Hit(ex.requestMethod, path, body)
+        val range = ex.requestHeaders.getFirst("Range")
+        hits += Hit(ex.requestMethod, path, body, range)
         val key = if (path.startsWith("/k/")) URLDecoder.decode(path.removePrefix("/k/"), "UTF-8") else null
         var status = forceStatus ?: 200
         var out = ByteArray(0)
@@ -72,6 +76,11 @@ class FakeRelayServer {
                 val forced = getStatus[key]
                 val v = store[key]
                 if (forced != null) status = forced else if (v == null) status = 404 else out = v
+                val suffix = range?.removePrefix("bytes=-")?.toIntOrNull()
+                if (status == 200 && honorsRange && suffix != null && suffix < out.size) {
+                    status = 206
+                    out = out.copyOfRange(out.size - suffix, out.size)
+                }
             }
             ex.requestMethod == "PUT" -> { val forced = putStatus[key]; if (forced != null) status = forced else store[key!!] = body }
         }

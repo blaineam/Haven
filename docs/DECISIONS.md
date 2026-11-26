@@ -652,8 +652,18 @@ the source half for a device that holds the account key, so a desktop can answer
 **What this costs.** Until a device of the account answers, a new browser shows only what is
 posted from then on. A phone answers when Haven is next open on it. The feed says so, offers
 "Load from relays instead" (the old behaviour, complete but unordered), and falls back to that
-after fifteen minutes. An account whose only other device is an Android phone always takes that
-path today: Android does not serve the hand-off.
+after fifteen minutes. An account whose only other device is an Android phone always took that
+path until 2026-11-25 (Android served no hand-off).
+
+**Added 2026-11-25: Android is a source** (`HistoryHandoff.kt`, wire in `HistoryHandoffWire.kt`).
+It answers the same request as Apple, and only while it holds the account key: pages newest first
+with each page's media named, media put on the relay when a phone asks (`history-need`), kept
+stories as a last media page, direct own-device media for the device it is serving, a banner with
+"Cancel transfer", and the screen kept on while sending. Like the desktop it serves only a device
+the account's signed roster lists, after taking in the roster the request carries. It runs on the
+mailbox poll, on frame 36 and in the 15-minute background sync; Android may stop a backgrounded
+app, and the run resumes where it stopped. Android is not a TARGET: an Android phone newly linked
+to an account still does not ask for the hand-off.
 
 **Known gaps.** A post that reaches a mailbox between a source exporting that circle's first page
 and the browser first listing that circle is skipped by both; the authors' periodic re-send is
@@ -714,6 +724,13 @@ the request.
 **What it costs and does not do.** The account's phone or computer has to run once with Haven
 open. It sends about 64 bytes per blob, and downloads about 64 KB per blob through a relay that
 honors ranges (whole blobs through one that does not). A blob on no reachable relay gets no key and
-is counted as missing. An account whose only other device is an Android phone has no sender
-(Android serves no hand-off, D26).
+is counted as missing.
+
+**Added 2026-11-25: Android sends too** (`MediaKeysSender.kt`, `ItemKeyLookup.kt`), so an account
+whose only other device is an Android phone has a sender. It reads the relay's copy, never its
+own (Android re-seals what it keeps, which names a different blob), asks for the end of each blob
+and reads the whole one only when the key is not in it. A batch with a blob that some destination
+did not answer for is held back whole, including a relay Haven is leaving alone for a while after
+a refusal. One limit of its own: a chunked blob too large for the phone's memory is never put
+together whole, so if its end does not hold the key it is counted as missing.
 

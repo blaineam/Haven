@@ -52,8 +52,8 @@ final class HistoryHandoff: ObservableObject {
             case received
             /// This device is uploading history for another of my devices.
             case sending
-            /// Asked, and no device has answered for `noAnswerMs`. Android can't serve a handoff yet,
-            /// and an older Haven build doesn't know the request — waiting forever helped nobody.
+            /// Asked, and no device has answered for `noAnswerMs`. An older Haven build doesn't know
+            /// the request (or, on Android, doesn't answer it) — waiting forever helped nobody.
             case noAnswer
             /// The transfer was stopped — here or on the other device (`cancelledRemotely`). Shown
             /// until dismissed or a new transfer starts; nothing resumes on its own.

@@ -804,4 +804,19 @@ Tout ce que vous publiez est chiffré de bout en bout pour votre cercle.</string
     <string name="car_messages_label">Haven Messages</string>
     <string name="car_messages_title">Messages</string>
     <string name="car_messages_off">Les messages Android Auto sont désactivés dans les réglages de Haven.</string>
+
+    <!-- Transfer banner: sending history / media keys to another of my devices (Apple parity) -->
+    <string name="handoff_sending_title">Envoi de l’historique vers votre nouvel appareil</string>
+    <string name="handoff_cancelled_title">Transfert annulé</string>
+    <string name="handoff_keep_open">Gardez Haven ouvert sur ce téléphone jusqu’à ce que votre nouvel appareil ait tout reçu — l’écran reste allumé pendant l’envoi.</string>
+    <string name="handoff_cancel">Annuler le transfert</string>
+    <string name="handoff_confirm_title">Arrêter le transfert de votre historique ?</string>
+    <string name="handoff_confirm_stop">Arrêter le transfert</string>
+    <string name="handoff_confirm_keep">Continuer</string>
+    <string name="handoff_cancelled_there">Votre autre appareil a arrêté le transfert. Ce qui a déjà été copié est conservé.</string>
+    <string name="handoff_cancelled_here">Ce qui a déjà été copié est conservé ; vous pourrez recommencer plus tard.</string>
+    <string name="handoff_dismiss">Ignorer</string>
+    <string name="handoff_media_fmt">%1$d sur %2$d photos et vidéos</string>
+    <string name="handoff_posts_fmt">%1$d sur %2$d posts et messages</string>
+    <string name="handoff_both_fmt">%1$d sur %2$d posts et messages · %3$d sur %4$d photos et vidéos</string>
 </resources>

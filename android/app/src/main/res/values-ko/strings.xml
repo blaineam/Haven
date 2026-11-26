@@ -804,4 +804,19 @@
     <string name="car_messages_label">Haven 메시지</string>
     <string name="car_messages_title">메시지</string>
     <string name="car_messages_off">Android Auto 메시지가 Haven 설정에서 꺼져 있습니다.</string>
+
+    <!-- Transfer banner: sending history / media keys to another of my devices (Apple parity) -->
+    <string name="handoff_sending_title">새 기기로 기록을 보내는 중</string>
+    <string name="handoff_cancelled_title">전송이 취소됨</string>
+    <string name="handoff_keep_open">새 기기가 모두 받을 때까지 이 휴대폰에서 Haven을 열어 두세요. 보내는 동안 화면이 켜진 상태로 유지됩니다.</string>
+    <string name="handoff_cancel">전송 취소</string>
+    <string name="handoff_confirm_title">기록 이동을 중지할까요?</string>
+    <string name="handoff_confirm_stop">전송 중지</string>
+    <string name="handoff_confirm_keep">계속하기</string>
+    <string name="handoff_cancelled_there">다른 기기에서 전송을 중지했습니다. 이미 복사된 항목은 그대로 유지됩니다.</string>
+    <string name="handoff_cancelled_here">이미 복사된 항목은 그대로 유지되며, 나중에 다시 시작할 수 있습니다.</string>
+    <string name="handoff_dismiss">닫기</string>
+    <string name="handoff_media_fmt">사진과 동영상 %2$d개 중 %1$d개</string>
+    <string name="handoff_posts_fmt">게시물과 메시지 %2$d개 중 %1$d개</string>
+    <string name="handoff_both_fmt">게시물과 메시지 %2$d개 중 %1$d개 · 사진과 동영상 %4$d개 중 %3$d개</string>
 </resources>

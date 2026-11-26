@@ -588,6 +588,8 @@ object HavenNet : InboundListener {
         // on EVERY launch. Everything is gated in core — inert (byte-identical to 1.0.6) until a circle /
         // the own-device fleet is fully capable.
         QaStats.timed("apply_crypto_switches") { applyCryptoSwitches() }
+        // The history hand-off and media-key senders (DECISIONS D26 / D27) for my other devices.
+        HistoryHandoff.shared = HistoryHandoff(handoffHost, File(appContext.filesDir, "haven-handoff"), scope)
         ready = true
         QaStats.mark("engine_ready")
         // Tell the UI the engine exists now.
@@ -1587,6 +1589,9 @@ object HavenNet : InboundListener {
                 // blobs. Only its Compose-state edits hop to main (see handleMediaAvailable).
                 Wire.MEDIA_AVAILABLE -> handleMediaAvailable(body)
                 Wire.HISTORY_REQ -> handleHistoryRequest(body)
+                // 36 is only a "look now" hint from one of my devices: the request itself is on the
+                // account lane, which only my own devices can write, so it carries no authority.
+                Wire.HISTORY_NUDGE -> HistoryHandoff.shared?.poke()
                 else -> Log.d(TAG, "ignoring frame type $type (not yet handled)")
             }
         }
@@ -6657,6 +6662,8 @@ object HavenNet : InboundListener {
         // refresh trigger (selfSyncDidApply) when a peer device's state arrives.
         // Deferred (like Apple's ThermalPolicy.skipSelfSync) during a call / Battery Saver / SEVERE+.
         if (!HeavyWorkMonitor.current.suspendHeavyIO) runCatching { SelfSyncCoordinator.sync(social) }
+        // …and answer any of them asking for history or media keys. Its own loop: never holds the poll.
+        HistoryHandoff.shared?.poke()
         // Persist whenever ANY receive ran — even a "nothing changed" pass may have buffered
         // envelopes into pending_epoch, and those buffers must survive process death.
         if (receiveRan && !changed) persist()
@@ -8099,6 +8106,34 @@ object HavenNet : InboundListener {
                     throw RelayForbidden()
                 }
                 else -> { qaCountHttp(base, "getFail"); throw java.io.IOException("http ${c.responseCode}") }
+            }
+        } catch (e: java.io.IOException) {
+            if (e !is RelayForbidden && e.message?.startsWith("http ") != true) qaCountHttp(base, "getFail")
+            throw e
+        } finally { c.disconnect() }
+    }
+
+    /** GET the closing bytes of one key (`Range: bytes=-N`). A relay that honors the range sends
+     *  those (206, `partial`); an older one sends the whole body. Null = it does not hold the key. */
+    internal fun relayHttpGetTail(base: String, token: String, key: String): Result<ItemKeyLookup.Tail?> = runCatching {
+        if (HavenOffline.enabled) throw java.io.IOException("offline (haven_no_net)")
+        val auth = httpAuth(token, "GET", key, ByteArray(0)) ?: throw java.io.IOException("cannot sign relay GET")
+        val c = (java.net.URL(httpKeyUrl(base, key)).openConnection() as java.net.HttpURLConnection).apply {
+            connectTimeout = 4000; readTimeout = 60000
+            setRequestProperty("Authorization", auth)
+            setRequestProperty("Range", "bytes=-${HistoryHandoffWire.KEY_TAIL_BYTES}")
+        }
+        try {
+            when (val code = c.responseCode) {
+                in 200..299 -> ItemKeyLookup.Tail(c.inputStream.use { it.readBytes() }, partial = code == 206)
+                    .also { qaCountHttp(base, "getOk") }
+                404 -> null.also { qaCountHttp(base, "getMiss") }
+                401, 403 -> {
+                    qaCountHttp(base, "getRefused")
+                    if (code == 401) noteUnverified(base)
+                    throw RelayForbidden()
+                }
+                else -> { qaCountHttp(base, "getFail"); throw java.io.IOException("http $code") }
             }
         } catch (e: java.io.IOException) {
             if (e !is RelayForbidden && e.message?.startsWith("http ") != true) qaCountHttp(base, "getFail")
@@ -9725,6 +9760,7 @@ object HavenNet : InboundListener {
             val cid = if (own) null else circleOfRef(ref)
             val req = HeavyWorkPolicy.ServeRequest(
                 isOwnDevice = own,
+                isHandoffTarget = own && !HistoryHandoff.shared?.handoffTargets.isNullOrEmpty(),
                 onRelay = isBackedUpRemote(ref),
                 uploadPending = hasPendingBackup(ref),
                 circleHasRelay = cid?.let { relaysFor(it).isNotEmpty() } ?: false,
@@ -9866,6 +9902,7 @@ object HavenNet : InboundListener {
         val refBytes = ref.toByteArray(Charsets.UTF_8)
         val isOwn = runCatching { social.myNodeHex() }.getOrNull() == requesterHex
         QaStats.bump(if (isOwn) "served_direct_own" else "served_direct_friend")
+        if (isOwn) HistoryHandoff.shared?.noteSending(ref)   // a hand-off's direct media counts up
         val buf = ByteArray(mediaChunkSize)
         java.io.RandomAccessFile(file, "r").use { raf ->
             for (index in 0 until total) {
@@ -10547,6 +10584,7 @@ object HavenNet : InboundListener {
         relayNodes.clear(); relayClients.clear(); relayHealth.clear(); seenMailbox.clear()
         runCatching { seenMailboxFile.delete() }   // a new identity must not inherit the seen-set
         RelayHistoryResync.resetJournal()   // …nor the relay-history resync's ingested journal
+        HistoryHandoff.shared?.reset()   // …nor a run or key job it was sending for the old account
         invalidateListDigests()   // a fresh seen-set must re-list everything (no 204 short-circuit)
         relayEntries.clear(); suppressedRelays.clear(); forgotAtRelays.clear(); clearedRelayForgets.clear(); erasedRelays.clear(); defaultRelayHex = ""
         Presign.reset()
@@ -10626,8 +10664,8 @@ object HavenNet : InboundListener {
         publishUploadProgress()
     }
     /** The honest-progress UI's state for the QA dump (schema: docs/QA.md ▸ "Progress fields"),
-     *  field-for-field with the Apple dump. Android has no history-handoff source or target yet, so
-     *  `history_handoff` always reads role "none". */
+     *  field-for-field with the Apple dump. Android is a history-handoff SOURCE only, never a
+     *  target. */
     fun qaProgressJson(): JSONObject {
         val circle = activeCircle.value
         val p = authoredUploads.value
@@ -10661,10 +10699,18 @@ object HavenNet : InboundListener {
             // Refs a placeholder shows as given up ("No longer available") — the e2e `progress`
             // step asserts a transfer that is still receiving bytes never lands here.
             .put("media_gave_up", org.json.JSONArray(unavailableMedia.toList().sorted()))
-            .put("history_handoff", JSONObject()
-                .put("role", "none").put("state", "idle").put("done", 0).put("total", 0)
-                .put("media_done", 0).put("media_total", 0))
+            .put("history_handoff", qaHandoffJson(HistoryHandoff.shared?.status() ?: HistoryHandoff.Status()))
             .put("relay_history", RelayHistoryResync.qaSnapshot())
+    }
+
+    private fun qaHandoffJson(h: HistoryHandoff.Status): JSONObject {
+        val (role, state) = when (h.phase) {
+            HistoryHandoff.Phase.IDLE -> "none" to "idle"
+            HistoryHandoff.Phase.SENDING -> "source" to "sending"
+            HistoryHandoff.Phase.CANCELLED -> "none" to "cancelled"
+        }
+        return JSONObject().put("role", role).put("state", state).put("done", h.done).put("total", h.total)
+            .put("media_done", h.mediaDone).put("media_total", h.mediaTotal)
     }
 
     /** Snapshot taken ON Main at publish time, so the last publish always carries the latest counts. */
@@ -10879,6 +10925,161 @@ object HavenNet : InboundListener {
         reconcileSupersededCircles()   // an upgrade synced from another device may have superseded a circle
         persist()
         scope.launch(Dispatchers.Main) { feedVersion.value++; circlesVersion.value++ }
+    }
+
+    // ---- History hand-off + media keys (HistoryHandoff.kt / MediaKeysSender.kt) ----------
+
+    /** Every destination that may hold [circleId]'s media, INCLUDING relays standing down after a
+     *  refusal (which [relaysFor] leaves out): a relay nobody asked is not one that lacks the blob. */
+    private fun itemKeyDestinations(circleId: String): List<String> {
+        val own = LinkedHashSet<String>()
+        relayNodes[circleId]?.let { own.addAll(RelayNodeMap.copy(it)) }
+        val fallback = defaultRelayHex
+        if (fallback.isNotEmpty() && circleInheritsRelay(circleId, fallback)) own.add(fallback)
+        val all = LinkedHashSet<String>(own)
+        for (list in relayNodes.values.toList()) all.addAll(RelayNodeMap.copy(list))
+        if (fallback.isNotEmpty()) all.add(fallback)
+        return all.filter { isRelayActive(it) && (it in own || !scopeRefused(it, circleId)) }
+    }
+
+    /**
+     * One blob's content key, from whichever destination holds the blob, reading as little of it as
+     * the destination allows (DECISIONS D27; core `find_item_key`). [unwrap] is the engine.
+     * Anything that did not answer makes a blob nobody else had [ItemKeyResult.Unreachable].
+     */
+    internal suspend fun findItemKey(circleId: String, ref: String, unwrap: (ByteArray) -> ByteArray?): ItemKeyResult {
+        if (LocalMedia.isSynthetic(ref)) return ItemKeyResult.Missing
+        val maxWhole = LocalMedia.maxInMemoryBytes()
+        var asked = 0
+        var unanswered = false
+        suspend fun ask(reader: ItemKeyLookup.Reader) =
+            ItemKeyLookup.fromDestination(reader, ref, maxWhole, unwrap)
+        val hosted = runCatching { relayHost?.nodeIdHex() }.getOrNull()
+        val me = setOf(runCatching { social.myNodeHex() }.getOrDefault("").lowercase(),
+            runCatching { social.myDeviceNodeHex() }.getOrDefault("").lowercase())
+        val dests = itemKeyDestinations(circleId)
+        // Our own hosted store first: no network at all.
+        for (node in dests.sortedByDescending { it == hosted }) {
+            try {
+                if (hosted != null && node == hosted) {
+                    asked++
+                    ask(ItemKeyLookup.WholeReader { relayHost?.localGet(it) })?.let { return ItemKeyResult.Found(it) }
+                    continue
+                }
+                if (node.startsWith("s3:")) {
+                    val cfg = StorageStore.s3Config(appContext) ?: continue
+                    asked++
+                    ask(ItemKeyLookup.WholeReader { uniffi.haven_ffi.s3Get(cfg, it) })
+                        ?.let { return ItemKeyResult.Found(it) }
+                    continue
+                }
+                if (node.lowercase() in me) continue
+                asked++
+                if (relayStoodDown(node)) { unanswered = true; continue }
+                var answered = false
+                val entry = relayEntries[node]
+                if (entry != null) {
+                    for (base in httpUrlsFor(entry)) {
+                        try {
+                            val key = ask(object : ItemKeyLookup.Reader {
+                                override suspend fun tail(key: String) =
+                                    relayHttpGetTail(base, entry.httpToken, key).getOrThrow()
+                                override suspend fun whole(key: String) =
+                                    relayHttpGet(base, entry.httpToken, key).getOrThrow()
+                            })
+                            if (key != null) return ItemKeyResult.Found(key)
+                            answered = true
+                            break
+                        } catch (e: RelayForbidden) {
+                            noteRefused(node, "media key read")
+                        } catch (e: java.io.IOException) {
+                            markHttpUrlBad(base)
+                        }
+                    }
+                }
+                if (answered) continue
+                // No HTTP door answered: the iroh lane reads whole blobs.
+                val client = relayClientFor(node)
+                if (client == null) { unanswered = true; continue }
+                ask(ItemKeyLookup.WholeReader { key ->
+                    // `get` folds a failure into "not held"; `has` surfaces it.
+                    client.get(key) ?: if (client.has(key)) throw java.io.IOException("held but unread") else null
+                })?.let { return ItemKeyResult.Found(it) }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.i("MediaKeys", "lookup ${ref.take(12)} on ${node.take(8)} did not answer: ${e.message}")
+                unanswered = true
+            }
+        }
+        // A refusal heals by publishing our roster; the next pass then gets an answer.
+        if (unanswered) runCatching { healForbiddenRelays() }
+        return if (unanswered || asked == 0) ItemKeyResult.Unreachable else ItemKeyResult.Missing
+    }
+
+    /** What the hand-off senders ask of the app. */
+    internal val handoffHost: HandoffHost = object : HandoffHost {
+        override fun ready() = this@HavenNet.ready && !HavenOffline.enabled
+        override fun accountHex() = accountNodeHex.lowercase()
+        override fun deviceHex() = DeviceKeyStore.deviceNodeHex().lowercase()
+        override fun holdsAccountSeed() = !core.seedless
+        override fun suspendHeavyIO() = HeavyWorkMonitor.current.suspendHeavyIO
+
+        override suspend fun laneList(prefix: String) = SelfSyncCoordinator.laneList(prefix)
+        override suspend fun laneGet(key: String) = SelfSyncCoordinator.laneGet(key)
+        override suspend fun lanePut(key: String, data: ByteArray) = SelfSyncCoordinator.lanePut(key, data)
+
+        override fun circleIds() = runCatching { social.circles().map { it.id } }.getOrDefault(emptyList())
+        override fun accountDevices() =
+            runCatching { social.deviceNodeIdsFor(accountNodeHex) }.getOrDefault(emptyList())
+
+        override fun ingestOwnRoster(wire: ByteArray): Int {
+            val status = runCatching { social.ingestRosterWireStatus(wire).toInt() }.getOrDefault(-1)
+            if (status > 0) { persist(); resealAfterEpochChange() }
+            return status
+        }
+
+        override fun historyEventCount(circleId: String) =
+            runCatching { social.historyEventCount(circleId).toLong() }.getOrDefault(0L)
+
+        override fun exportHistoryPage(circleId: String, beforeMs: Long, limit: Int) = runCatching {
+            social.exportHistoryPage(circleId, beforeMs.toULong(), limit.toUInt()).also { durableKeyState() }
+        }.onFailure { Log.w("HistoryHandoff", "export failed", it) }.getOrNull()
+
+        override fun historyMediaRefs() =
+            runCatching { social.historyMediaRefs(nowMs()).map { it.circleId to it.reference } }
+                .getOrDefault(emptyList())
+
+        override fun keptStoryMedia() =
+            runCatching { KeptStoriesStore.all().flatMap { it.media } }.getOrDefault(emptyList())
+
+        override fun localMediaSize(ref: String): Long? =
+            if (LocalMedia.isSynthetic(ref)) null else LocalMedia.sizeOf(ref).takeIf { it > 0 }
+
+        override fun sealMediaForHandoff(circleId: String, ref: String): File? {
+            // Kept media is sealed at rest: open it file to file, then seal it to the circle's
+            // CURRENT key, which the new device holds once its roster was taken in.
+            val plain = LocalMedia.openForServing(ref) ?: return null
+            val out = File(appContext.cacheDir, "handoff-${java.util.UUID.randomUUID()}.sealed")
+            return try {
+                val ok = runCatching { social.sealCircleMediaFile(circleId, plain.file.absolutePath, out.absolutePath) }
+                    .getOrDefault(false)
+                if (ok && out.exists()) out else { out.delete(); null }
+            } finally {
+                plain.release()
+            }
+        }
+
+        override suspend fun findItemKey(circleId: String, ref: String) =
+            this@HavenNet.findItemKey(circleId, ref) { tail -> runCatching { social.itemKeyFromTail(tail) }.getOrNull() }
+
+        override fun sealItemKeys(device: String, entries: List<ByteArray>) =
+            runCatching { social.sealItemKeys(device, entries) }.getOrNull()
+
+        override fun nudgeMyDevices() {
+            val me = DeviceKeyStore.deviceNodeHex().toByteArray(Charsets.UTF_8)
+            for (t in myOtherDeviceTargets()) sendFrame(Wire.HISTORY_NUDGE, me, t)
+        }
     }
 
     // ---- Self-sync nudge (debounced local-mutation push) ---------------------------------

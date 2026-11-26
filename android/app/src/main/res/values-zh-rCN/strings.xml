@@ -803,4 +803,19 @@
     <string name="car_messages_label">Haven 消息</string>
     <string name="car_messages_title">消息</string>
     <string name="car_messages_off">Android Auto 消息已在 Haven 设置中关闭。</string>
+
+    <!-- Transfer banner: sending history / media keys to another of my devices (Apple parity) -->
+    <string name="handoff_sending_title">正在将历史记录发送到你的新设备</string>
+    <string name="handoff_cancelled_title">传输已取消</string>
+    <string name="handoff_keep_open">请在此手机上保持 Haven 打开，直到新设备收到全部内容——发送期间屏幕会保持常亮。</string>
+    <string name="handoff_cancel">取消传输</string>
+    <string name="handoff_confirm_title">要停止迁移你的历史记录吗？</string>
+    <string name="handoff_confirm_stop">停止传输</string>
+    <string name="handoff_confirm_keep">继续</string>
+    <string name="handoff_cancelled_there">你的其他设备已停止传输。已复制的内容会保留。</string>
+    <string name="handoff_cancelled_here">已复制的内容会保留；你可以稍后重新开始。</string>
+    <string name="handoff_dismiss">关闭</string>
+    <string name="handoff_media_fmt">照片和视频 %1$d/%2$d</string>
+    <string name="handoff_posts_fmt">%2$d 条帖子和消息中的 %1$d 条</string>
+    <string name="handoff_both_fmt">帖子和消息 %1$d/%2$d · 照片和视频 %3$d/%4$d</string>
 </resources>

@@ -9,6 +9,16 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Added
+- **An Android phone can send your history and your older photos and videos to a linked browser**,
+  as the iPhone, Mac and desktop apps do. If your only other device is an Android phone, a linked
+  browser now gets recent history from it, and once, a small key for each older photo and video,
+  so they load from the relay. A new iPhone can take its history from an Android phone too. Only
+  the phone that holds your account key sends. While it sends, a banner shows the progress, the
+  screen stays on, and you can cancel. (DECISIONS D26 and D27; strings in nine languages.)
+- **Tests: a round trip on an Android emulator with the real engine**: a linked device without
+  the account key reads the history pages and opens old media.
+
 ### Fixed
 - **CI: the desktop workflow's Flatpak build works again** when Flathub has a newer runtime than
   the build image. It now takes the same step the release build already did.

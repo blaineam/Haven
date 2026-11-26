@@ -30,6 +30,9 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
             // app was killed, its upload cut off mid-flight). The pending queue is persisted, so this
             // background pass can finish it even when the app isn't in the foreground.
             HavenNet.drainPersistedBackups()
+            // A linked browser or a new device of mine may be waiting for history or media keys.
+            // Run the pass here: the worker is what keeps a backgrounded process alive for it.
+            HistoryHandoff.shared?.tick(60_000, waitForTurn = true)
         }
         return Result.success()
     }

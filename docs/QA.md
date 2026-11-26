@@ -602,7 +602,8 @@ can assert that progress actually moves rather than that a spinner existed:
 - `history_handoff`: `target` = this device is pulling its history (`media_done` = received),
   `source` = sending it (`media_done` = streamed directly or put on the relay, `media_total` = named
   by the pages so far). `noAnswer` = asked and nobody answered for 2 min (the banner offers Retry).
-  Android has no handoff yet and always reports `role: "none"`.
+  Android is a source only: it never reports `target`. Its `history_cancel` op is the banner's
+  "Cancel transfer" (`history_request` is Apple only).
 
 Liveness and timing on the desktop leg: every dump carries `dump_seq` (strictly increasing per
 successful write — the orchestrator warns when it sticks, which means the driver, not delivery),

@@ -144,16 +144,21 @@ linked later is on no old device list, so the circle key is its way in. It has t
 account's other devices still hold (D25): the last four per sender. Rotation is weekly and on
 membership changes, so in a quiet circle that reaches back about a month, and in a busy one less.
 
-Older media opens with **per-item keys** (D27). Once, after linking, the account's iPhone, Mac or
-desktop app sends the browser the content key of each older photo and video, signed by the account
+Older media opens with **per-item keys** (D27). Once, after linking, the account's iPhone, Mac,
+Android or desktop app sends the browser the content key of each older photo and video, signed by the account
 and sealed to that browser. It reads only the end of each blob from the relay and uploads nothing
 again. After that the browser loads media from the relay on its own, with the other device off.
 Both sides need the version with D27; a browser linked earlier asks by itself.
-Not covered: a blob that is on no reachable relay, and an account whose only other device is an
-Android phone.
+Not covered: a blob that is on no reachable relay. Only a device holding the account key sends
+(a linked, seedless phone does not). Android sends from the build after 2.2.3, as does its history
+hand-off (D26).
 Regression tests: `a_newly_linked_browser_opens_a_friends_media_under_every_key_still_held`,
 `a_new_browser_opens_old_media_with_the_item_keys_its_phone_sends`,
-`a_new_browser_gets_the_keys_to_old_photos_and_loads_them_from_the_relay`.
+`a_new_browser_gets_the_keys_to_old_photos_and_loads_them_from_the_relay`. Android's half:
+`HandoffRoundTripInstrumentedTest` (the real core on an emulator: a device without the account key
+reads the history pages and opens old media, one blob whole and one in two chunks, from their ends
+only), with `HistoryHandoffTest`, `MediaKeysSenderTest` and `HavenNetItemKeyTest` on the JVM. Not
+yet run: a real browser against a real Android phone through a relay.
 
 ## What a browser cannot do
 

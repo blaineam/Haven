@@ -804,4 +804,19 @@
     <string name="car_messages_label">Haven Nachrichten</string>
     <string name="car_messages_title">Nachrichten</string>
     <string name="car_messages_off">Android-Auto-Nachrichten sind in den Haven-Einstellungen ausgeschaltet.</string>
+
+    <!-- Transfer banner: sending history / media keys to another of my devices (Apple parity) -->
+    <string name="handoff_sending_title">Verlauf wird an dein neues Gerät gesendet</string>
+    <string name="handoff_cancelled_title">Übertragung abgebrochen</string>
+    <string name="handoff_keep_open">Lass Haven auf diesem Telefon geöffnet, bis dein neues Gerät alles hat – der Bildschirm bleibt beim Senden an.</string>
+    <string name="handoff_cancel">Übertragung abbrechen</string>
+    <string name="handoff_confirm_title">Übertragung deines Verlaufs beenden?</string>
+    <string name="handoff_confirm_stop">Übertragung beenden</string>
+    <string name="handoff_confirm_keep">Weitermachen</string>
+    <string name="handoff_cancelled_there">Dein anderes Gerät hat die Übertragung beendet. Bereits Kopiertes bleibt erhalten.</string>
+    <string name="handoff_cancelled_here">Bereits Kopiertes bleibt erhalten; du kannst später neu starten.</string>
+    <string name="handoff_dismiss">Schließen</string>
+    <string name="handoff_media_fmt">%1$d von %2$d Fotos und Videos</string>
+    <string name="handoff_posts_fmt">%1$d von %2$d Beiträgen und Nachrichten</string>
+    <string name="handoff_both_fmt">%1$d von %2$d Beiträgen und Nachrichten · %3$d von %4$d Fotos und Videos</string>
 </resources>

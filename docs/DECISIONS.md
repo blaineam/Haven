@@ -729,8 +729,24 @@ is counted as missing.
 **Added 2026-11-25: Android sends too** (`MediaKeysSender.kt`, `ItemKeyLookup.kt`), so an account
 whose only other device is an Android phone has a sender. It reads the relay's copy, never its
 own (Android re-seals what it keeps, which names a different blob), asks for the end of each blob
-and reads the whole one only when the key is not in it. A batch with a blob that some destination
-did not answer for is held back whole, including a relay Haven is leaving alone for a while after
-a refusal. One limit of its own: a chunked blob too large for the phone's memory is never put
+and reads the whole one only when the key is not in it. A relay Haven is leaving alone for a while
+after a refusal counts as not having answered. One limit of its own: a chunked blob too large for the phone's memory is never put
 together whole, so if its end does not hold the key it is counted as missing.
+
+**Changed 2026-11-26: one silent relay no longer holds the others back** (all three senders). As
+first built, a batch with a blob some destination did not answer for was held back whole and tried
+again, so a relay that stayed away could stop the keys for everything older. Retrying also counted
+as progress on iPhone, which kept the screen on. And the desktop, iPhone and Mac counted a blob as
+having no key, for good, when the relay that might hold it had no web address in use and could not
+be reached directly. Now:
+
+- A blob counts as having no key only when every relay that serves its circle has answered.
+- One that cannot be settled is set aside; the rest of its batch goes. Set-aside blobs are asked
+  about again after every other blob has had its turn.
+- A blob still unanswered three days after it was first set aside is counted as missing, so the
+  job ends. If its only copy is on a relay that later returns, that browser does not get its key;
+  linking the browser again asks afresh.
+- Only a batch that settles something counts as progress (screen, banner, running loop).
+- A batch still looking after 45 seconds sends what it has.
+- A job whose request is still open is no longer dropped, and started over, after three days.
 

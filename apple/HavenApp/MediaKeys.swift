@@ -18,16 +18,32 @@ final class MediaKeysSender {
         var device: String
         var requestAt: UInt64
         var run: String
-        /// Still to go, in reverse: the next one is at the end.
+        /// Not looked up yet, in reverse: the next one is at the end.
         var left: [Item]
+        /// Set aside because something that may hold them did not answer, longest-waiting retry
+        /// first. Optional, as is `touched`: jobs saved by an earlier build have neither.
+        var later: [Item]?
+        /// The last pass that saw this job's request still open.
+        var touched: UInt64?
         var total: Int
         var missing = 0
         var batches = 0
         var complete = false
-        struct Item: Codable { var circle: String; var ref: String }
+        struct Item: Codable {
+            var circle: String
+            var ref: String
+            /// When it was first set aside.
+            var since: UInt64?
+        }
+
+        var waiting: Int { left.count + (later?.count ?? 0) }
     }
 
     private static let abandonedMs: UInt64 = 3 * 24 * 3_600_000
+    /// A blob nobody could be asked about for this long is counted as having no key.
+    static let giveUpAfterMs: UInt64 = 3 * 24 * 3_600_000
+    /// A batch still looking after this long sends what it has: the rest stay for the next one.
+    private static let batchBudget: TimeInterval = 45
     /// Batches worked through per pass, and blobs looked up at once within one.
     private static let batchesPerPass = 5
     private static let parallel = 4
@@ -61,7 +77,7 @@ final class MediaKeysSender {
 
     /// How far the unfinished job is, for the transfer banner.
     var progress: (done: Int, total: Int)? {
-        jobs.values.first { !$0.complete }.map { ($0.total - $0.left.count, $0.total) }
+        jobs.values.first { !$0.complete }.map { ($0.total - $0.waiting, $0.total) }
     }
 
     /// "Cancel transfer": stop, and don't take these requests up again.
@@ -91,12 +107,6 @@ final class MediaKeysSender {
         serving = true
         defer { serving = false }
         let me = DeviceKeyStore.deviceNodeHex().lowercased()
-        let cutoff = HistoryHandoffWire.nowMs() &- Self.abandonedMs
-        let abandoned = jobs.filter { (UInt64($0.value.run) ?? 0) < cutoff }.map(\.key)
-        if !abandoned.isEmpty {
-            for device in abandoned { jobs[device] = nil }
-            save()
-        }
         var did = false
         for key in await SelfSyncCoordinator.shared.accountLaneList(HistoryHandoffWire.keysRequestPrefix(acct)) {
             guard Date() < deadline else { break }
@@ -125,10 +135,26 @@ final class MediaKeysSender {
                 save()
                 HavenLog.sync("media keys: \(device.prefix(8)) asked — \(items.count) blobs")
             }
-            guard let current = job, !current.complete else { continue }
+            guard var current = job else { continue }
+            current.touched = HistoryHandoffWire.nowMs()
+            jobs[device] = current
+            save()
+            if current.complete { continue }
             if await run(current, account: acct, source: me, until: deadline) { did = true }
         }
+        dropAbandoned()
         return did
+    }
+
+    /// Jobs whose request no pass has seen for days: the asking device is gone. A job still being
+    /// asked for is kept however old it is, so it is never worked through a second time.
+    private func dropAbandoned() {
+        let cutoff = HistoryHandoffWire.nowMs() &- Self.abandonedMs
+        let abandoned = jobs.filter { ($0.value.touched ?? UInt64($0.value.run) ?? 0) < cutoff }.map(\.key)
+        if !abandoned.isEmpty {
+            for device in abandoned { jobs[device] = nil }
+            save()
+        }
     }
 
     private func anotherSourceSends(account: String, target: String, request: UInt64, me: String) async -> Bool {
@@ -150,15 +176,19 @@ final class MediaKeysSender {
     private func run(_ start: Job, account: String, source: String, until deadline: Date) async -> Bool {
         var job = start
         var did = false
-        for _ in 0..<Self.batchesPerPass where !job.left.isEmpty && Date() < deadline {
-            let take = min(HistoryHandoffWire.keyBatch, job.left.count)
-            let batch = Array(job.left.suffix(take).reversed())
+        for _ in 0..<Self.batchesPerPass where job.waiting > 0 && Date() < deadline {
+            // New blobs first; the ones set aside once every other has had its turn.
+            let retrying = job.left.isEmpty
+            let batch = retrying
+                ? Array((job.later ?? []).prefix(HistoryHandoffWire.keyBatch))
+                : Array(job.left.suffix(HistoryHandoffWire.keyBatch).reversed())
             var entries: [Data] = []
+            var setAside: [Job.Item] = []
             var missing = 0
-            var index = 0
-            while index < batch.count {
-                let group = batch[index..<min(index + Self.parallel, batch.count)]
-                index += group.count
+            var looked = 0
+            let started = Date()
+            while looked < batch.count, looked == 0 || Date().timeIntervalSince(started) < Self.batchBudget {
+                let group = batch[looked..<min(looked + Self.parallel, batch.count)]
                 let tasks = group.map { item in
                     Task { @MainActor in
                         await SharedStore.findItemKey(ref: item.ref, circleId: item.circle) {
@@ -166,19 +196,23 @@ final class MediaKeysSender {
                         }
                     }
                 }
-                for task in tasks {
+                for (var item, task) in zip(group, tasks) {
                     switch await task.value {
                     case .found(let entry): entries.append(entry)
                     case .missing: missing += 1
                     case .unreachable:
-                        // Leave the whole batch for a pass that can reach the relay.
-                        guard isCurrent(job) else { return did }
-                        await putManifest(job, account: account, source: source)
-                        return did
+                        let now = HistoryHandoffWire.nowMs()
+                        let since = item.since ?? now
+                        if now >= since, now - since >= Self.giveUpAfterMs {
+                            missing += 1
+                        } else {
+                            item.since = since
+                            setAside.append(item)
+                        }
                     }
                 }
+                looked += group.count
                 guard isCurrent(job) else { return did }
-                HistoryHandoff.shared.noteSendingKeys()
             }
             if !entries.isEmpty {
                 guard let grant = await FeedStore.shared.sealItemKeys(device: job.device, entries: entries) else {
@@ -190,15 +224,23 @@ final class MediaKeysSender {
                 job.batches += 1
             }
             guard isCurrent(job) else { return did }
-            job.left.removeLast(take)
+            if retrying {
+                job.later?.removeFirst(looked)
+            } else {
+                job.left.removeLast(looked)
+            }
+            job.later = (job.later ?? []) + setAside
             job.missing += missing
             jobs[job.device] = job
             save()
-            did = true
             await putManifest(job, account: account, source: source)
+            // Only a blob settled for good is progress. Asking again about the ones set aside is
+            // not: counted as such, it would hold the screen for as long as a relay stayed away.
+            guard setAside.count < looked else { break }
+            did = true
             HistoryHandoff.shared.noteSendingKeys()
         }
-        if job.left.isEmpty, !job.complete, isCurrent(job) {
+        if job.waiting == 0, !job.complete, isCurrent(job) {
             job.complete = true
             jobs[job.device] = job
             save()
@@ -212,7 +254,7 @@ final class MediaKeysSender {
     private func putManifest(_ job: Job, account: String, source: String) async {
         let m = HistoryHandoffWire.KeysManifest(
             run: job.run, source: source, forRequest: job.requestAt, batches: job.batches, complete: job.complete,
-            updatedAt: HistoryHandoffWire.nowMs(), total: job.total, done: job.total - job.left.count,
+            updatedAt: HistoryHandoffWire.nowMs(), total: job.total, done: job.total - job.waiting,
             missing: job.missing)
         if let body = try? JSONEncoder().encode(m) {
             _ = await SelfSyncCoordinator.shared.accountLanePut(

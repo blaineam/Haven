@@ -1336,6 +1336,70 @@ async fn a_chunked_blobs_key_is_read_from_its_two_ends() {
     assert_eq!(web.social.item_key_count(), 1);
 }
 
+/// One relay that never answers must not hold back the keys for everything else, must not be
+/// read as "no key", and is given up on only after days. Both ways of not answering: a dead HTTP
+/// address, and a relay with no address we can use from here and no way to dial it (which was
+/// counted as holding nothing).
+#[tokio::test]
+async fn a_relay_that_never_answers_sets_its_blobs_aside_and_the_rest_go() {
+    for (seed, dead_url) in [(179u8, "http://127.0.0.1:1"), (180, "http://10.255.255.1:9")] {
+        let stub = Stub::start().await;
+        let (p, _) = new_engine(seed);
+        wire_to(&p, &stub).await;
+        let post = |body: &str, media: Vec<String>, at: u64| {
+            p.social.post(DEFAULT_CIRCLE.into(), body.into(), media, None, None, false, false, at).unwrap();
+        };
+        // Newest, so it is looked up first and everything else queues behind it.
+        // (A ref this device never held: anything it holds it uploads by itself.)
+        let nowhere = format!("img_{}", "ab".repeat(32));
+        post("stranded", vec![nowhere.clone()], now_ms() - 1_000);
+        for n in 0..(mediakeys::KEY_BATCH as u64 + 2) {
+            let r = p.add_local_media(DEFAULT_CIRCLE, format!("\u{ff}photo {n}").as_bytes(), false);
+            post("old", vec![r.clone()], now_ms() - 90 * 24 * 3_600_000 - n);
+            assert!(p.upload_media(DEFAULT_CIRCLE, &r).await);
+        }
+        let web = linked_seedless_named(&p, &haven_p2p::webpolicy::mark_web_device_name("Chrome")).await;
+        wire_to(&web, &stub).await;
+        let dead = serde_json::json!({ "node": "cd".repeat(32), "urls": [dead_url], "token": TOKEN });
+        p.adopt_relay(dead.to_string()).await;
+        web.media_keys_pull().await;
+
+        for _ in 0..3 {
+            p.media_keys_serve().await;
+        }
+        let job = || p.prefs.lock().media_key_jobs.values().next().cloned().expect("a job");
+        let held = job();
+        assert!(!held.complete, "{dead_url}: {held:?}");
+        assert_eq!((held.left.len(), held.later.len(), held.missing), (0, 1, 0), "{dead_url}");
+        assert_eq!(held.later[0].reference, nowhere);
+        assert!(web.media_keys_pull().await);
+        assert_eq!(web.social.item_key_count() as usize, mediakeys::KEY_BATCH + 2, "{dead_url}");
+
+        // Asking again settles nothing and sends nothing more.
+        assert!(!p.media_keys_serve().await);
+        assert_eq!(job().batches, held.batches);
+
+        // A job whose ask is still open is kept however old it is. (The run id is its age; it
+        // also names the batches already up, so it goes back afterwards.)
+        let set_run = |run: String| p.prefs.lock().media_key_jobs.values_mut().for_each(|j| j.run = run.clone());
+        let aged = (now_ms() - 10 * 24 * 3_600_000).to_string();
+        set_run(aged.clone());
+        p.media_keys_serve().await;
+        assert_eq!((job().run, job().batches), (aged, held.batches), "not started over");
+        set_run(held.run.clone());
+
+        // Days later it still has not answered: counted as having no key, and the job ends.
+        for j in p.prefs.lock().media_key_jobs.values_mut() {
+            j.later[0].since = now_ms() - mediakeys::GIVE_UP_AFTER_MS;
+        }
+        assert!(p.media_keys_serve().await);
+        let done = job();
+        assert!(done.complete && done.missing == 1 && done.waiting() == 0, "{done:?}");
+        web.media_keys_pull().await;
+        assert!(web.prefs.lock().media_key_want.as_ref().is_some_and(|w| w.complete), "{dead_url}");
+    }
+}
+
 #[test]
 fn a_browsers_media_retries_back_off() {
     let d = Engine::web_media_retry_delay_ms;

@@ -55,31 +55,60 @@ class MediaKeysSenderTest {
         assertFalse(file.readText().contains(host.browser + "\",\"requestAt"))
     }
 
-    @Test fun a_blob_is_never_given_up_while_a_relay_is_unreachable() {
+    @Test fun a_blob_nobody_answers_for_is_set_aside_and_the_rest_go() {
         host.lookup = {
-            if (it == "img_045") ItemKeyResult.Unreachable else ItemKeyResult.Found(it.toByteArray())
+            if (it == "img_000") ItemKeyResult.Unreachable else ItemKeyResult.Found(it.toByteArray())
         }
         host.askKeys(at = 100)
         val s = sender()
         s.pass()
         val m = host.keysManifest()!!
         assertFalse(m.complete)
-        assertEquals("the first batch went, the second waits whole", 40, m.done)
+        assertEquals("everything behind the newest blob still went", 89, m.done)
         assertEquals(0, m.missing)
-        assertEquals(1, m.batches)
-        assertNull(batch(m.run, 1))
+        assertEquals(3, m.batches)
         assertTrue(s.hasJobs())
-        assertEquals(40 to 90, s.progress())
+        assertEquals(89 to 90, s.progress())
         repeat(5) { assertFalse(sender().pass()) }   // across relaunches too
-        assertEquals(40, host.keysManifest()!!.done)
-        // The relay is back: the same run carries on where it stopped.
+        assertEquals(89, host.keysManifest()!!.done)
+        assertEquals("no empty batches", 3, host.keysManifest()!!.batches)
+        // The relay is back: the same run sends the one that waited.
         host.lookup = { ItemKeyResult.Found(it.toByteArray()) }
         assertTrue(sender().pass())
         val done = host.keysManifest()!!
         assertEquals(m.run, done.run)
         assertTrue(done.complete)
         assertEquals(0, done.missing)
-        assertTrue(batch(done.run, 1)!!.startsWith("grant:img_040,"))
+        assertEquals("grant:img_000", batch(done.run, 3))
+    }
+
+    @Test fun a_blob_is_given_up_only_after_days_without_an_answer() {
+        host.lookup = {
+            if (it == "img_000") ItemKeyResult.Unreachable else ItemKeyResult.Found(it.toByteArray())
+        }
+        host.askKeys(at = 100)
+        sender().pass()
+        val run = host.keysManifest()!!.run
+        clock += MediaKeysSender.GIVE_UP_AFTER_MS - 1
+        assertFalse(sender().pass())
+        assertFalse(host.keysManifest()!!.complete)
+        clock += 1
+        assertTrue(sender().pass())
+        val m = host.keysManifest()!!
+        assertEquals("the same run: a job still asked for is never started over", run, m.run)
+        assertTrue(m.complete)
+        assertEquals(1, m.missing)
+        assertEquals(90, m.done)
+    }
+
+    @Test fun a_slow_batch_sends_what_it_has() {
+        host.refs = (0 until 12).map { "default" to "img_$it" }
+        host.lookup = { clock += 30_000; ItemKeyResult.Found(it.toByteArray()) }
+        host.askKeys(at = 100)
+        val s = sender()
+        runBlocking { s.serve(clock + 3_600_000) }
+        assertTrue(host.keysManifest()!!.complete)
+        assertEquals(listOf(4, 4, 4), host.sealedBatches.map { it.second.size })
     }
 
     @Test fun retrying_a_held_batch_is_not_progress() {

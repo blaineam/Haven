@@ -32,6 +32,10 @@ const RENUDGE_MS: u64 = 10 * 60 * 1000;
 const SLOW_RENUDGE_MS: u64 = 6 * 3_600_000;
 const SLOW_AFTER_MS: u64 = 3_600_000;
 const ABANDONED_JOB_MS: u64 = 3 * 24 * 3_600_000;
+/// A blob nobody could be asked about for this long is counted as having no key.
+pub(super) const GIVE_UP_AFTER_MS: u64 = 3 * 24 * 3_600_000;
+/// A batch still looking after this long sends what it has: the rest stay for the next one.
+const BATCH_BUDGET: std::time::Duration = std::time::Duration::from_secs(45);
 
 fn lane(acct: &str) -> String {
     format!("haven/self/{}/", acct.to_lowercase())
@@ -112,9 +116,15 @@ pub struct KeyWant {
 pub struct KeyJob {
     pub request_at: u64,
     pub run: String,
-    /// `(circle, ref)` still to go, in reverse: the next one is at the end.
+    /// `(circle, ref)` not looked up yet, in reverse: the next one is at the end.
     #[serde(default)]
     pub left: Vec<(String, String)>,
+    /// Set aside because something that may hold them did not answer, longest-waiting retry first.
+    #[serde(default)]
+    pub later: Vec<SetAside>,
+    /// The last pass that saw this job's request still open.
+    #[serde(default)]
+    pub touched: u64,
     #[serde(default)]
     pub total: u32,
     #[serde(default)]
@@ -123,6 +133,21 @@ pub struct KeyJob {
     pub batches: u32,
     #[serde(default)]
     pub complete: bool,
+}
+
+impl KeyJob {
+    /// Blobs not settled yet.
+    pub fn waiting(&self) -> usize {
+        self.left.len() + self.later.len()
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct SetAside {
+    pub circle: String,
+    pub reference: String,
+    /// When it was first set aside.
+    pub since: u64,
 }
 
 /// What looking for one blob's key came to.
@@ -267,16 +292,6 @@ impl Engine {
         let me = self.social.my_device_node_hex().to_lowercase();
         let mine: Vec<String> =
             self.social.device_node_ids_for(acct.clone()).into_iter().map(|d| d.to_lowercase()).collect();
-        let now = now_ms();
-        {
-            let mut p = self.prefs.lock();
-            let before = p.media_key_jobs.len();
-            p.media_key_jobs
-                .retain(|_, j| j.run.parse::<u64>().unwrap_or(0) > now.saturating_sub(ABANDONED_JOB_MS));
-            if p.media_key_jobs.len() != before {
-                let _ = p.save(&self.paths);
-            }
-        }
         let mut did = false;
         for key in self.lane_list(&request_prefix(&acct)).await {
             let device = key.rsplit('/').next().unwrap_or("").to_lowercase();
@@ -319,15 +334,29 @@ impl Engine {
                     }
                 }
             };
-            if job.complete {
-                continue;
+            job.touched = now_ms();
+            if !job.complete {
+                did |= self.run_key_job(&mut job, &acct, &device, &me).await;
             }
-            did |= self.run_key_job(&mut job, &acct, &device, &me).await;
             let mut p = self.prefs.lock();
             p.media_key_jobs.insert(device, job);
             let _ = p.save(&self.paths);
         }
+        self.drop_abandoned_key_jobs();
         did
+    }
+
+    /// Jobs whose request no pass has seen for days: the asking device is gone. A job still being
+    /// asked for is kept however old it is, so it is never worked through a second time.
+    fn drop_abandoned_key_jobs(&self) {
+        let cutoff = now_ms().saturating_sub(ABANDONED_JOB_MS);
+        let mut p = self.prefs.lock();
+        let before = p.media_key_jobs.len();
+        p.media_key_jobs
+            .retain(|_, j| j.touched.max(j.run.parse::<u64>().unwrap_or(0)) > cutoff);
+        if p.media_key_jobs.len() != before {
+            let _ = p.save(&self.paths);
+        }
     }
 
     async fn another_source_sends_keys(self: &Arc<Self>, acct: &str, target: &str, request: u64, me: &str) -> bool {
@@ -346,20 +375,37 @@ impl Engine {
     async fn run_key_job(self: &Arc<Self>, job: &mut KeyJob, acct: &str, device: &str, me: &str) -> bool {
         let mut did = false;
         for _ in 0..BATCHES_PER_PASS {
-            if job.left.is_empty() {
+            if job.waiting() == 0 {
                 break;
             }
-            let take = KEY_BATCH.min(job.left.len());
+            // New blobs first; the ones set aside once every other has had its turn.
+            let retrying = job.left.is_empty();
+            let batch: Vec<(String, String, Option<u64>)> = if retrying {
+                job.later.iter().take(KEY_BATCH).map(|a| (a.circle.clone(), a.reference.clone(), Some(a.since))).collect()
+            } else {
+                job.left.iter().rev().take(KEY_BATCH).map(|(c, r)| (c.clone(), r.clone(), None)).collect()
+            };
             let mut entries = Vec::new();
+            let mut set_aside = Vec::new();
             let mut missing = 0;
-            for (circle, reference) in job.left[job.left.len() - take..].iter().rev() {
-                match self.find_item_key(circle, reference).await {
+            let mut looked = 0;
+            let started = std::time::Instant::now();
+            for (circle, reference, since) in batch {
+                if looked > 0 && started.elapsed() >= BATCH_BUDGET {
+                    break;
+                }
+                looked += 1;
+                match self.find_item_key(&circle, &reference).await {
                     Found::Key(k) => entries.push(k),
                     Found::Missing => missing += 1,
-                    // Leave the whole batch for a pass that can reach the relay.
                     Found::Unreachable => {
-                        self.put_key_manifest(job, acct, device, me).await;
-                        return did;
+                        let now = now_ms();
+                        let since = since.unwrap_or(now);
+                        if now.saturating_sub(since) >= GIVE_UP_AFTER_MS {
+                            missing += 1;
+                        } else {
+                            set_aside.push(SetAside { circle, reference, since });
+                        }
                     }
                 }
             }
@@ -373,12 +419,22 @@ impl Engine {
                 }
                 job.batches += 1;
             }
-            job.left.truncate(job.left.len() - take);
+            if retrying {
+                job.later.drain(..looked);
+            } else {
+                job.left.truncate(job.left.len() - looked);
+            }
+            let settled = set_aside.len() < looked;
+            job.later.append(&mut set_aside);
             job.missing += missing;
-            did = true;
             self.put_key_manifest(job, acct, device, me).await;
+            // Nothing in it could be asked about: another batch now would fare no better.
+            if !settled {
+                break;
+            }
+            did = true;
         }
-        if job.left.is_empty() && !job.complete {
+        if job.waiting() == 0 && !job.complete {
             job.complete = true;
             self.put_key_manifest(job, acct, device, me).await;
             log::info!("media keys: sent, {} blobs, {} without a key", job.total, job.missing);
@@ -397,7 +453,7 @@ impl Engine {
             complete: job.complete,
             updated_at: now_ms(),
             total: job.total,
-            done: job.total.saturating_sub(job.left.len() as u32),
+            done: job.total.saturating_sub(job.waiting() as u32),
             missing: job.missing,
         };
         if let Ok(body) = serde_json::to_vec(&m) {
@@ -432,16 +488,31 @@ impl Engine {
                 Err(_) => unreachable = true,
             }
         }
+        let hosted = self.relay_host.lock().as_ref().map(|h| h.node_id_hex());
+        let (me, my_device) = (self.social.my_node_hex(), self.social.my_device_node_hex());
         for node_hex in self.media_dests(circle_id) {
             if node_hex.starts_with("s3:") {
                 continue;
             }
+            // Our own hosted store: read it directly, we cannot dial ourselves.
+            if hosted.as_deref() == Some(node_hex.as_str()) {
+                if let Some(k) = self.item_key_from_own_store(reference) {
+                    return Found::Key(k);
+                }
+                continue;
+            }
+            if me.eq_ignore_ascii_case(&node_hex) || my_device.eq_ignore_ascii_case(&node_hex) {
+                continue;
+            }
             let Some((urls, token)) = self.relay_http_reachable(&node_hex) else {
                 // No HTTP front door: the iroh lane reads whole blobs.
-                if let Some(client) = self.relay_client_for(&node_hex).await {
-                    if let Some(k) = self.item_key_over_iroh(&client, reference).await {
-                        return Found::Key(k);
-                    }
+                match self.relay_client_for(&node_hex).await {
+                    Some(client) => match self.item_key_over_iroh(&client, reference).await {
+                        Ok(Some(k)) => return Found::Key(k),
+                        Ok(None) => {}
+                        Err(()) => unreachable = true,
+                    },
+                    None => unreachable = true,
                 }
                 continue;
             };
@@ -468,20 +539,49 @@ impl Engine {
         }
     }
 
-    async fn item_key_over_iroh(self: &Arc<Self>, client: &RelayClient, reference: &str) -> Option<Vec<u8>> {
-        let head = client.get(Self::media_key(reference)).await?;
+    fn item_key_from_own_store(&self, reference: &str) -> Option<Vec<u8>> {
+        let host = self.relay_host.lock().clone()?;
+        let head = host.local_get(Self::media_key(reference))?;
         let sealed = match Self::parse_manifest(&head) {
             Some(count) => {
-                let last = client.get(Self::media_chunk_key(reference, count - 1)).await?;
+                let last = host.local_get(Self::media_chunk_key(reference, count.checked_sub(1)?))?;
+                let before = count.checked_sub(2).and_then(|i| host.local_get(Self::media_chunk_key(reference, i)));
+                join_tail(before, last)
+            }
+            None => head,
+        };
+        self.social.item_key_from_tail(sealed)
+    }
+
+    /// `Ok(None)`: the relay answered and has no key to give for this blob. `Err`: it did not
+    /// answer.
+    async fn item_key_over_iroh(self: &Arc<Self>, client: &RelayClient, reference: &str) -> Result<Option<Vec<u8>>, ()> {
+        let Some(head) = Self::iroh_read(client, Self::media_key(reference)).await? else { return Ok(None) };
+        let sealed = match Self::parse_manifest(&head) {
+            Some(count) => {
+                let Some(last) = Self::iroh_read(client, Self::media_chunk_key(reference, count - 1)).await? else {
+                    return Ok(None);
+                };
                 let before = match count.checked_sub(2) {
-                    Some(i) => client.get(Self::media_chunk_key(reference, i)).await,
+                    Some(i) => Self::iroh_read(client, Self::media_chunk_key(reference, i)).await?,
                     None => None,
                 };
                 join_tail(before, last)
             }
             None => head,
         };
-        self.social.item_key_from_tail(sealed)
+        Ok(self.social.item_key_from_tail(sealed))
+    }
+
+    /// The client's `get` folds a failure into "not held"; `has` surfaces it.
+    async fn iroh_read(client: &RelayClient, key: String) -> Result<Option<Vec<u8>>, ()> {
+        if let Some(bytes) = client.get(key.clone()).await {
+            return Ok(Some(bytes));
+        }
+        match client.has(key).await {
+            Ok(false) => Ok(None),
+            _ => Err(()),
+        }
     }
 
     /// `Ok(None)`: the relay answered and has no key to give for this blob.

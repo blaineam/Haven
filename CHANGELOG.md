@@ -20,6 +20,15 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   the account key reads the history pages and opens old media.
 
 ### Fixed
+- **One relay that doesn't answer no longer stops a linked browser getting the keys to your other
+  older photos and videos.** What that relay might hold is set aside and asked about again, and
+  everything else is sent. After three days without an answer those are counted as unavailable.
+  (iPhone, Mac, Windows, Linux and Android.)
+- **iPhone: the screen no longer stays on while Haven keeps retrying a relay that is away.** Only
+  keys that were actually sent count as a transfer in progress.
+- **Windows, Linux, iPhone and Mac: an offline relay is no longer read as not having a photo.**
+  When a relay had no web address in use and couldn't be reached directly, its older photos and
+  videos could be written off for good. Haven now waits for it to answer.
 - **CI: the desktop workflow's Flatpak build works again** when Flathub has a newer runtime than
   the build image. It now takes the same step the release build already did.
 - **Microsoft Store tooling:** the command-line submit now sends the Windows release notes, not the

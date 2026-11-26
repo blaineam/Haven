@@ -2225,23 +2225,30 @@ enum SharedStore {
     static func findItemKey(ref: String, circleId: String,
                             unwrap: @escaping (Data) async -> Data?) async -> ItemKeyLookup {
         let sources = await mediaSources(circleIds: [circleId])
-        // A relay whose address is parked as failing was left out above: not having asked it is
-        // not the same as it not holding the blob.
-        var unanswered = sources.isEmpty || mediaDests(circleId).contains { node in
-            guard let http = RelayMailboxStore.shared.httpInterface(node) else { return false }
-            return http.urls.allSatisfy { httpUrlBad($0) }
-        }
+        var unanswered = sources.isEmpty
+        // Relays that said whether they hold it. Any other one (its address parked as failing, no
+        // way to dial it, a read that failed) was not asked, which is not the same as not
+        // holding the blob.
+        var answered = Set<String>()
+        if RelayHost.shared.serving { answered.insert(RelayHost.shared.nodeId) }
         for source in sources {
-            if case .http(let base, let token, _) = source {
+            if case .http(let base, let token, let node) = source {
                 switch await itemKeyOverHttp(base, token, ref: ref, unwrap: unwrap) {
                 case .success(let entry?): return .found(entry)
-                case .success(nil): continue
+                case .success(nil): answered.insert(node); continue
                 case .failure(let error):
                     if !(error is RelayForbidden) { markHttpUrlBad(base) }
                     unanswered = true
                 }
             } else {
-                guard let head = await fetch(source, key(ref)) else { continue }
+                guard let head = await fetch(source, key(ref)) else {
+                    // A dialed relay's `get` folds a failure into "not held"; `has` surfaces it.
+                    if case .relay(let client, let node) = source,
+                       (try? await client.has(key: key(ref))) == false {
+                        answered.insert(node)
+                    }
+                    continue
+                }
                 var sealed = head
                 if let count = parseManifest(head) {
                     guard let last = await fetch(source, chunkKey(ref, count - 1)) else { continue }
@@ -2249,8 +2256,10 @@ enum SharedStore {
                     sealed = HistoryHandoffWire.joinTail(before: before, last: last)
                 }
                 if let entry = await unwrap(sealed) { return .found(entry) }
+                if case .relay(_, let node) = source { answered.insert(node) }
             }
         }
+        if mediaDests(circleId).contains(where: { !answered.contains($0) }) { unanswered = true }
         return unanswered ? .unreachable : .missing
     }
 

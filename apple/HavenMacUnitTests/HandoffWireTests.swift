@@ -199,6 +199,81 @@ final class HandoffWireTests: XCTestCase {
         XCTAssertNil(wire.relayData(manifestKey))
     }
 
+    /// One relay that never answers must not hold back the keys for everything else, and what only
+    /// it might hold must not be written off as having no key.
+    func testARelayThatNeverAnswersDoesNotHoldBackTheOtherKeys() async throws {
+        let store = await Harness.feed()
+        let seed = try XCTUnwrap(AccountStore.storedSeed())
+        let acct = AccountStore.currentNodeHex()
+        let me = DeviceKeyStore.deviceNodeHex().lowercased()
+        let tag = UUID().uuidString.prefix(8).lowercased()
+        let friend = Peer(byte: 0xD8, name: "Half a library")
+        await friend.befriend(store)
+
+        let second = String(repeating: "e3", count: 32)
+        let r = RelayMailboxStore.shared
+        r.add(circleId: "default", nodeHex: second)
+        r.setHttpInterface(second, urls: [FakeWire.relay2Base], token: "tok2")
+        defer { r.eraseNow(second); r.dropErased(second); r.unforget(second) }
+        wire.unreachable2 = true
+
+        let photo = Data(repeating: 9, count: 90_000)
+        let heldRef = "img_d27held\(tag)", strandedRef = "img_d27stranded\(tag)"
+        let sealed = try friend.engine.sealCircleMedia(circleId: "default", data: photo)
+        wire.putRelay("haven/media/\(heldRef)", sealed)
+        // The stranded one is newer, so it is looked up first.
+        let now = HistoryHandoffWire.nowMs()
+        await friend.post("held \(tag)", into: store, createdAt: now - 60_000, media: [heldRef])
+        await friend.post("stranded \(tag)", into: store, createdAt: now - 1_000, media: [strandedRef])
+
+        let deviceByte: UInt8 = 0x74
+        let sib = try Sibling(seed: seed, deviceByte: deviceByte, adopting: await store.ownRosterWire())
+        _ = await store.ingestOwnDeviceRoster(sib.roster)
+        let accountBundle = try XCTUnwrap(store.myPublicBundle())
+        let browser = try HavenSocial.newSeedless(accountPublicBundle: accountBundle,
+                                                  deviceSeed: Data((0..<32).map { UInt8($0) &+ deviceByte }))
+        browser.createCircle(id: "default", name: "Your circle")
+
+        let ask = HistoryHandoffWire.KeysRequest(device: sib.deviceHex.lowercased(), at: now)
+        wire.putRelay(HistoryHandoffWire.keysRequestKey(acct, sib.deviceHex), try JSONEncoder().encode(ask))
+        let manifestKey = HistoryHandoffWire.keysManifestKey(acct, sib.deviceHex, me)
+        func manifest() -> HistoryHandoffWire.KeysManifest? {
+            wire.relayData(manifestKey).flatMap { try? JSONDecoder().decode(HistoryHandoffWire.KeysManifest.self, from: $0) }
+        }
+        var taken = 0
+        func takeKeys() {
+            guard let m = manifest() else { return }
+            while taken < m.batches,
+                  let grant = wire.relayData(HistoryHandoffWire.keysBatchKey(acct, sib.deviceHex, me, m.run, taken)) {
+                _ = browser.receiveItemKeys(grant: grant)
+                taken += 1
+            }
+        }
+        for _ in 0..<20 where browser.openCircleMedia(circleId: "default", sealed: sealed) == nil {
+            _ = await MediaKeysSender.shared.serve(until: Date().addingTimeInterval(60))
+            takeKeys()
+        }
+        XCTAssertEqual(browser.openCircleMedia(circleId: "default", sealed: sealed), photo,
+                       "the key behind the unanswerable one still went")
+        let waiting = try XCTUnwrap(manifest())
+        XCTAssertFalse(waiting.complete, "what the silent relay may hold is not written off")
+        XCTAssertLessThan(waiting.done, waiting.total)
+        XCTAssertTrue(MediaKeysSender.shared.hasJobs)
+
+        // It answers again (it holds nothing): now those count as having no key, in the same run.
+        wire.unreachable2 = false
+        var last = waiting
+        for _ in 0..<20 where !last.complete {
+            SharedStore.clearAllHttpUrlBad()
+            _ = await MediaKeysSender.shared.serve(until: Date().addingTimeInterval(60))
+            last = try XCTUnwrap(manifest())
+        }
+        XCTAssertTrue(last.complete)
+        XCTAssertEqual(last.run, waiting.run)
+        XCTAssertEqual(last.done, last.total)
+        XCTAssertGreaterThanOrEqual(last.missing, 1)
+    }
+
     func testAnAskCancelledByTheNewDeviceIsDroppedByTheSource() async throws {
         let store = await Harness.feed()
         let seed = try XCTUnwrap(AccountStore.storedSeed())

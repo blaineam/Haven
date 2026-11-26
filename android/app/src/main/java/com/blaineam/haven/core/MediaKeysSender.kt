@@ -27,25 +27,36 @@ class MediaKeysSender(
     private val now: () -> Long = System::currentTimeMillis,
     private val onProgress: () -> Unit = {},
 ) {
+    /** A blob set aside because something that may hold it did not answer, and since when. */
+    private data class Held(val circle: String, val ref: String, val since: Long)
+
+    /** One blob of a batch; [since] is set once it has been set aside. */
+    private data class Item(val circle: String, val ref: String, val since: Long?)
+
     private class Job(
         val device: String,
         val requestAt: Long,
         val run: String,
-        /** `(circle, ref)` still to go, newest first. */
+        /** `(circle, ref)` not looked up yet, newest first. */
         var left: List<Pair<String, String>>,
         val total: Int,
     ) {
         var missing = 0
         var batches = 0
         var complete = false
-        /** The last pass could not finish a batch. Looking the same blobs up again is not progress:
-         *  counted as such, it would keep the drive loop (and the screen) going for as long as one
-         *  relay stayed away. In memory only. */
-        var stalled = false
+        /** Set aside, longest-waiting retry first. */
+        var later: List<Held> = emptyList()
+        /** The last pass that saw this job's request still open. */
+        var touched = 0L
+
+        /** Blobs not settled yet. */
+        val waiting: Int get() = left.size + later.size
 
         fun toJson(): JSONObject = JSONObject().put("device", device).put("requestAt", requestAt).put("run", run)
             .put("left", JSONArray(left.map { JSONArray().put(it.first).put(it.second) }))
+            .put("later", JSONArray(later.map { JSONArray().put(it.circle).put(it.ref).put(it.since) }))
             .put("total", total).put("missing", missing).put("batches", batches).put("complete", complete)
+            .put("touched", touched)
 
         companion object {
             fun from(o: JSONObject): Job {
@@ -56,6 +67,12 @@ class MediaKeysSender(
                         it.missing = o.optInt("missing")
                         it.batches = o.optInt("batches")
                         it.complete = o.optBoolean("complete")
+                        it.touched = o.optLong("touched")
+                        o.optJSONArray("later")?.let { h ->
+                            it.later = (0 until h.length()).map { i ->
+                                h.getJSONArray(i).let { e -> Held(e.getString(0), e.getString(1), e.getLong(2)) }
+                            }
+                        }
                     }
             }
         }
@@ -92,7 +109,7 @@ class MediaKeysSender(
 
     /** `(done, total)` of the unfinished job, for the transfer banner. */
     fun progress(): Pair<Int, Int>? = synchronized(lock) {
-        jobs.values.firstOrNull { !it.complete }?.let { (it.total - it.left.size) to it.total }
+        jobs.values.firstOrNull { !it.complete }?.let { (it.total - it.waiting) to it.total }
     }
 
     /** "Cancel transfer": stop, and don't take these requests up again. */
@@ -124,8 +141,6 @@ class MediaKeysSender(
                 account = acct
                 save()
             }
-            val cutoff = now() - HW.ABANDONED_MS
-            if (jobs.values.removeAll { (it.run.toLongOrNull() ?: 0L) < cutoff }) save()
         }
         var did = false
         for (key in host.laneList(HW.keysRequestPrefix(acct))) {
@@ -152,10 +167,19 @@ class MediaKeysSender(
                 synchronized(lock) { jobs[device] = job; save() }
                 Log.i(TAG, "media keys: ${device.take(8)} asked — ${items.size} blobs")
             }
+            synchronized(lock) { job.touched = now(); save() }
             if (job.complete) continue
             if (run(job, acct, me, deadline)) did = true
         }
+        dropAbandoned()
         return did
+    }
+
+    /** Jobs whose request no pass has seen for days: the asking device is gone. A job still being
+     *  asked for is kept however old it is, so it is never worked through a second time. */
+    private fun dropAbandoned() = synchronized(lock) {
+        val cutoff = now() - HW.ABANDONED_MS
+        if (jobs.values.removeAll { maxOf(it.touched, it.run.toLongOrNull() ?: 0L) < cutoff }) save()
     }
 
     private suspend fun anotherSourceSends(acct: String, target: String, request: Long, me: String): Boolean {
@@ -172,54 +196,62 @@ class MediaKeysSender(
     private suspend fun run(job: Job, acct: String, me: String, deadline: Long): Boolean {
         var did = false
         var batchesThisPass = 0
-        while (batchesThisPass < BATCHES_PER_PASS && job.left.isNotEmpty() && now() < deadline) {
+        while (batchesThisPass < BATCHES_PER_PASS && job.waiting > 0 && now() < deadline) {
             batchesThisPass++
-            val batch = job.left.take(HW.KEY_BATCH)
+            // New blobs first; the ones set aside once every other has had its turn.
+            val retrying = job.left.isEmpty()
+            val batch = if (retrying) {
+                job.later.take(HW.KEY_BATCH).map { Item(it.circle, it.ref, it.since) }
+            } else {
+                job.left.take(HW.KEY_BATCH).map { Item(it.first, it.second, null) }
+            }
             val entries = ArrayList<ByteArray>()
+            val setAside = ArrayList<Held>()
             var missing = 0
+            var looked = 0
+            val started = now()
             for (group in batch.chunked(PARALLEL)) {
+                if (looked > 0 && now() - started >= BATCH_BUDGET_MS) break
                 if (host.suspendHeavyIO()) return did
                 val found = coroutineScope {
-                    group.map { (circle, ref) -> async { host.findItemKey(circle, ref) } }.awaitAll()
+                    group.map { async { host.findItemKey(it.circle, it.ref) } }.awaitAll()
                 }
-                for (f in found) when (f) {
+                for ((item, f) in group.zip(found)) when (f) {
                     is ItemKeyResult.Found -> entries.add(f.entry)
                     ItemKeyResult.Missing -> missing++
                     ItemKeyResult.Unreachable -> {
-                        // Leave the whole batch for a pass that can reach the relay.
-                        job.stalled = true
-                        if (isCurrent(job)) putManifest(job, acct, me)
-                        return did
+                        val since = item.since ?: now()
+                        if (now() - since >= GIVE_UP_AFTER_MS) missing++
+                        else setAside.add(Held(item.circle, item.ref, since))
                     }
                 }
+                looked += group.size
                 if (!isCurrent(job)) return did
-                if (!job.stalled) onProgress()
             }
             if (entries.isNotEmpty()) {
                 val grant = host.sealItemKeys(job.device, entries)
                 if (grant == null) {
                     Log.w(TAG, "media keys: could not seal a batch to ${job.device.take(8)}")
-                    job.stalled = true
                     return did
                 }
-                if (!host.lanePut(HW.keysBatchKey(acct, job.device, me, job.run, job.batches), grant)) {
-                    job.stalled = true
-                    return did
-                }
+                if (!host.lanePut(HW.keysBatchKey(acct, job.device, me, job.run, job.batches), grant)) return did
             }
             synchronized(lock) {
                 if (!isCurrent(job)) return did
                 if (entries.isNotEmpty()) job.batches++
-                job.left = job.left.drop(batch.size)
+                if (retrying) job.later = job.later.drop(looked) else job.left = job.left.drop(looked)
+                job.later = job.later + setAside
                 job.missing += missing
-                job.stalled = false
                 save()
             }
-            did = true
             putManifest(job, acct, me)
+            // Only a blob settled for good is progress. Asking again about the ones set aside is
+            // not: counted as such, it would hold the screen for as long as a relay stayed away.
+            if (setAside.size >= looked) break
+            did = true
             onProgress()
         }
-        if (job.left.isEmpty() && !job.complete && isCurrent(job)) {
+        if (job.waiting == 0 && !job.complete && isCurrent(job)) {
             synchronized(lock) { job.complete = true; save() }
             putManifest(job, acct, me)
             onProgress()
@@ -231,14 +263,18 @@ class MediaKeysSender(
 
     private suspend fun putManifest(job: Job, acct: String, me: String) {
         val m = HW.KeysManifest(job.run, me, job.requestAt, job.batches, job.complete, now(),
-            job.total, job.total - job.left.size, job.missing)
+            job.total, job.total - job.waiting, job.missing)
         host.lanePut(HW.keysManifestKey(acct, job.device, me), m.encode())
     }
 
-    private companion object {
-        const val TAG = "MediaKeys"
+    companion object {
+        /** A blob nobody could be asked about for this long is counted as having no key. */
+        const val GIVE_UP_AFTER_MS = 3 * 24 * 3_600_000L
+        /** A batch still looking after this long sends what it has: the rest stay for the next one. */
+        private const val BATCH_BUDGET_MS = 45_000L
+        private const val TAG = "MediaKeys"
         /** Batches worked through per pass, and blobs looked up at once within one. */
-        const val BATCHES_PER_PASS = 5
-        const val PARALLEL = 4
+        private const val BATCHES_PER_PASS = 5
+        private const val PARALLEL = 4
     }
 }

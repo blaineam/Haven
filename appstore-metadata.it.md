@@ -44,6 +44,10 @@ Novità della 2.0: il tuo relay fa il lavoro pesante con foto e video, così il 
 2.2.4 — L’invio delle foto meno recenti a un browser collegato è più affidabile.
 • Un relay che non risponde non blocca più il resto. Haven continua a chiedere ciò che potrebbe contenere, per un massimo di tre giorni, e invia tutto il resto.
 • Risolto: un relay offline poteva far rinunciare Haven per sempre ad alcune foto e video meno recenti.
+• Un browser collegato su haven.wemiller.com/app ora può aprire foto e video meno recenti. Dopo l’aggiornamento, apri Haven una volta sull’iPhone o sul Mac e tienilo aperto mentre invia l’accesso al browser (un browser collegato in precedenza lo chiede da solo). Poi il browser li carica dal tuo relay mentre scorri.
+• Le foto e i video recenti degli amici ora si aprono su un browser o dispositivo appena collegato.
+• Una foto non caricata nel browser viene riprovata.
+• Risolto: il messaggio di invio della cronologia al nuovo dispositivo restava sullo schermo a invio concluso.
 
 ## whats_new_windows
 2.2.4 — L’invio delle foto meno recenti a un browser collegato è più affidabile.

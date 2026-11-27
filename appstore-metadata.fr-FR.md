@@ -44,6 +44,10 @@ Nouveau en 2.0 : votre relay prend en charge photos et vidéos pour que votre t�
 2.2.4 — L’envoi d’anciennes photos à un navigateur associé est plus fiable.
 • Un relais qui ne répond pas ne bloque plus le reste. Haven continue de l’interroger sur ce qu’il peut contenir, pendant trois jours au plus, et envoie tout le reste.
 • Corrigé : un relais hors ligne pouvait amener Haven à abandonner définitivement certaines anciennes photos et vidéos.
+• Un navigateur associé sur haven.wemiller.com/app peut maintenant ouvrir les anciennes photos et vidéos. Après la mise à jour, ouvrez Haven une fois sur votre iPhone ou votre Mac et laissez-le ouvert pendant qu’il envoie l’accès au navigateur (un navigateur déjà associé le demande de lui-même). Le navigateur les charge ensuite depuis votre relais au fil du défilement.
+• Les photos et vidéos récentes de vos amis s’ouvrent désormais sur un navigateur ou un appareil nouvellement associé.
+• Une photo qui n’a pas pu se charger dans le navigateur est réessayée.
+• Corrigé : le message d’envoi de l’historique vers votre nouvel appareil restait affiché une fois l’envoi terminé.
 
 ## whats_new_windows
 2.2.4 — L’envoi d’anciennes photos à un navigateur associé est plus fiable.

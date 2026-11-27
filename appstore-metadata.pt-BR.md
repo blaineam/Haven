@@ -44,6 +44,10 @@ Novo no 2.0: seu relay faz o trabalho pesado com fotos e vídeos para o celular 
 2.2.4 — O envio de fotos antigas para um navegador vinculado está mais confiável.
 • Um relay que não responde não segura mais o restante. O Haven continua perguntando pelo que ele possa guardar, por até três dias, e envia todo o resto.
 • Corrigido: um relay offline podia fazer o Haven desistir de vez de algumas fotos e vídeos antigos.
+• Um navegador vinculado em haven.wemiller.com/app agora abre fotos e vídeos antigos. Depois de atualizar, abra o Haven uma vez no iPhone ou no Mac e mantenha-o aberto enquanto ele envia o acesso ao navegador (um navegador vinculado antes pede sozinho). Depois, o navegador os carrega do seu relay conforme você rola.
+• Fotos e vídeos recentes de amigos agora abrem em um navegador ou aparelho recém-vinculado.
+• Uma foto que não carregou no navegador é tentada de novo.
+• Corrigido: o aviso de envio do histórico para o novo aparelho continuava na tela depois do envio.
 
 ## whats_new_windows
 2.2.4 — O envio de fotos antigas para um navegador vinculado está mais confiável.

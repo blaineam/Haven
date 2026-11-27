@@ -44,6 +44,10 @@ Neu in 2.0: Dein Relay übernimmt die schwere Arbeit bei Fotos und Videos, damit
 2.2.4 – Das Senden älterer Fotos an einen verknüpften Browser ist zuverlässiger.
 • Ein Relay, das nicht antwortet, hält den Rest nicht mehr auf. Haven fragt bis zu drei Tage lang weiter nach dem, was dort liegen könnte, und sendet alles andere.
 • Behoben: Durch ein Relay, das offline war, konnte Haven manche älteren Fotos und Videos endgültig aufgeben.
+• Ein unter haven.wemiller.com/app verknüpfter Browser kann jetzt auch ältere Fotos und Videos öffnen. Öffne Haven nach dem Update einmal auf deinem iPhone oder Mac und lass es geöffnet, während es dem Browser den Zugriff sendet (ein früher verknüpfter Browser fragt selbst). Danach lädt der Browser sie beim Scrollen von deinem Relay.
+• Neuere Fotos und Videos von Freunden öffnen sich jetzt auf einem neu verknüpften Browser oder Gerät.
+• Ein Foto, das im Browser nicht geladen wurde, wird erneut versucht.
+• Behoben: „Verlauf wird an dein neues Gerät gesendet“ blieb nach dem Senden stehen.
 
 ## whats_new_windows
 2.2.4 – Das Senden älterer Fotos an einen verknüpften Browser ist zuverlässiger.

@@ -1,6 +1,11 @@
 #!/bin/bash
 # Xcode Cloud post-clone. Runs after the clone, BEFORE dependency resolution and xcodebuild.
 #
+# Releases: the workflow starts only for a push to main that changes apple/, core/ or ci_scripts/.
+# If every such commit since the last build was `[ci skip]` and the release's own commits touch only
+# notes, no build exists for the tag, and asking the API to start one has answered 500 (2.2.4).
+# Then push a real change under one of those folders and run apple-store.yml for that commit.
+#
 # Why this file has to exist at all: three build inputs are deliberately gitignored, so a fresh
 # clone cannot build without regenerating them —
 #   apple/*.xcodeproj    (.gitignore:14) — XcodeGen's output; committing it re-invites the

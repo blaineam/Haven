@@ -35,24 +35,20 @@ privato,crittografato,famiglia,amici,messaggi sicuri,offline,chiamate,senza pubb
 Novità della 2.0: il tuo relay fa il lavoro pesante con foto e video, così il telefono resta fresco, e vedi sempre chi raggiunge un post. Sempre gratis.
 
 ## whats_new
-2.2.3 — Foto e video ora si caricano in un browser collegato.
-• Un browser collegato su haven.wemiller.com/app ora può aprire foto e video meno recenti. Dopo l’aggiornamento, apri Haven una volta sull’iPhone o sul Mac e tienilo aperto mentre invia l’accesso al browser (un browser collegato in precedenza lo chiede da solo). Poi il browser li carica dal tuo relay mentre scorri.
-• Le foto e i video recenti degli amici ora si aprono su un browser o dispositivo appena collegato.
-• Una foto non caricata nel browser viene riprovata.
-• Risolto: il messaggio di invio della cronologia al nuovo dispositivo restava sullo schermo a invio concluso.
+2.2.4 — L’invio delle foto meno recenti a un browser collegato è più affidabile.
+• Un relay che non risponde non blocca più il resto. Haven continua a chiedere ciò che potrebbe contenere, per un massimo di tre giorni, e invia tutto il resto.
+• Risolto: un relay offline poteva far rinunciare Haven per sempre ad alcune foto e video meno recenti.
+• Risolto: lo schermo dell’iPhone restava acceso mentre Haven aspettava un relay assente.
 
 ## whats_new_macos
-2.2.3 — Foto e video ora si caricano in un browser collegato.
-• Un browser collegato su haven.wemiller.com/app ora può aprire foto e video meno recenti. Dopo l’aggiornamento, apri Haven una volta sull’iPhone o sul Mac e tienilo aperto mentre invia l’accesso al browser (un browser collegato in precedenza lo chiede da solo). Poi il browser li carica dal tuo relay mentre scorri.
-• Le foto e i video recenti degli amici ora si aprono su un browser o dispositivo appena collegato.
-• Una foto non caricata nel browser viene riprovata.
-• Risolto: il messaggio di invio della cronologia al nuovo dispositivo restava sullo schermo a invio concluso.
+2.2.4 — L’invio delle foto meno recenti a un browser collegato è più affidabile.
+• Un relay che non risponde non blocca più il resto. Haven continua a chiedere ciò che potrebbe contenere, per un massimo di tre giorni, e invia tutto il resto.
+• Risolto: un relay offline poteva far rinunciare Haven per sempre ad alcune foto e video meno recenti.
 
 ## whats_new_windows
-2.2.3 — Foto e video ora si caricano in un browser collegato.
-• Un browser collegato su haven.wemiller.com/app ora può aprire foto e video meno recenti. Dopo l’aggiornamento, apri Haven una volta su questo computer, sull’iPhone o sul Mac e tienilo aperto mentre invia l’accesso al browser (un browser collegato in precedenza lo chiede da solo). Poi il browser li carica dal tuo relay mentre scorri.
-• Le foto e i video recenti degli amici ora si aprono su un browser o dispositivo appena collegato.
-• Una foto non caricata nel browser viene riprovata.
+2.2.4 — L’invio delle foto meno recenti a un browser collegato è più affidabile.
+• Un relay che non risponde non blocca più il resto. Haven continua a chiedere ciò che potrebbe contenere, per un massimo di tre giorni, e invia tutto il resto.
+• Risolto: un relay offline poteva far rinunciare Haven per sempre ad alcune foto e video meno recenti.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

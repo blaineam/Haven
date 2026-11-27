@@ -1,4 +1,3 @@
-2.2.3 — Fotos en un navegador vinculado.
-• Las fotos y videos recientes de tus amigos ya se abren en navegadores y dispositivos recién vinculados.
-• Las fotos que no cargaron en el navegador se reintentan.
-• Las fotos antiguas se abren en el navegador tras abrir Haven una vez en un iPhone, Mac o equipo actualizado de tu cuenta. Esta app aún no puede enviar ese acceso.
+2.2.4 — Este teléfono ya puede ayudar a un navegador vinculado.
+• Un teléfono Android con la clave de tu cuenta puede enviar a un navegador vinculado el historial reciente y el acceso a fotos y videos antiguos. Mantén Haven abierto.
+• Un iPhone nuevo puede recibir su historial desde este teléfono. Un relé sin respuesta ya no frena lo demás.

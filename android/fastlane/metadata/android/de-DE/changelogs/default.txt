@@ -1,4 +1,3 @@
-2.2.3 – Fotos im verknüpften Browser.
-• Neuere Fotos und Videos von Freunden öffnen sich auf neu verknüpften Browsern und Geräten.
-• Nicht geladene Fotos im Browser werden erneut versucht.
-• Ältere Fotos öffnen sich im Browser, nachdem Haven auf einem aktualisierten iPhone, Mac oder Computer deines Kontos einmal offen war. Diese App kann den Zugriff noch nicht senden.
+2.2.4 – Dieses Handy kann jetzt einem verknüpften Browser helfen.
+• Ein Android-Handy mit deinem Kontoschlüssel kann einem verknüpften Browser den neueren Verlauf und den Zugriff auf ältere Fotos und Videos senden. Lass Haven dabei geöffnet.
+• Ein neues iPhone kann seinen Verlauf von diesem Handy holen. Ein stummes Relay hält den Rest nicht mehr auf.

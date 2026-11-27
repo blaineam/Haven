@@ -1,4 +1,3 @@
-2.2.3 — Photos dans un navigateur associé.
-• Les photos et vidéos récentes de vos amis s’ouvrent sur un navigateur ou appareil nouvellement associé.
-• Les photos non chargées dans le navigateur sont réessayées.
-• Les anciennes photos s’y ouvrent après une ouverture de Haven sur un iPhone, Mac ou ordinateur à jour de votre compte. Cette app ne peut pas encore envoyer cet accès.
+2.2.4 — Ce téléphone peut aider un navigateur associé.
+• Un téléphone Android détenant la clé du compte peut envoyer à un navigateur associé l’historique récent et l’accès aux anciennes photos et vidéos. Laissez Haven ouvert.
+• Un nouvel iPhone peut y reprendre son historique. Un relais muet ne bloque plus le reste.

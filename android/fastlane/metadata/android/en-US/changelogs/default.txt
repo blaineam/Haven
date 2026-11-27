@@ -1,4 +1,3 @@
-2.2.3 — Photos in a linked browser.
-• Friends’ recent photos and videos now open in a newly linked browser or device.
-• A photo that failed to load in the browser is tried again.
-• Older photos open in a linked browser after an updated iPhone, Mac or computer on your account has Haven open once. This app can’t send that access yet.
+2.2.4 — This phone can now help a linked browser.
+• An Android phone with your account key can send recent history, and access to older photos and videos, to a browser you link. Keep Haven open while it sends.
+• A new iPhone can take its history from this phone. A silent relay no longer holds up the rest.

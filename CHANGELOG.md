@@ -9,6 +9,8 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+## 2.2.4 (2026-11-26)
+
 ### Added
 - **An Android phone can send your history and your older photos and videos to a linked browser**,
   as the iPhone, Mac and desktop apps do. If your only other device is an Android phone, a linked

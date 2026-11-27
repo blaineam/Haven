@@ -33,24 +33,20 @@ private,encrypted,family,friends,circle,secure,messaging,offline,stories,calls,n
 New in 2.0: your relay does the heavy lifting for photos and videos, so your phone stays cool — and you always see exactly who a post reaches. Still free.
 
 ## whats_new
-2.2.3 — Photos and videos now load in a linked browser.
-• A browser you link at haven.wemiller.com/app can now open older photos and videos. After updating, open Haven on your iPhone or Mac once and keep it open while it sends the browser access (a browser you linked earlier asks on its own). Then the browser loads them from your relay as you scroll.
-• Friends’ recent photos and videos now open in a newly linked browser or device.
-• A photo that failed to load in the browser is tried again.
-• Fixed: “Sending history to your new device” stayed on screen after sending was done.
+2.2.4 — Sending older photos to a linked browser is more reliable.
+• One relay that doesn’t answer no longer holds up the rest. Haven keeps asking about what it may hold, for up to three days, and sends everything else.
+• Fixed: an offline relay could make Haven give up on some older photos and videos for good.
+• Fixed: the iPhone screen stayed on while Haven waited for a relay that was away.
 
 ## whats_new_macos
-2.2.3 — Photos and videos now load in a linked browser.
-• A browser you link at haven.wemiller.com/app can now open older photos and videos. After updating, open Haven on your iPhone or Mac once and keep it open while it sends the browser access (a browser you linked earlier asks on its own). Then the browser loads them from your relay as you scroll.
-• Friends’ recent photos and videos now open in a newly linked browser or device.
-• A photo that failed to load in the browser is tried again.
-• Fixed: “Sending history to your new device” stayed on screen after sending was done.
+2.2.4 — Sending older photos to a linked browser is more reliable.
+• One relay that doesn’t answer no longer holds up the rest. Haven keeps asking about what it may hold, for up to three days, and sends everything else.
+• Fixed: an offline relay could make Haven give up on some older photos and videos for good.
 
 ## whats_new_windows
-2.2.3 — Photos and videos now load in a linked browser.
-• A browser you link at haven.wemiller.com/app can now open older photos and videos. After updating, open Haven on this computer or your iPhone or Mac once and keep it open while it sends the browser access (a browser you linked earlier asks on its own). Then the browser loads them from your relay as you scroll.
-• Friends’ recent photos and videos now open in a newly linked browser or device.
-• A photo that failed to load in the browser is tried again.
+2.2.4 — Sending older photos to a linked browser is more reliable.
+• One relay that doesn’t answer no longer holds up the rest. Haven keeps asking about what it may hold, for up to three days, and sends everything else.
+• Fixed: an offline relay could make Haven give up on some older photos and videos for good.
 
 ## whats_new_previous
 2.0.2 — Optimized for iPhone Duo. Opened flat on a dual-screen phone, and on iPad, the feed and profile now sit in a centered column, so photos and videos are no longer huge and you scroll less.
@@ -69,10 +65,11 @@ https://wemiller.com/
 https://wemiller.com/privacy/
 
 ## review_notes
-WHAT IS NEW IN 2.2.3
-Media in a linked web browser. Security-relevant; no new permissions, entitlements or data collection.
-- A linked browser (one of the member's own devices, approved by name) could not open older media: it never holds the account key. Once, a device that does sends it each older item's own content key, signed by the account and encrypted to that browser only (relays cannot read it). Each key opens one item; removing the browser stops all new access. Modelled and checked with a protocol prover.
-- Fixes: friends' recent media opens on newly linked devices; failed loads retry; a transfer banner now clears when sending ends.
+WHAT IS NEW IN 2.2.4
+Reliability fixes to sending older media to a member's own linked browser (the 2.2.3 feature). No change to encryption, who can read anything, permissions, entitlements or data collection.
+- A relay that does not answer no longer holds back the other items. Those it may hold are retried for up to three days, then counted as unavailable.
+- An offline relay is no longer read as not having an item.
+- iPhone: only real progress now keeps the screen on, not repeated retries.
 
 Haven is a serverless, peer-to-peer, end-to-end encrypted social app for small private circles. There is no central server and no login.
 

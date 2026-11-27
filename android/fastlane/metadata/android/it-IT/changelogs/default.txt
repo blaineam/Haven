@@ -1,4 +1,3 @@
-2.2.3 — Foto in un browser collegato.
-• Le foto e i video recenti degli amici si aprono su browser e dispositivi appena collegati.
-• Le foto non caricate nel browser vengono riprovate.
-• Le foto meno recenti si aprono nel browser dopo aver aperto Haven una volta su un iPhone, Mac o computer aggiornato del tuo account. Questa app non può ancora inviare l’accesso.
+2.2.4 — Questo telefono ora può aiutare un browser collegato.
+• Un telefono Android con la chiave del tuo account può inviare a un browser collegato la cronologia recente e l’accesso a foto e video meno recenti. Tieni aperto Haven.
+• Un nuovo iPhone può riprendere la cronologia da questo telefono. Un relay muto non blocca più il resto.

@@ -87,8 +87,8 @@ or `1.0` publishes fully live (`status=completed`).
 
 ## Apple (iOS + macOS → `.github/workflows/apple-store.yml`)
 
-Xcode Cloud still does **every** Apple build — it is the only place Haven's iOS/macOS binaries come
-from, and a push to `main` that touches `apple/`, `core/` or `ci_scripts/` lands on TestFlight
+Xcode Cloud normally does every Apple build (the fallback is a local build: see
+[RELEASING.md](RELEASING.md), "When Xcode Cloud can't build"), and a push to `main` that touches `apple/`, `core/` or `ci_scripts/` lands on TestFlight
 internal on its own. What the tag adds is the App Store **submission**:
 
 | Step | Who | When |

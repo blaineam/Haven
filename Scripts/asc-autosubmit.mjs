@@ -5,7 +5,11 @@
  *
  *   Scripts/asc-autosubmit.mjs --version 1.6.1 --commit <sha> [--tag v1.6.1]
  *       [--platforms IOS,MAC_OS] [--wait-build 120] [--wait-process 45]
- *       [--notes-dir .] [--no-submit] [--dry-run]
+ *       [--notes-dir .] [--no-submit] [--dry-run] [--build-number N]
+ *
+ * --build-number N: the builds were archived on a Mac and already uploaded under build number N
+ * (docs/RELEASING.md, "When Xcode Cloud can't build"). Skips steps 1 and 2's Xcode Cloud run; ASC
+ * does not record a commit for such a build, so --commit is then only the operator's statement.
  *
  * What it does, in order (every step idempotent — re-running after a hiccup is safe):
  *   1. Find the Xcode Cloud build run whose source commit is `--commit`. If XCC never ran it
@@ -54,6 +58,7 @@ function parseArgs(argv) {
 			case '--bundle-id': a.bundleId = argv[++i]; break;
 			case '--version': a.version = argv[++i]; break;
 			case '--commit': a.commit = argv[++i]; break;
+			case '--build-number': a.buildNumber = argv[++i] ?? ''; break;
 			case '--tag': a.tag = argv[++i]; break;
 			case '--platforms': a.platforms = argv[++i].split(',').map((s) => s.trim().toUpperCase()).filter(Boolean); break;
 			case '--wait-build': a.waitBuild = Number(argv[++i]); break;
@@ -69,6 +74,7 @@ function parseArgs(argv) {
 	if (!a.version) die('--version required (X.Y.Z — the App Store marketing version)');
 	if (!/^\d+\.\d+\.\d+$/.test(a.version)) die(`--version ${a.version} is not plain X.Y.Z (an rc never reaches the App Store)`);
 	if (!a.commit) die('--commit required (the full sha the tag points at)');
+	if (a.buildNumber !== undefined && !/^\d+$/.test(a.buildNumber)) die('--build-number needs the number of an uploaded build');
 	if (!a.tag) a.tag = `v${a.version}`;
 	for (const p of a.platforms) if (!['IOS', 'MAC_OS', 'TV_OS', 'VISION_OS'].includes(p)) die(`unknown platform ${p}`);
 	return a;
@@ -223,6 +229,16 @@ async function waitValid(build, minutes) {
 		log(`${build.platform} build ${build.number}: ${at.processingState}…`);
 		await sleep(60_000);
 	}
+}
+
+/** Builds uploaded from a Mac: found by marketing version + build number, one per platform. */
+async function uploadedBuilds(appId, version, number) {
+	const r = await api('GET', `/v1/builds?filter[app]=${appId}&filter[version]=${number}&filter[preReleaseVersion.version]=${version}&include=preReleaseVersion&limit=20&fields[builds]=version,processingState,usesNonExemptEncryption,preReleaseVersion&fields[preReleaseVersions]=platform,version`);
+	const pre = new Map((r.included || []).filter((x) => x.type === 'preReleaseVersions').map((x) => [x.id, x.attributes]));
+	return (r.data || []).map((b) => {
+		const p = pre.get(b.relationships?.preReleaseVersion?.data?.id) || {};
+		return { id: b.id, number: b.attributes.version, state: b.attributes.processingState, platform: p.platform, marketing: p.version, usesNonExemptEncryption: b.attributes.usesNonExemptEncryption };
+	});
 }
 
 // ── 3. version, notes, attach ──────────────────────────────────────────────────────────
@@ -458,8 +474,26 @@ async function main() {
 	if (!app) die(`No app for ${args.bundleId}`);
 	log(`${app.attributes.name} ${args.version} ← commit ${args.commit.slice(0, 10)} (${args.tag})${args.dryRun ? ' — DRY RUN' : ''}`);
 
+	const { builds, source } = args.buildNumber !== undefined
+		? { builds: await uploadedBuilds(app.id, args.version, args.buildNumber), source: `locally archived build ${args.buildNumber}` }
+		: await cloudBuilds(app.id, args);
+	if (!builds.length) die(`${source}: App Store Connect has no builds for it`);
+	const wrongVersion = builds.filter((b) => b.marketing && b.marketing !== args.version);
+	if (wrongVersion.length) die(`${source} built marketing version ${wrongVersion[0].marketing}, not ${args.version} — MARKETING_VERSION in apple/project.yml is out of step with the tag`);
+	const byPlatform = {};
+	for (const p of args.platforms) {
+		const b = builds.filter((x) => x.platform === p).sort((x, y) => Number(y.number) - Number(x.number))[0];
+		if (!b) die(`${source} has no ${p} build (got: ${builds.map((x) => `${x.platform} ${x.number}`).join(', ') || 'none'})`);
+		byPlatform[p] = await waitValid(b, args.waitProcess);
+		log(`${p}: build ${byPlatform[p].number} VALID`);
+	}
+	await shipBuilds(app, args, byPlatform, source);
+}
+
+/** The builds Xcode Cloud made for `args.commit`, starting a run if it never did. */
+async function cloudBuilds(appId, args) {
 	// 1. the run
-	const product = await ciProductFor(app.id);
+	const product = await ciProductFor(appId);
 	if (!product) die('no Xcode Cloud product for this app');
 	let run = await findRun(product.id, args.commit);
 	const workflow = await archiveWorkflow(product.id);
@@ -531,18 +565,12 @@ async function main() {
 	log(`run #${run.attributes.number} SUCCEEDED`);
 
 	// 2. the builds
-	let builds = await runBuilds(run.id);
+	const builds = await runBuilds(run.id);
 	if (!builds.length) die(`run #${run.attributes.number} uploaded no builds`);
-	const wrongVersion = builds.filter((b) => b.marketing && b.marketing !== args.version);
-	if (wrongVersion.length) die(`run #${run.attributes.number} built marketing version ${wrongVersion[0].marketing}, not ${args.version} — MARKETING_VERSION in apple/project.yml is out of step with the tag`);
-	const byPlatform = {};
-	for (const p of args.platforms) {
-		const b = builds.filter((x) => x.platform === p).sort((x, y) => Number(y.number) - Number(x.number))[0];
-		if (!b) die(`run #${run.attributes.number} has no ${p} build (got: ${builds.map((x) => `${x.platform} ${x.number}`).join(', ') || 'none'})`);
-		byPlatform[p] = await waitValid(b, args.waitProcess);
-		log(`${p}: build ${byPlatform[p].number} VALID`);
-	}
+	return { builds, source: `Xcode Cloud run #${run.attributes.number}` };
+}
 
+async function shipBuilds(app, args, byPlatform, source) {
 	// RC path: the build reaching VALID *is* the deliverable — Xcode Cloud's post-action has
 	// already handed it to TestFlight, and a VALID build is TestFlight-installable. No App Store
 	// version, no notes, no review submission.
@@ -582,7 +610,7 @@ async function main() {
 			results.push(`${platform} ${args.version}: would attach build ${build.number} and submit`);
 		}
 	}
-	summary(`### App Store — ${app.attributes.name} ${args.version}\n- Xcode Cloud run #${run.attributes.number} (commit \`${args.commit.slice(0, 10)}\`)\n${results.map((r) => `- ${r}`).join('\n')}`);
+	summary(`### App Store — ${app.attributes.name} ${args.version}\n- ${source} (commit \`${args.commit.slice(0, 10)}\`)\n${results.map((r) => `- ${r}`).join('\n')}`);
 }
 
 main().catch((e) => die(e.message));

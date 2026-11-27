@@ -9,6 +9,10 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Changed
+- Release tooling: `Scripts/asc-autosubmit.mjs --build-number N` submits builds that were archived
+  and uploaded from a Mac, for when Xcode Cloud can't build a release (docs/RELEASING.md).
+
 ## 2.2.4 (2026-11-26)
 
 ### Added

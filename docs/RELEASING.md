@@ -193,6 +193,15 @@ Releases go out in **two hops: candidate, then promote.** Testers get the exact 
    submits the review submission. It is gated on three repo secrets (`ASC_API_KEY_ID`, `ASC_API_ISSUER_ID`,
    `ASC_API_KEY_P8` — the key needs **App Manager**) and skips with a notice until they exist.
 
+   **When Xcode Cloud can't build** (outage, refused runs, or a release whose commits touch nothing
+   it watches), build on a Mac running a released macOS and Xcode (Apple refuses beta ones). On a
+   clean checkout of the release commit: run `apple/ci_scripts/ci_post_clone.sh` with
+   `HAVEN_BUILD_WEB_CLIENT=1 CI_PRODUCT_PLATFORM=macOS` (Xcode Cloud's Mac app carries the web
+   client; a plain archive would drop Web access), set `CURRENT_PROJECT_VERSION` above every
+   uploaded build number, run `_shared/local-ci-archive.sh`, then
+   `Scripts/asc-autosubmit.mjs --version X.Y.Z --commit <sha> --build-number <n>`.
+   That path does not run the workflow's step that bumps `main` to the next version.
+
    **The notes gate:** `appstore-metadata.md`'s `## whats_new` must **start with the version**
    (`1.6.1 — …`) or the job fails instead of shipping last release's notes. A locale file that is
    still on an older version gets the English notes, loudly (summary + log) — translate first

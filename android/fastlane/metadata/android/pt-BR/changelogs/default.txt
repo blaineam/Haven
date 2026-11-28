@@ -1,3 +1,3 @@
-2.2.4 — Este celular agora ajuda um navegador vinculado.
-• Um celular Android com a chave da sua conta pode enviar a um navegador vinculado o histórico recente e o acesso a fotos e vídeos antigos. Mantenha o Haven aberto.
-• Um iPhone novo pode receber o histórico deste celular. Um relay sem resposta não segura o resto.
+2.2.5 — Os contatos sincronizam em todos os seus aparelhos, e os relays mantêm os vídeos inteiros.
+• Agora seus contatos sincronizam de forma confiável entre todos os seus aparelhos, e seus amigos mantêm nome e foto.
+• Os limites de armazenamento de um relay não apagam mais só parte de um vídeo, e abrir uma foto ou um vídeo impede que expire. Atualize o aparelho que hospeda seu relay. As partes já apagadas não são recuperadas.

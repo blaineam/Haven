@@ -1,3 +1,3 @@
-2.2.4 – Dieses Handy kann jetzt einem verknüpften Browser helfen.
-• Ein Android-Handy mit deinem Kontoschlüssel kann einem verknüpften Browser den neueren Verlauf und den Zugriff auf ältere Fotos und Videos senden. Lass Haven dabei geöffnet.
-• Ein neues iPhone kann seinen Verlauf von diesem Handy holen. Ein stummes Relay hält den Rest nicht mehr auf.
+2.2.5 — Kontakte werden auf all deinen Geräten synchronisiert, und Relays behalten Videos vollständig.
+• Deine Kontakte werden jetzt zuverlässig zwischen allen eigenen Geräten synchronisiert, sodass Freunde Namen und Bild behalten.
+• Speicherlimits eines Relays löschen nicht mehr nur einen Teil eines Videos, und wer ein Foto oder Video öffnet, verhindert, dass es abläuft. Aktualisiere das Gerät, auf dem dein Relay läuft. Bereits gelöschte Teile werden nicht wiederhergestellt.

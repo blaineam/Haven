@@ -1,3 +1,3 @@
-2.2.4 — This phone can now help a linked browser.
-• An Android phone with your account key can send recent history, and access to older photos and videos, to a browser you link. Keep Haven open while it sends.
-• A new iPhone can take its history from this phone. A silent relay no longer holds up the rest.
+2.2.5 — Contacts sync across your devices, and relays keep videos whole.
+• Your contacts now sync reliably between all your own devices, so friends keep their names and pictures.
+• A relay’s storage limits no longer delete part of a video, and opening a photo or video keeps it from expiring. Update the device that hosts your relay. Parts already deleted are not restored.

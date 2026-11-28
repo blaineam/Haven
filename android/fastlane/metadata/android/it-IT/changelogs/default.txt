@@ -1,3 +1,3 @@
-2.2.4 — Questo telefono ora può aiutare un browser collegato.
-• Un telefono Android con la chiave del tuo account può inviare a un browser collegato la cronologia recente e l’accesso a foto e video meno recenti. Tieni aperto Haven.
-• Un nuovo iPhone può riprendere la cronologia da questo telefono. Un relay muto non blocca più il resto.
+2.2.5 — I contatti si sincronizzano su tutti i tuoi dispositivi e i relay conservano i video interi.
+• Ora i contatti si sincronizzano in modo affidabile tra tutti i tuoi dispositivi: gli amici mantengono nome e foto.
+• I limiti di spazio di un relay non cancellano più solo una parte di un video, e aprire una foto o un video ne impedisce la scadenza. Aggiorna il dispositivo che ospita il tuo relay. Le parti già cancellate non vengono ripristinate.

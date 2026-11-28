@@ -35,24 +35,31 @@ privé,chiffré,famille,amis,cercle,sécurisé,messagerie,hors ligne,stories,app
 Nouveau en 2.0 : votre relay prend en charge photos et vidéos pour que votre téléphone reste frais, et vous voyez toujours qui atteint chaque publication. Gratuit.
 
 ## whats_new
-2.2.4 — L’envoi d’anciennes photos à un navigateur associé est plus fiable.
+2.2.5 — Vos contacts se synchronisent sur tous vos appareils, et les relais gardent les vidéos entières.
+• Vos contacts se synchronisent désormais de façon fiable entre tous vos appareils : vos amis gardent leur nom et leur photo.
+• Les limites de stockage d’un relais ne suppriment plus une partie seulement d’une vidéo, et ouvrir une photo ou une vidéo l’empêche d’expirer. Mettez à jour l’appareil qui héberge votre relais. Les parties déjà supprimées ne sont pas restaurées.
+• Haven dans le navigateur est maintenant sur wemiller.com/apps/haven/app (reliez à nouveau votre navigateur). Les vidéos, notes vocales et chansons s’y lisent, et les médias manquants sont demandés moins souvent.
 • Un relais qui ne répond pas ne bloque plus le reste. Haven continue de l’interroger sur ce qu’il peut contenir, pendant trois jours au plus, et envoie tout le reste.
 • Corrigé : un relais hors ligne pouvait amener Haven à abandonner définitivement certaines anciennes photos et vidéos.
 • Corrigé : l’écran de l’iPhone restait allumé pendant que Haven attendait un relais absent.
 
 ## whats_new_macos
-2.2.4 — L’envoi d’anciennes photos à un navigateur associé est plus fiable.
+2.2.5 — Vos contacts se synchronisent sur tous vos appareils, et les relais gardent les vidéos entières.
+• Vos contacts se synchronisent désormais de façon fiable entre tous vos appareils : vos amis gardent leur nom et leur photo.
+• Les limites de stockage d’un relais ne suppriment plus une partie seulement d’une vidéo, et ouvrir une photo ou une vidéo l’empêche d’expirer. Mettez à jour l’appareil qui héberge votre relais. Les parties déjà supprimées ne sont pas restaurées.
+• Haven dans le navigateur est maintenant sur wemiller.com/apps/haven/app (reliez à nouveau votre navigateur). Les vidéos, notes vocales et chansons s’y lisent, et les médias manquants sont demandés moins souvent.
 • Un relais qui ne répond pas ne bloque plus le reste. Haven continue de l’interroger sur ce qu’il peut contenir, pendant trois jours au plus, et envoie tout le reste.
 • Corrigé : un relais hors ligne pouvait amener Haven à abandonner définitivement certaines anciennes photos et vidéos.
-• Un navigateur associé sur haven.wemiller.com/app peut maintenant ouvrir les anciennes photos et vidéos. Après la mise à jour, ouvrez Haven une fois sur votre iPhone ou votre Mac et laissez-le ouvert pendant qu’il envoie l’accès au navigateur (un navigateur déjà associé le demande de lui-même). Le navigateur les charge ensuite depuis votre relais au fil du défilement.
+• Un navigateur associé sur wemiller.com/apps/haven/app peut maintenant ouvrir les anciennes photos et vidéos. Après la mise à jour, ouvrez Haven une fois sur votre iPhone ou votre Mac et laissez-le ouvert pendant qu’il envoie l’accès au navigateur (un navigateur déjà associé le demande de lui-même). Le navigateur les charge ensuite depuis votre relais au fil du défilement.
 • Les photos et vidéos récentes de vos amis s’ouvrent désormais sur un navigateur ou un appareil nouvellement associé.
 • Une photo qui n’a pas pu se charger dans le navigateur est réessayée.
 • Corrigé : le message d’envoi de l’historique vers votre nouvel appareil restait affiché une fois l’envoi terminé.
 
 ## whats_new_windows
-2.2.4 — L’envoi d’anciennes photos à un navigateur associé est plus fiable.
-• Un relais qui ne répond pas ne bloque plus le reste. Haven continue de l’interroger sur ce qu’il peut contenir, pendant trois jours au plus, et envoie tout le reste.
-• Corrigé : un relais hors ligne pouvait amener Haven à abandonner définitivement certaines anciennes photos et vidéos.
+2.2.5 — Vos contacts se synchronisent sur tous vos appareils, et les relais gardent les vidéos entières.
+• Vos contacts se synchronisent désormais de façon fiable entre tous vos appareils : vos amis gardent leur nom et leur photo.
+• Les limites de stockage d’un relais ne suppriment plus une partie seulement d’une vidéo, et ouvrir une photo ou une vidéo l’empêche d’expirer. Mettez à jour l’appareil qui héberge votre relais. Les parties déjà supprimées ne sont pas restaurées.
+• Cliquez sur une photo pour l’afficher en grand, utilisez les flèches dans les séries de photos et balayez les stories.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

@@ -35,24 +35,31 @@ privado,cifrado,familia,amigos,mensajería,seguro,sin conexión,llamadas,sin anu
 Novedad en 2.0: tu relay hace el trabajo pesado con fotos y vídeos para que tu móvil no se caliente, y siempre ves a quién llega cada publicación. Sigue siendo gratis.
 
 ## whats_new
-2.2.4 — El envío de fotos antiguas a un navegador vinculado es más fiable.
+2.2.5 — Tus contactos se sincronizan en todos tus dispositivos y los relés conservan los vídeos completos.
+• Tus contactos ahora se sincronizan de forma fiable entre todos tus dispositivos, así que tus amigos conservan su nombre y su foto.
+• Los límites de almacenamiento de un relé ya no borran solo parte de un vídeo, y abrir una foto o un vídeo evita que caduque. Actualiza el dispositivo que aloja tu relé. Las partes ya borradas no se recuperan.
+• Haven en el navegador está ahora en wemiller.com/apps/haven/app (vuelve a vincular tu navegador). Allí se reproducen vídeos, notas de voz y canciones, y el contenido que falta se pide con menos frecuencia.
 • Un relé que no responde ya no frena lo demás. Haven sigue preguntando por lo que pueda guardar, hasta tres días, y envía todo lo demás.
 • Corregido: un relé sin conexión podía hacer que Haven descartara para siempre algunas fotos y videos antiguos.
 • Corregido: la pantalla del iPhone seguía encendida mientras Haven esperaba a un relé ausente.
 
 ## whats_new_macos
-2.2.4 — El envío de fotos antiguas a un navegador vinculado es más fiable.
+2.2.5 — Tus contactos se sincronizan en todos tus dispositivos y los relés conservan los vídeos completos.
+• Tus contactos ahora se sincronizan de forma fiable entre todos tus dispositivos, así que tus amigos conservan su nombre y su foto.
+• Los límites de almacenamiento de un relé ya no borran solo parte de un vídeo, y abrir una foto o un vídeo evita que caduque. Actualiza el dispositivo que aloja tu relé. Las partes ya borradas no se recuperan.
+• Haven en el navegador está ahora en wemiller.com/apps/haven/app (vuelve a vincular tu navegador). Allí se reproducen vídeos, notas de voz y canciones, y el contenido que falta se pide con menos frecuencia.
 • Un relé que no responde ya no frena lo demás. Haven sigue preguntando por lo que pueda guardar, hasta tres días, y envía todo lo demás.
 • Corregido: un relé sin conexión podía hacer que Haven descartara para siempre algunas fotos y videos antiguos.
-• Un navegador vinculado en haven.wemiller.com/app ya puede abrir fotos y videos antiguos. Tras actualizar, abre Haven una vez en tu iPhone o Mac y mantenlo abierto mientras envía el acceso al navegador (un navegador vinculado antes lo pide solo). Después, el navegador los carga desde tu relé al desplazarte.
+• Un navegador vinculado en wemiller.com/apps/haven/app ya puede abrir fotos y videos antiguos. Tras actualizar, abre Haven una vez en tu iPhone o Mac y mantenlo abierto mientras envía el acceso al navegador (un navegador vinculado antes lo pide solo). Después, el navegador los carga desde tu relé al desplazarte.
 • Las fotos y los videos recientes de tus amigos ya se abren en un navegador o dispositivo recién vinculado.
 • Una foto que no se cargó en el navegador se vuelve a intentar.
 • Corregido: «Enviando el historial a tu nuevo dispositivo» seguía en pantalla después del envío.
 
 ## whats_new_windows
-2.2.4 — El envío de fotos antiguas a un navegador vinculado es más fiable.
-• Un relé que no responde ya no frena lo demás. Haven sigue preguntando por lo que pueda guardar, hasta tres días, y envía todo lo demás.
-• Corregido: un relé sin conexión podía hacer que Haven descartara para siempre algunas fotos y videos antiguos.
+2.2.5 — Tus contactos se sincronizan en todos tus dispositivos y los relés conservan los vídeos completos.
+• Tus contactos ahora se sincronizan de forma fiable entre todos tus dispositivos, así que tus amigos conservan su nombre y su foto.
+• Los límites de almacenamiento de un relé ya no borran solo parte de un vídeo, y abrir una foto o un vídeo evita que caduque. Actualiza el dispositivo que aloja tu relé. Las partes ya borradas no se recuperan.
+• Haz clic en una foto para verla en grande, usa las flechas en los grupos de fotos y desliza entre historias.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

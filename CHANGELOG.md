@@ -9,6 +9,8 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+## 2.2.5 (2026-11-27)
+
 ### Fixed (relay and media loading)
 - **A relay's storage limits no longer leave half a video.** The age and size limits worked file by
   file, and a video is a manifest plus chunk files, the first chunks the oldest: a limit could delete

@@ -35,24 +35,31 @@ privat,verschlüsselt,Familie,Freunde,sicher,Messenger,offline,Anrufe,ohne Werbu
 Neu in 2.0: Dein Relay übernimmt die schwere Arbeit bei Fotos und Videos, damit dein Handy kühl bleibt – und du siehst immer genau, wen ein Beitrag erreicht. Kostenlos.
 
 ## whats_new
-2.2.4 – Das Senden älterer Fotos an einen verknüpften Browser ist zuverlässiger.
+2.2.5 — Kontakte werden auf all deinen Geräten synchronisiert, und Relays behalten Videos vollständig.
+• Deine Kontakte werden jetzt zuverlässig zwischen allen eigenen Geräten synchronisiert, sodass Freunde Namen und Bild behalten.
+• Speicherlimits eines Relays löschen nicht mehr nur einen Teil eines Videos, und wer ein Foto oder Video öffnet, verhindert, dass es abläuft. Aktualisiere das Gerät, auf dem dein Relay läuft. Bereits gelöschte Teile werden nicht wiederhergestellt.
+• Haven im Browser ist jetzt unter wemiller.com/apps/haven/app erreichbar (Browser neu verknüpfen). Videos, Sprachnachrichten und Songs werden dort abgespielt, und fehlende Medien werden seltener angefragt.
 • Ein Relay, das nicht antwortet, hält den Rest nicht mehr auf. Haven fragt bis zu drei Tage lang weiter nach dem, was dort liegen könnte, und sendet alles andere.
 • Behoben: Durch ein Relay, das offline war, konnte Haven manche älteren Fotos und Videos endgültig aufgeben.
 • Behoben: Der iPhone-Bildschirm blieb an, während Haven auf ein nicht erreichbares Relay wartete.
 
 ## whats_new_macos
-2.2.4 – Das Senden älterer Fotos an einen verknüpften Browser ist zuverlässiger.
+2.2.5 — Kontakte werden auf all deinen Geräten synchronisiert, und Relays behalten Videos vollständig.
+• Deine Kontakte werden jetzt zuverlässig zwischen allen eigenen Geräten synchronisiert, sodass Freunde Namen und Bild behalten.
+• Speicherlimits eines Relays löschen nicht mehr nur einen Teil eines Videos, und wer ein Foto oder Video öffnet, verhindert, dass es abläuft. Aktualisiere das Gerät, auf dem dein Relay läuft. Bereits gelöschte Teile werden nicht wiederhergestellt.
+• Haven im Browser ist jetzt unter wemiller.com/apps/haven/app erreichbar (Browser neu verknüpfen). Videos, Sprachnachrichten und Songs werden dort abgespielt, und fehlende Medien werden seltener angefragt.
 • Ein Relay, das nicht antwortet, hält den Rest nicht mehr auf. Haven fragt bis zu drei Tage lang weiter nach dem, was dort liegen könnte, und sendet alles andere.
 • Behoben: Durch ein Relay, das offline war, konnte Haven manche älteren Fotos und Videos endgültig aufgeben.
-• Ein unter haven.wemiller.com/app verknüpfter Browser kann jetzt auch ältere Fotos und Videos öffnen. Öffne Haven nach dem Update einmal auf deinem iPhone oder Mac und lass es geöffnet, während es dem Browser den Zugriff sendet (ein früher verknüpfter Browser fragt selbst). Danach lädt der Browser sie beim Scrollen von deinem Relay.
+• Ein unter wemiller.com/apps/haven/app verknüpfter Browser kann jetzt auch ältere Fotos und Videos öffnen. Öffne Haven nach dem Update einmal auf deinem iPhone oder Mac und lass es geöffnet, während es dem Browser den Zugriff sendet (ein früher verknüpfter Browser fragt selbst). Danach lädt der Browser sie beim Scrollen von deinem Relay.
 • Neuere Fotos und Videos von Freunden öffnen sich jetzt auf einem neu verknüpften Browser oder Gerät.
 • Ein Foto, das im Browser nicht geladen wurde, wird erneut versucht.
 • Behoben: „Verlauf wird an dein neues Gerät gesendet“ blieb nach dem Senden stehen.
 
 ## whats_new_windows
-2.2.4 – Das Senden älterer Fotos an einen verknüpften Browser ist zuverlässiger.
-• Ein Relay, das nicht antwortet, hält den Rest nicht mehr auf. Haven fragt bis zu drei Tage lang weiter nach dem, was dort liegen könnte, und sendet alles andere.
-• Behoben: Durch ein Relay, das offline war, konnte Haven manche älteren Fotos und Videos endgültig aufgeben.
+2.2.5 — Kontakte werden auf all deinen Geräten synchronisiert, und Relays behalten Videos vollständig.
+• Deine Kontakte werden jetzt zuverlässig zwischen allen eigenen Geräten synchronisiert, sodass Freunde Namen und Bild behalten.
+• Speicherlimits eines Relays löschen nicht mehr nur einen Teil eines Videos, und wer ein Foto oder Video öffnet, verhindert, dass es abläuft. Aktualisiere das Gerät, auf dem dein Relay läuft. Bereits gelöschte Teile werden nicht wiederhergestellt.
+• Klicke ein Foto an, um es groß zu öffnen, nutze Pfeile bei Fotoreihen und wische durch Stories.
 
 ## marketing_url
 https://wemiller.com/apps/haven/

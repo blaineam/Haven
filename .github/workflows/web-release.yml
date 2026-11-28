@@ -6,9 +6,9 @@ name: web-release
 # that commit, drives it end to end in a browser, and publishes the two archives as a Release.
 #
 # The Release is never marked "latest": the desktop updater, the relay installer and everything
-# else that asks GitHub for the latest release keep getting the last full `v*` one. The project
-# site (static.yml) serves whichever is newer of the latest full release and the latest web one,
-# so the next full release takes over again by itself. The page at /app/ is still a tested,
+# else that asks GitHub for the latest release keep getting the last full `v*` one. The portfolio
+# serves whichever is newer of the latest full release and the latest web one at
+# wemiller.com/apps/haven/app/, so the next full release takes over again by itself. That page is a tested,
 # tagged build that anyone can compare with a public archive (Scripts/verify-web-site.mjs).
 
 on:
@@ -28,7 +28,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      actions: write
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -47,8 +46,13 @@ jobs:
             --title "Haven web client ${TAG#web-v}" \
             --notes "The browser client only. Installers and store apps are unchanged; see CHANGELOG.md." \
             haven-web-site.tar.gz haven-web-client.tar.gz
-      # A Release published with the workflow token starts no other workflow.
-      - name: Refresh the site's web client
+      # The web client is served at wemiller.com/apps/haven/app/ by the portfolio, whose deploy
+      # unpacks the newest release. A Release published with the workflow token starts no other
+      # workflow, so ask here. Without the token the portfolio's daily deploy picks it up.
+      - name: Refresh the web client's address
+        continue-on-error: true
         env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh workflow run static.yml --repo "$GITHUB_REPOSITORY" --ref main
+          GH_TOKEN: ${{ secrets.PORTFOLIO_DISPATCH_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then echo "::notice::PORTFOLIO_DISPATCH_TOKEN not set; the portfolio's daily deploy will pick this up"; exit 0; fi
+          gh api -X POST /repos/blaineam/blaineam.github.io/dispatches -f event_type=haven-web-client

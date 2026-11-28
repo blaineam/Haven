@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Haven in your browser has moved</title>
+<link rel="canonical" href="https://wemiller.com/apps/haven/app/">
+<style>
+  :root { color-scheme: light dark; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 16px; box-sizing: border-box; font: 1.05rem/1.5 system-ui, -apple-system, sans-serif; text-align: center; }
+</style>
+</head>
+<body>
+<div>
+<p>Haven in your browser is now at <a id="go" href="https://wemiller.com/apps/haven/app/">wemiller.com/apps/haven/app</a>.</p>
+<p>A browser linked at this old address has to be linked again there. Remove the old one from your devices in Haven on your phone.</p>
+</div>
+<script>
+  (function () {
+    var to = "https://wemiller.com/apps/haven/app/" + location.search + location.hash;
+    document.getElementById("go").href = to;
+    var left = navigator.serviceWorker
+      ? navigator.serviceWorker.getRegistrations().then(function (all) { return Promise.all(all.map(function (r) { return r.unregister(); })); })
+      : Promise.resolve();
+    // Time to read the line about linking again.
+    left.catch(function () {}).then(function () { setTimeout(function () { location.replace(to); }, 6000); });
+  })();
+</script>
+</body>
+</html>

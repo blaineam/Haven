@@ -62,8 +62,8 @@ that decides who can read.
 
 The same client can be served by an ordinary static web site: `web-client/build.sh` also writes
 `web-client/dist-site/`, a Release carries it as `haven-web-site.tar.gz`, and the project's own
-site can serve the build of the latest stable Release at `/app/` (a switch its owner holds, off
-until set: [`DECISIONS.md`](DECISIONS.md) D24; `Scripts/verify-web-site.mjs` checks what a site
+site serves the build of the newest Release at `/apps/haven/app/` ([`DECISIONS.md`](DECISIONS.md)
+D24; `Scripts/verify-web-site.mjs` checks what a site
 serves against a Release). It is for the person who cannot
 reach, or does not know, their relay's address: one address that does not change, a code on the
 screen, a phone to scan it.
@@ -84,8 +84,13 @@ What is different about such a page:
 
 If you host it yourself: give it an origin of its own (a host name that serves nothing else). A
 browser keeps what a page stores per origin, so any other page or script on the same origin could
-reach what the client stores there. That is why the project serves it from Haven's own address
-and the portfolio, which shares one origin among many pages, only redirects to it.
+reach what the client stores there. The project's own page does **not** do this any more: since
+2026-11-27 it is at `https://wemiller.com/apps/haven/app/`, sharing an origin with the rest of
+that site, by the owner's decision ([`DECISIONS.md`](DECISIONS.md) D24 says what that costs).
+
+Each build's code is in `r/<id>/`, named after its own bytes, so a host that caches scripts for a
+long time cannot serve a stale or half-updated client. Check what the project's page serves with
+`node Scripts/verify-web-site.mjs <unpacked haven-web-site.tar.gz> https://wemiller.com/apps/haven/app/`.
 
 What has to be true for it to work, said plainly:
 

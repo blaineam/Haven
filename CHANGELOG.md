@@ -9,6 +9,11 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Changed
+- **Haven in a browser has a new address: `wemiller.com/apps/haven/app/`.** The old one forwards
+  there. A browser linked at the old address has to be linked again. The new address shares its
+  origin with the rest of that site (DECISIONS D24).
+
 ### Fixed
 - **Haven in a browser: videos and voice notes play.** The page was handed them as `data:` links,
   which its security policy refuses for video and sound. They are now `blob:` links.

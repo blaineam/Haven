@@ -611,15 +611,24 @@ other device and loses new content when it is. The apps are not affected at all.
 - The site serves a tagged Release's archive, not a build of its own. That Release is the newest of the full ones and the web-client-only ones (`web-vX.Y.Z-N`, `web-release.yml`), so a browser-only fix does not wait for new installers. `Scripts/verify-web-site.mjs`
   lets anyone compare what the site serves with that Release, byte for byte. It cannot detect a
   page served differently to one chosen visitor, and says so.
-- Publishing on the project's site is a switch the owner holds, off until set: the repository
-  variable `SITE_WEB_CLIENT`. Without it the site has no `/app/`, and nothing else changes.
 - Anyone can host the archive themselves, which keeps the maker out of it for their circle.
-- **Its own origin.** A browser keeps a site's stored data per origin, so the client must not
-  share one with anything else: any other page or script served from the same origin could reach
-  what it stores. The project serves it from Haven's own address, which serves nothing else. The
-  portfolio, one origin shared by many pages and tools, only redirects there; the 2026-06
-  prototype that used to sit at that path (and kept an account seed in `localStorage`) was
-  removed, and the redirect clears what it left behind.
+
+**Amended 2026-11-27: the project serves it at `wemiller.com/apps/haven/app/`, an origin shared
+with the rest of the maker's site.** Until then it had an origin of its own (`haven.wemiller.com`),
+because a browser keeps a site's stored data per origin: any other page or script served from the
+same origin can reach what the client stores there, and act as that linked browser. The owner
+chose the shared address after being told that, on the grounds that everything on the domain,
+Cloudflare in front of it included, is trusted. What that adds to the cost above, for **every**
+person who links through the project's page: a flaw or compromise in anything else on
+wemiller.com (its own scripts, other tools and mirrored app pages hosted there, or the CDN that
+fronts it) can reach their linked browser's posts and messages. A browser still never holds the
+account key and is still revoked from any other device. A relay-served page, or the archive on an
+origin of one's own, avoids all of it.
+
+What limits it there: the portfolio's offline service worker leaves the client's folder alone, and
+its page rewriting steps skip it, so the files served are the release's byte for byte
+(`Scripts/verify-web-site.mjs`). Each build's code sits in a folder named after its bytes, since
+that site caches scripts for a year. The old address only forwards.
 
 **Proof and tests:** `web-client/smoke/site.mjs` (hermetic in CI; `SMOKE_RENDEZVOUS=public` over
 the public rendezvous relays); `a_page_from_another_origin_may_ask_but_still_needs_a_members_signature`

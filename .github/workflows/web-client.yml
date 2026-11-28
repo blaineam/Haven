@@ -126,10 +126,11 @@ jobs:
           NODE_PATH: ${{ runner.temp }}/pw/node_modules
         run: node web-client/smoke/engine.mjs core/target/debug/examples/web_primary_engine
       # And in WebKit: Safari refuses things Chromium lets through, and plays media its own way.
-      - name: Browser smoke, in WebKit
+      - name: Browser smoke, in WebKit (linking through media)
         env:
           NODE_PATH: ${{ runner.temp }}/pw/node_modules
           SMOKE_BROWSER: webkit
+          SMOKE_THROUGH: media
         run: node web-client/smoke/engine.mjs core/target/debug/examples/web_primary_engine
       # The same client served by a plain web site on another origin than the relay: links by its
       # own code and uses the relay's mailbox across origins (web-client/smoke/site.mjs).

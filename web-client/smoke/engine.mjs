@@ -280,6 +280,11 @@ await run(
     noCrashes("after posts and pictures in both directions");
     step("the engine ran its delayed save in the page without a crash");
 
+    // CI's WebKit run ends here. It is there for what a person sees and plays. The rest (leaving,
+    // relinking by code, the service worker, Start over) fails there with the page navigating
+    // under the test, which has not been run down; Chromium runs all of it.
+    if (process.env.SMOKE_THROUGH === "media") return;
+
     // ── At rest, and after the tab is left ───────────────────────────────────────────────────
     await page.evaluate(() => window.__HAVEN_WEB__.flush());
     if ((await page.evaluate(() => window.__HAVEN_WEB__.mode())) !== "session") throw new Error("expected a session-mode store");

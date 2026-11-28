@@ -25,7 +25,13 @@
   /** A browser is only ever a linked device; app.js reads this to offer nothing else. `site` is
    *  the host that served the page when that was not a relay — the page says so where it asks to
    *  be trusted. */
-  window.__HAVEN_HOST__ = { web: true, site: SITE_HOSTED ? location.host : "" };
+  // `assets`: the folder this script came from. A web site keeps each build's files in one of its
+  // own (build.sh), so what app.js loads by name has to be looked for there, not beside the page.
+  const ASSETS = document.currentScript?.src ? new URL(".", document.currentScript.src).href : "";
+  window.__HAVEN_HOST__ = { web: true, site: SITE_HOSTED ? location.host : "", assets: ASSETS };
+  // A 2026-06 prototype kept an account seed in this storage on the project's site. Nothing reads
+  // it any more, and it must not be left lying there.
+  if (SITE_HOSTED) { try { localStorage.removeItem("haven.seed"); } catch (_) { /* storage off */ } }
 
   // Safari refuses a secure connection to a host written as a fully qualified name with its
   // trailing dot ("relay.example.com."): "The server did not accept the certificate". The public

@@ -3401,7 +3401,7 @@ const ImgWorker = {
     if (this.w) return this.w;
     try {
       if (typeof Worker === "undefined" || typeof OffscreenCanvas === "undefined") throw new Error("unsupported");
-      this.w = new Worker("imgworker.js");
+      this.w = new Worker(((window.__HAVEN_HOST__ && window.__HAVEN_HOST__.assets) || "") + "imgworker.js");
       this.w.onmessage = (e) => {
         const { id, ok, b64, err } = e.data || {};
         const slot = this.waiting.get(id);

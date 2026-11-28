@@ -105,4 +105,22 @@ HAVEN_CSP="$csp" HAVEN_RDV="${HAVEN_SITE_RENDEZVOUS:-}" awk '
   { print }
 ' "$dist/index.html" > "$site/index.html"
 grep -q 'name="haven-host" content="site"' "$site/index.html" || { echo "dist-site/index.html: site marker not injected" >&2; exit 1; }
+# Every build's code lives in a folder named after its own bytes (r/<id>/). The project's site
+# keeps scripts and styles cached for a year; under fixed names a browser would go on running an
+# old build, or half of each. Only index.html (kept briefly) names the folder. What the page asks
+# for by a fixed address stays at the top: the service worker and its icon.
+moved="app.js strings.js styles.css responsive.css web-host.js storage.js imgworker.js vendor pkg"
+sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"; else shasum -a 256 "$@"; fi; }
+id=$(cd "$site" && find $moved -type f | LC_ALL=C sort | while read -r f; do sha "$f"; done | sha | cut -c1-12)
+mkdir -p "$site/r/$id"
+for item in $moved; do mv "$site/$item" "$site/r/$id/$item"; done
+awk -v r="r/$id/" '
+  { gsub(/href="styles\.css"/, "href=\"" r "styles.css\""); gsub(/href="responsive\.css"/, "href=\"" r "responsive.css\"")
+    gsub(/src="vendor\//, "src=\"" r "vendor/")
+    gsub(/src="web-host\.js"/, "src=\"" r "web-host.js\""); gsub(/src="strings\.js"/, "src=\"" r "strings.js\""); gsub(/src="app\.js"/, "src=\"" r "app.js\""); print }
+' "$site/index.html" > "$site/index.html.tmp" && mv "$site/index.html.tmp" "$site/index.html"
+# A reference left at its old name would load nothing.
+if grep -E '(src|href)="(styles\.css|responsive\.css|web-host\.js|strings\.js|app\.js|vendor/)' "$site/index.html"; then
+  echo "dist-site/index.html still names a file outside r/$id/" >&2; exit 1
+fi
 echo "built $site"

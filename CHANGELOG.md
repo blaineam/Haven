@@ -27,13 +27,17 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - A video or story that finishes loading keeps its framing, autoplay and sound button, and shows
   its poster while it loads. A story's timer starts when its picture is there.
 
+- On a web site, each build's files now live in a folder of their own (`r/<id>/`), so a host that
+  caches scripts for a long time cannot serve a stale or half-updated page.
+
 ### Added
 - **A full-window viewer.** Click a photo, or any tile of a large grid, and swipe, scroll or use the
   arrow keys through the post.
 - **Browsers load small first.** The thumbnail shows as soon as a post is on screen; the full photo
   or video is fetched only if you stay on it.
 - Tests: the browser end to end is now a Soren suite (`web-client-browser`) in the release gate, with
-  checks for each of the above in a real browser, and CI also runs it in WebKit.
+  checks for each of the above in a real browser. CI also runs it in WebKit through the media
+  checks.
 
 ### Changed
 - Release tooling: `Scripts/asc-autosubmit.mjs --build-number N` submits builds that were archived

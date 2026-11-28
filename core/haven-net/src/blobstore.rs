@@ -1289,6 +1289,19 @@ pub(crate) fn local_has(root: &Path, key: &str) -> bool {
     safe_path(root, key).map(|p| p.exists()).unwrap_or(false)
 }
 
+/// How stale a media file's liveness stamp must be before a READ moves it. A day: age limits are
+/// counted in days, and a finer stamp would be a record of when someone read it, which this relay
+/// does not keep.
+const READ_REFRESH_AFTER_SECS: u64 = 24 * 60 * 60;
+
+/// A member read `key`. For media that is use: the age and size limits count idle time, and
+/// something people still open must not be the thing they delete.
+pub(crate) fn note_media_read(path: &Path, key: &str) {
+    if key.starts_with(MEDIA_PREFIX) && idle_age_secs(path) >= READ_REFRESH_AFTER_SECS {
+        touch_now(path);
+    }
+}
+
 /// Read a sealed blob the in-process relay holds — the HOST reading its OWN store (e.g. a sibling device's
 /// upload, or a friend's post landed while we were offline). No iroh self-connection.
 pub(crate) fn local_get(root: &Path, key: &str) -> Option<Vec<u8>> {
@@ -1421,7 +1434,7 @@ pub fn gc_sweep_with(root: &Path, retention: &Retention, grace: std::time::Durat
         if let Some(max_age) = retention.media_max_age {
             // Scope markers live exactly as long as their blob (below) — aging one out on its own
             // would leave a live blob unscoped, i.e. replicating to every sibling.
-            sweep_dir(&media_root, max_age.as_secs(), &mut stats.media_deleted_age, &mut stats.media_bytes_freed, &is_scope_marker_path);
+            expire_media(&media_root, max_age.as_secs(), &mut stats.media_deleted_age, &mut stats.media_bytes_freed);
         }
         // Then size: evict oldest-first until under the cap. Applying age before size means
         // the size pass sees the already-thinned store — the "least space wins" order.
@@ -1628,30 +1641,76 @@ fn media_files(media_root: &Path) -> Vec<(PathBuf, u64, u64)> {
     out
 }
 
-/// Size-cap eviction: while the media store exceeds `cap`, delete the OLDEST blob (by the
-/// same mtime clock the age sweep uses — TOUCH/HAS refreshes push a blob toward the back of
-/// the eviction line). Records the newest evicted mtime as the store's size-eviction
-/// horizon so mesh sync won't immediately re-pull what was just evicted (see
-/// [`keys_to_pull`]). Returns `(blobs deleted, bytes freed)`.
+/// One media item as the limits see it: a whole blob, whether it is one file or a manifest and its
+/// chunk windows. It is as fresh as its most recently used file, and it goes all at once. Limits
+/// applied file by file deleted a video's first window (written before the rest, so oldest) and
+/// kept its manifest: a video no one could load, that its uploader still counted as stored.
+struct MediaItem {
+    files: Vec<(PathBuf, u64)>,
+    newest_mtime: u64,
+    newest_idle_secs: u64,
+    len: u64,
+}
+
+fn media_items(media_root: &Path) -> Vec<MediaItem> {
+    let mut items: HashMap<String, MediaItem> = HashMap::new();
+    for (path, mtime, len) in media_files(media_root) {
+        let Ok(rel) = path.strip_prefix(media_root) else { continue };
+        let rel = rel.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/");
+        let key = format!("{MEDIA_PREFIX}{rel}");
+        let name = media_ref(&key).unwrap_or(&key).to_string();
+        let idle = idle_age_secs(&path);
+        let item = items.entry(name).or_insert(MediaItem { files: vec![], newest_mtime: 0, newest_idle_secs: u64::MAX, len: 0 });
+        item.newest_mtime = item.newest_mtime.max(mtime);
+        item.newest_idle_secs = item.newest_idle_secs.min(idle);
+        item.len += len;
+        item.files.push((path, len));
+    }
+    items.into_values().collect()
+}
+
+/// Delete every file of `item`. Returns `(files deleted, bytes freed)`.
+fn remove_media_item(item: &MediaItem) -> (usize, u64) {
+    item.files.iter().fold((0, 0), |(n, freed), (path, len)| {
+        if std::fs::remove_file(path).is_ok() { (n + 1, freed + len) } else { (n, freed) }
+    })
+}
+
+/// Age limit: delete each media item none of whose files was used within `max_age_secs`.
+fn expire_media(media_root: &Path, max_age_secs: u64, deleted: &mut usize, bytes_freed: &mut u64) {
+    for item in media_items(media_root).iter().filter(|i| i.newest_idle_secs > max_age_secs) {
+        let (n, freed) = remove_media_item(item);
+        *deleted += n;
+        *bytes_freed += freed;
+    }
+    prune_empty_dirs(media_root);
+}
+
+/// Size-cap eviction: while the media store exceeds `cap`, delete the longest-unused item (by the
+/// same mtime clock the age sweep uses — PUT/HAS/TOUCH and a day-stale read push an item toward the
+/// back of the eviction line). Records the newest evicted mtime as the store's size-eviction horizon
+/// so mesh sync won't immediately re-pull what was just evicted (see [`keys_to_pull`]). Returns
+/// `(files deleted, bytes freed)`.
 fn evict_media_to_cap(root: &Path, media_root: &Path, cap: u64) -> (usize, u64) {
-    let mut files = media_files(media_root);
-    let mut total: u64 = files.iter().map(|(_, _, len)| len).sum();
+    let mut items = media_items(media_root);
+    let mut total: u64 = items.iter().map(|i| i.len).sum();
     if total <= cap {
         return (0, 0);
     }
-    files.sort_by_key(|(_, mtime, _)| *mtime); // oldest first
+    items.sort_by_key(|i| i.newest_mtime); // longest unused first
     let mut deleted = 0usize;
     let mut freed = 0u64;
     let mut horizon = 0u64;
-    for (path, mtime, len) in files {
+    for item in &items {
         if total <= cap {
             break;
         }
-        if std::fs::remove_file(&path).is_ok() {
-            total = total.saturating_sub(len);
-            freed += len;
-            deleted += 1;
-            horizon = horizon.max(mtime);
+        let (n, bytes) = remove_media_item(item);
+        if n > 0 {
+            total = total.saturating_sub(bytes);
+            freed += bytes;
+            deleted += n;
+            horizon = horizon.max(item.newest_mtime);
         }
     }
     if horizon > 0 {
@@ -3031,9 +3090,14 @@ pub(crate) async fn handle_request(
                     return Ok(());
                 }
             };
-            match tokio::task::spawn_blocking(move || std::fs::read(&path))
-                .await
-                .unwrap_or_else(|e| Err(std::io::Error::other(e)))
+            let read_key = key.clone();
+            match tokio::task::spawn_blocking(move || {
+                let bytes = std::fs::read(&path)?;
+                note_media_read(&path, &read_key);
+                Ok(bytes)
+            })
+            .await
+            .unwrap_or_else(|e| Err(std::io::Error::other(e)))
             {
                 Ok(bytes) => {
                     let _ = send.write_all(&bytes).await;
@@ -5260,6 +5324,73 @@ mod tests {
         assert_eq!(touch_batches(&small), vec![small.as_slice()]);
     }
 
+
+    /// Writes `haven/media/<key>` and sets how long ago it was last used.
+    fn media_file(dir: &Path, key: &str, len: usize, idle_secs: u64) -> PathBuf {
+        let path = safe_path(dir, &format!("{MEDIA_PREFIX}{key}")).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, vec![0u8; len]).unwrap();
+        let then = std::time::SystemTime::now() - std::time::Duration::from_secs(idle_secs);
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(then).unwrap();
+        path
+    }
+
+    /// A video is its manifest and its chunk windows. The windows are written first, so they are
+    /// the oldest files: limits applied one file at a time deleted a window and kept the manifest,
+    /// and the browser got 404 for chunk 1 for ever.
+    #[test]
+    fn the_age_and_size_limits_never_leave_half_a_video() {
+        let day = 24 * 3600;
+        let dir = std::env::temp_dir().join(format!("haven-whole-media-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let clip = |name: &str, window_age: u64, manifest_age: u64| {
+            [
+                media_file(&dir, &format!("{name}.p/0"), 100, window_age),
+                media_file(&dir, &format!("{name}.p/1"), 100, window_age),
+                media_file(&dir, name, 10, manifest_age),
+            ]
+        };
+        let all = |files: &[PathBuf]| files.iter().all(|p| p.is_file());
+        let none = |files: &[PathBuf]| files.iter().all(|p| !p.is_file());
+        // Age: one file used lately keeps the whole item; nothing used lately takes all of it.
+        let used = clip("vid_used", 40 * day, day);
+        let unused = clip("vid_unused", 40 * day, 35 * day);
+        let mut ret = Retention { media_max_age: Some(std::time::Duration::from_secs(30 * day)), ..Retention::default() };
+        plant_gc_markers(&dir, &ret, std::time::Duration::ZERO);
+        gc_sweep_with(&dir, &ret, std::time::Duration::ZERO);
+        let stats = gc_sweep_with(&dir, &ret, std::time::Duration::ZERO);
+        assert!(all(&used), "a video in use keeps its old windows");
+        assert!(none(&unused), "an unused one goes whole");
+        assert!(stats.media_bytes_total == 210, "{stats:?}");
+        // Size: the longest-unused item goes whole, even to free a few bytes.
+        let newer = clip("vid_newer", 60, 60);
+        ret = Retention { media_max_bytes: Some(400), ..Retention::default() };
+        let stats = gc_sweep_with(&dir, &ret, std::time::Duration::ZERO);
+        assert_eq!((stats.media_deleted_size, none(&used), all(&newer)), (3, true, true), "{stats:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Opening media is using it. The stamp moves at most once a day, so it is not a record of when
+    /// anyone read it.
+    #[test]
+    fn a_read_keeps_media_alive_and_stamps_it_no_finer_than_a_day() {
+        let dir = std::env::temp_dir().join(format!("haven-read-media-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let stale = media_file(&dir, "img_stale", 10, 29 * 24 * 3600);
+        let recent = media_file(&dir, "img_recent", 10, 3600);
+        let before = std::fs::metadata(&recent).unwrap().modified().unwrap();
+        note_media_read(&stale, "haven/media/img_stale");
+        note_media_read(&recent, "haven/media/img_recent");
+        assert!(idle_age_secs(&stale) < 60, "a read of month-old media restarts its clock");
+        assert_eq!(std::fs::metadata(&recent).unwrap().modified().unwrap(), before, "read within the day: nothing written");
+        let envelope = media_file(&dir, "x", 1, 0).with_file_name("mail");
+        std::fs::write(&envelope, b"m").unwrap();
+        std::fs::File::options().write(true).open(&envelope).unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(5 * 24 * 3600)).unwrap();
+        note_media_read(&envelope, "haven/mailbox/fam/mail");
+        assert!(idle_age_secs(&envelope) > 4 * 24 * 3600, "reading mail is not what keeps mail");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[cfg(test)]

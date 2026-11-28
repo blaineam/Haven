@@ -1285,6 +1285,25 @@ async fn a_browser_asking_again_for_media_no_post_names_gets_a_second_attempt() 
     .await;
 }
 
+/// What stays on screen is asked for every few seconds. Something no relay has must not be
+/// downloaded again each time: a browser made tens of thousands of requests in minutes.
+#[test]
+fn the_pages_asking_again_backs_off() {
+    let waits: Vec<u64> = (0..12).map(Engine::web_reask_delay_ms).collect();
+    assert_eq!(&waits[..4], &[10_000, 20_000, 40_000, 80_000]);
+    assert_eq!(*waits.last().unwrap(), 30 * 60 * 1000);
+    assert!(waits.windows(2).all(|w| w[1] >= w[0]));
+    // An hour on screen, asked for every 12 s: a handful of downloads, not 300.
+    let (mut due, mut tries) = (0u64, 0u32);
+    for ask in (0..3_600_000u64).step_by(12_000) {
+        if ask >= due {
+            due = ask + Engine::web_reask_delay_ms(tries);
+            tries += 1;
+        }
+    }
+    assert!(tries <= 10, "{tries}");
+}
+
 /// DECISIONS D27, end to end over a relay: a photo sealed before the browser was linked, under a
 /// circle key every device has since deleted, does not open with anything the browser was handed.
 /// It asks; the account's other device reads the end of the blob from the relay and answers; the

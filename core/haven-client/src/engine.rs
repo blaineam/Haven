@@ -255,8 +255,9 @@ struct DynState {
     web_media_wanted: std::collections::HashSet<String>,
     /// Browser only: per wanted ref, how many times the sweep has asked and when it may next.
     web_media_retry: HashMap<String, (u32, u64)>,
-    /// Browser only: when the page's own ask last started a download of each ref.
-    web_media_asked: HashMap<String, u64>,
+    /// Browser only: per ref, how many downloads the page's own asking has started and when the
+    /// next may.
+    web_media_asked: HashMap<String, (u32, u64)>,
     /// Camera-state ordering (frame 22): the stamp of the last one sent, and the newest applied
     /// from each peer — see [`Engine::camera_state_is_current`].
     camera_stamp_sent: u64,
@@ -4340,9 +4341,9 @@ impl Engine {
                 st.web_media_wanted.insert(r.clone());
                 // Asked again while still on screen: try again. The sweep only knows what the
                 // feed names, so a kept story whose post is gone had one attempt, ever.
-                let recent = st.web_media_asked.get(&r).is_some_and(|at| now.saturating_sub(*at) < Self::WEB_REASK_MS);
-                if !recent && !self.media.has(&r) && !self.media.fetch_in_flight(&r) && !st.media_unopenable.contains(&r) {
-                    st.web_media_asked.insert(r.clone(), now);
+                let (tries, due) = st.web_media_asked.get(&r).copied().unwrap_or((0, 0));
+                if now >= due && !self.media.has(&r) && !self.media.fetch_in_flight(&r) && !st.media_unopenable.contains(&r) {
+                    st.web_media_asked.insert(r.clone(), (tries.saturating_add(1), now + Self::web_reask_delay_ms(tries)));
                     fetch.push(r);
                 }
             }
@@ -4360,8 +4361,12 @@ impl Engine {
         }
     }
 
-    /// How soon the page's asking again for the same blob starts another download of it.
-    pub(crate) const WEB_REASK_MS: u64 = 10_000;
+    /// How long after a download the page asked for before its asking may start another: 10 s,
+    /// doubling to half an hour. The page asks for what stays on screen every few seconds, and each
+    /// download of something that is not there asks every relay.
+    pub(crate) fn web_reask_delay_ms(tries: u32) -> u64 {
+        (10_000u64 << tries.min(8)).min(30 * 60 * 1000)
+    }
 
     /// For a test: let the next [`Self::media_want`] count as a fresh ask, without waiting.
     #[cfg(test)]

@@ -93,7 +93,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::blobstore::{
-    blob_forbidden, listing_retain, local_get, local_list, local_put, local_touch, put_allowed, record_devroster, safe_path,
+    blob_forbidden, listing_retain, local_get, local_list, local_put, local_touch, note_media_read, put_allowed, record_devroster, safe_path,
     verify_devroster_put, DevrosterPut, RelayAuth, DEVROSTER_PREFIX, VERB_GET, VERB_HAS, VERB_LIST,
     VERB_PUT, VERB_TOUCH,
 };
@@ -501,7 +501,11 @@ async fn handle_conn(
         }
 
         match route {
-            Route::Get(_) => match local_get(root, &key) {
+            Route::Get(_) => match local_get(root, &key).inspect(|_| {
+                if let Ok(path) = safe_path(root, &key) {
+                    note_media_read(&path, &key);
+                }
+            }) {
                 Some(body) => match header(&headers, "range").and_then(|v| suffix_range(&v, body.len())) {
                     Some(from) => range_respond(&mut w, keep_alive, from, &body).await?,
                     None => respond(&mut w, 200, "OK", keep_alive, &body).await?,

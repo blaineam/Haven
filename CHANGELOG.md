@@ -9,6 +9,19 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Fixed (relay and media loading)
+- **A relay's storage limits no longer leave half a video.** The age and size limits worked file by
+  file, and a video is a manifest plus chunk files, the first chunks the oldest: a limit could delete
+  one chunk and keep the rest, leaving a video no one could load that its uploader still counted as
+  stored. A video now expires or is evicted whole. Relays need this update; chunks already deleted
+  are not restored.
+- **Opening media keeps it.** Only uploads and existence checks restarted the age limit's clock, so a
+  photo viewed every day still expired 30 days after it was last checked. A read restarts it too, at
+  most once a day, so the stamp says nothing finer than the day (the relay still writes no logs).
+- **A browser asks less for what is missing.** Asking again for media still on screen, added in web
+  client 2.2.4-1, repeated about every 12 seconds without limit. It now waits 10 s, then doubles up
+  to half an hour.
+
 ### Changed
 - **Haven in a browser has a new address: `wemiller.com/apps/haven/app/`.** The old one forwards
   there. A browser linked at the old address has to be linked again. The new address shares its

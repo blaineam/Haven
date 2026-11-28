@@ -196,3 +196,54 @@ final class HistoryHandoffTests: XCTestCase {
         XCTAssertNil(unknown)
     }
 }
+
+/// `contact:` records between this app and the others, through the real core.
+@MainActor
+final class SyncedContactTests: XCTestCase {
+    private let android = Data(#"{"id_hex":"ab","name":"Signed Name","verify":"vv"}"#.utf8)
+    private let desktop = Data(#"{"id_hex":"ab","name":"Signed Name","verify_hex":"vv","emoji":"","avatar":"","bio":"","link":""}"#.utf8)
+    private var mine: Contact {
+        var c = Contact(name: "Hand Shake", idHex: "ab")
+        c.verificationHex = "vv"; c.authoritativeName = "Signed Name"; c.avatarB64 = "/9j/4AAQ"; c.emoji = "🌊"
+        return c
+    }
+
+    func testAndroidAndDesktopRecordsDecode() throws {
+        for record in [android, desktop] {
+            let got = try XCTUnwrap(SyncedContact(record: record))
+            XCTAssertEqual(got.contact.idHex, "ab")
+            XCTAssertEqual(got.contact.displayName, "Signed Name")
+            XCTAssertEqual(got.contact.verificationHex, "vv")
+            XCTAssertTrue(got.legacy)
+        }
+    }
+
+    func testAnOlderAppsRecordKeepsTheNicknameAndPictureHeldHere() throws {
+        var held = mine; held.nickname = "Mum"
+        var shown = try XCTUnwrap(SyncedContact(record: android))
+        let next = shown.contact.keeping(held, legacyRecord: shown.legacy)
+        XCTAssertEqual(next.displayName, "Mum")
+        XCTAssertEqual(next.avatarB64, "/9j/4AAQ")
+        XCTAssertEqual(next.authoritativeName, "Signed Name")
+        // A real rename from there still arrives (under my nickname).
+        shown = try XCTUnwrap(SyncedContact(record: Data(#"{"id_hex":"ab","name":"Renamed","verify":"vv"}"#.utf8)))
+        XCTAssertEqual(shown.contact.keeping(mine, legacyRecord: true).displayName, "Renamed")
+    }
+
+    func testWhatThisAppPublishesAndroidCanReadAndASecondPassIsQuiet() throws {
+        let own = try JSONEncoder().encode(mine)
+        let stamp = try XCTUnwrap(SyncedContact.valueToStamp(key: "contact:ab", local: own, base: nil))
+        let o = try XCTUnwrap(JSONSerialization.jsonObject(with: stamp) as? [String: Any])
+        XCTAssertEqual(o["id_hex"] as? String, "ab")
+        XCTAssertEqual(o["verify"] as? String, "vv")
+        XCTAssertNil(SyncedContact.valueToStamp(key: "contact:ab", local: own, base: stamp))
+        XCTAssertNil(SyncedContact.valueToStamp(key: "contact:ab", local: own, base: android), "another app's spelling is not a change")
+    }
+
+    func testAnUnreadableRecordIsNotPublishedAsRemoved() {
+        XCTAssertFalse(SyncedContact.mayTombstone(key: "contact:ab", base: Data(#"{"future":1}"#.utf8)))
+        XCTAssertTrue(SyncedContact.mayTombstone(key: "contact:ab", base: android))
+        XCTAssertTrue(SyncedContact.mayTombstone(key: "blocked:ab", base: Data([1])))
+    }
+}
+

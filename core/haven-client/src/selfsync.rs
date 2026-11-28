@@ -9,8 +9,8 @@
 //! Scope (must match iOS byte-for-byte cross-platform): PROFILE (name/emoji/bio/link), GLOBAL
 //! SETTINGS (retention, host-on-launch), CONTACTS, the BLOCKED list, and CIRCLES (name + member
 //! bundles + relay nodes). Profile/setting/blocked/circle values are byte-identical to iOS. The
-//! `contact:` value is JSON that each platform spells its own way, so this one reads all three and
-//! writes a record all three can read ([`contact_from_wire`], [`contact_to_wire`]).
+//! `contact:` value is JSON that each app used to spell its own way; every app now reads and writes
+//! it by the one set of rules in [`haven_ffi::contact_sync`].
 //!
 //! This module holds the **pure** pieces — the device-id, the CRDT key/value mapping, and the
 //! deterministic circle encoding. The networked coordinator (`Engine::poll_self_sync`) lives in
@@ -19,6 +19,7 @@
 use std::collections::BTreeMap;
 
 use crate::store::{Contact, Paths, Prefs};
+use haven_ffi::contact_sync::{contact_sync_fold, contact_sync_may_tombstone, contact_sync_normalize, contact_sync_read};
 use haven_ffi::multidevice::{decode_circle_sync, encode_circle_sync};
 use haven_ffi::HavenSocial;
 
@@ -46,120 +47,40 @@ pub fn device_id(paths: &Paths) -> [u8; 32] {
 /// (`profile:`/`setting:`) are always present, so they're never spuriously removed.
 pub const DYNAMIC_PREFIXES: [&str; 3] = ["contact:", "blocked:", "circle:"];
 
-/// A `contact:` record from any of this account's devices. The three spellings:
-/// Apple `idHex, name, authoritativeName, nickname, verificationHex, avatarB64 (bare base64),
-/// emoji, bio, link`; Android `id_hex, name, verify`; this engine before 2.2.5
-/// `id_hex, name, verify_hex, emoji, avatar (data: URL), bio, link`. The name is the one the Apple
-/// app shows: your nickname for them, else the name they signed, else the one they arrived with.
+/// A `contact:` record from any of this account's devices, in whichever app's spelling. The
+/// rules every app shares are in [`haven_ffi::contact_sync`].
 pub fn contact_from_wire(bytes: &[u8]) -> Option<Contact> {
-    let v: serde_json::Value = serde_json::from_slice(bytes).ok()?;
-    let o = v.as_object()?;
-    let first = |keys: &[&str]| -> String {
-        keys.iter()
-            .filter_map(|k| o.get(*k).and_then(|v| v.as_str()))
-            .find(|s| !s.is_empty())
-            .unwrap_or("")
-            .to_string()
-    };
-    let id_hex = first(&["idHex", "id_hex"]);
-    if id_hex.is_empty() {
-        return None;
-    }
-    let mut avatar = first(&["avatar", "avatarB64"]);
-    if !avatar.is_empty() && !avatar.starts_with("data:") {
-        let kind = if avatar.starts_with("iVBOR") { "png" } else { "jpeg" };
-        avatar = format!("data:image/{kind};base64,{avatar}");
-    }
+    let c = contact_sync_read(bytes.to_vec())?;
     Some(Contact {
-        id_hex,
-        name: first(&["nickname", "authoritativeName", "name"]),
-        verify_hex: first(&["verificationHex", "verify_hex", "verify"]),
-        emoji: first(&["emoji"]),
-        avatar,
-        bio: first(&["bio"]),
-        link: first(&["link"]),
+        id_hex: c.id_hex,
+        name: c.name,
+        verify_hex: c.verify_hex,
+        emoji: c.emoji,
+        avatar: c.avatar,
+        bio: c.bio,
+        link: c.link,
     })
 }
 
-/// `c` as a record every platform decodes, keeping whatever else `previous` carried (an iPhone's
-/// nickname for this person, say).
-pub fn contact_to_wire(c: &Contact, previous: Option<&[u8]>) -> Vec<u8> {
-    let mut o = previous
-        .and_then(|p| serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(p).ok())
-        .unwrap_or_default();
-    let was = previous.and_then(contact_from_wire);
-    let mut put = |k: &str, v: &str| {
-        o.insert(k.to_string(), serde_json::Value::String(v.to_string()));
-    };
-    put("idHex", &c.id_hex);
-    put("id_hex", &c.id_hex);
-    if was.as_ref().map_or(true, |w| w.name != c.name) {
-        put("name", &c.name);
-        if previous.is_some() {
-            put("authoritativeName", &c.name);
-        }
-    }
-    if !c.verify_hex.is_empty() {
-        for k in ["verificationHex", "verify_hex", "verify"] {
-            put(k, &c.verify_hex);
-        }
-    }
-    for (k, v) in [("emoji", &c.emoji), ("bio", &c.bio), ("link", &c.link), ("avatar", &c.avatar)] {
-        if !v.is_empty() {
-            put(k, v);
-        }
-    }
-    if !c.avatar.is_empty() {
-        put("avatarB64", crate::engine::raw_base64(&c.avatar).as_str());
-    }
-    serde_json::to_vec(&o).unwrap_or_default()
-}
-
-/// Does this device know something about a contact that the shared record `base` does not say?
-/// Only then is it worth publishing. Another platform's spelling of the same contact is not a
-/// change: re-writing it would have two devices overwrite each other for ever.
-fn contact_adds_to(c: &Contact, base: &[u8]) -> bool {
-    let Some(was) = contact_from_wire(base) else { return true };
-    let newer = |mine: &str, theirs: &str| !mine.is_empty() && mine != theirs;
-    if newer(&c.name, &was.name) || newer(&c.verify_hex, &was.verify_hex) {
-        return true;
-    }
-    // Android's record has no appearance at all, and its app re-writes any record that is not its
-    // own three fields. Adding a picture to one would start that exchange, so leave it.
-    let android_only = serde_json::from_slice::<serde_json::Value>(base)
-        .ok()
-        .is_some_and(|v| v.get("verify").is_some() && v.get("idHex").is_none());
-    !android_only
-        && (newer(&c.emoji, &was.emoji)
-            || newer(&c.avatar, &was.avatar)
-            || newer(&c.bio, &was.bio)
-            || newer(&c.link, &was.link))
+/// This engine's contact as a record every app decodes.
+pub fn contact_to_wire(c: &Contact) -> Vec<u8> {
+    let own = serde_json::to_vec(c).unwrap_or_default();
+    contact_sync_normalize(own.clone()).unwrap_or(own)
 }
 
 /// What to stamp into the shared state for one locally published key, given what it already
 /// holds there. `None` means leave it alone.
 pub fn fold_value(key: &str, local: &[u8], base: Option<&[u8]>) -> Option<Vec<u8>> {
-    let Some(base) = base else { return Some(local.to_vec()) };
-    if base == local {
-        return None;
-    }
     if key.starts_with("contact:") {
-        if let Some(c) = contact_from_wire(local) {
-            if !contact_adds_to(&c, base) {
-                return None;
-            }
-            let merged = contact_to_wire(&c, Some(base));
-            return (merged != base).then_some(merged);
-        }
+        return contact_sync_fold(local.to_vec(), base.map(<[u8]>::to_vec));
     }
-    Some(local.to_vec())
+    (base != Some(local)).then(|| local.to_vec())
 }
 
 /// May a key missing from the local state be tombstoned? Not a contact record this build cannot
-/// read: it never made it into the local list, so its absence there says nothing. (Until 2.2.5
-/// every iPhone contact was one, and each pass published its removal.)
+/// read: it never made it into the local list, so its absence there says nothing.
 pub fn may_tombstone(key: &str, base: Option<&[u8]>) -> bool {
-    !key.starts_with("contact:") || base.and_then(contact_from_wire).is_some()
+    !key.starts_with("contact:") || contact_sync_may_tombstone(base.map(<[u8]>::to_vec))
 }
 
 /// The current local state as namespaced key → value bytes (no stamps). `prefs` contributes
@@ -259,7 +180,7 @@ pub fn current_local(prefs: &Prefs, social: &HavenSocial) -> BTreeMap<String, Ve
 
     // Roster: contacts (full card, deterministic serde) + blocked list (marker).
     for c in &prefs.contacts {
-        m.insert(format!("contact:{}", c.id_hex), contact_to_wire(c, None));
+        m.insert(format!("contact:{}", c.id_hex), contact_to_wire(c));
     }
     for hex in &prefs.blocked {
         m.insert(format!("blocked:{hex}"), vec![1]);

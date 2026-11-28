@@ -67,7 +67,11 @@ internal object SelfSyncWire {
         return key.substring(0, bar) to key.substring(bar + 1)
     }
 
-    /** Stable Android contact JSON. Need NOT match iOS (structs differ) — just stable on Android. */
+    /** How `contact:` records are read, published and removed. The core in the app; a JVM test,
+     *  which cannot load the core, puts a stand-in here. */
+    var contactRules: ContactRules = CoreContactRules
+
+    /** This app's own three fields. [valueToStamp] turns them into the record every app reads. */
     fun encodeContact(c: Contact): ByteArray =
         JSONObject().apply {
             put("id_hex", c.idHex)
@@ -75,10 +79,19 @@ internal object SelfSyncWire {
             put("verify", c.verifyHex)
         }.toString().toByteArray(Charsets.UTF_8)
 
-    fun decodeContact(bytes: ByteArray): Contact? = runCatching {
-        val o = JSONObject(String(bytes, Charsets.UTF_8))
-        Contact(o.getString("id_hex"), o.optString("name", ""), o.optString("verify", ""))
-    }.getOrNull()
+    /** A contact from any of the account's devices, in whichever app's spelling. */
+    fun decodeContact(bytes: ByteArray): Contact? = contactRules.read(bytes)
+
+    /** What to stamp into the shared state for one locally published key; null leaves it alone. */
+    fun valueToStamp(key: String, local: ByteArray, base: ByteArray?): ByteArray? = when {
+        key.startsWith("contact:") -> contactRules.fold(local, base)
+        local.contentEquals(base) -> null
+        else -> local
+    }
+
+    /** May a key missing from this device's state be published as removed? */
+    fun mayTombstone(key: String, base: ByteArray?): Boolean =
+        !key.startsWith("contact:") || contactRules.mayTombstone(base)
 
     fun int32LE(v: Int): ByteArray = byteArrayOf(
         (v and 0xFF).toByte(),
@@ -122,4 +135,23 @@ internal object SelfSyncWire {
         }
         return out
     }
+}
+
+/** The rules for the `contact:` record. Each app used to write only its own field names, so an
+ *  Android phone could not read an iPhone's or a computer's contacts, nor they its own, and each
+ *  published the other's as removed. */
+internal interface ContactRules {
+    fun read(record: ByteArray): Contact?
+    fun fold(local: ByteArray, base: ByteArray?): ByteArray?
+    fun mayTombstone(base: ByteArray?): Boolean
+}
+
+/** The one set of rules every app shares (`core/haven-ffi/src/contact_sync.rs`). */
+internal object CoreContactRules : ContactRules {
+    override fun read(record: ByteArray): Contact? =
+        uniffi.haven_ffi.contactSyncRead(record)?.let { Contact(it.idHex, it.name, it.verifyHex) }
+
+    override fun fold(local: ByteArray, base: ByteArray?): ByteArray? = uniffi.haven_ffi.contactSyncFold(local, base)
+
+    override fun mayTombstone(base: ByteArray?): Boolean = uniffi.haven_ffi.contactSyncMayTombstone(base)
 }

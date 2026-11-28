@@ -10896,7 +10896,10 @@ object HavenNet : InboundListener {
         if (ContactRemovals.isRemoved(c.idHex)) return
         val idx = contacts.indexOfFirst { it.idHex == c.idHex }
         if (idx >= 0) {
-            if (contacts[idx] != c) { contacts[idx] = c; saveContacts() }
+            // A field another device leaves empty says nothing about the one held here.
+            val held = contacts[idx]
+            val next = c.copy(name = c.name.ifEmpty { held.name }, verifyHex = c.verifyHex.ifEmpty { held.verifyHex })
+            if (held != next) { contacts[idx] = next; saveContacts() }
         } else {
             contacts.add(c); saveContacts()
         }

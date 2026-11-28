@@ -376,12 +376,12 @@ fn a_nickname_wins_and_the_old_and_android_spellings_still_read() {
 fn what_this_engine_publishes_every_platform_can_read() {
     let mut c = contact("a4", "Zed");
     c.avatar = "data:image/jpeg;base64,/9j/AA".into();
-    let v: serde_json::Value = serde_json::from_slice(&contact_to_wire(&c, None)).unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&contact_to_wire(&c)).unwrap();
     // Apple needs `idHex` + `name`; Android needs `id_hex`; each reads its own names for the rest.
     for (k, want) in [("idHex", "a4"), ("id_hex", "a4"), ("name", "Zed"), ("verificationHex", "v"), ("verify", "v"), ("avatarB64", "/9j/AA")] {
         assert_eq!(v[k].as_str(), Some(want), "{k}");
     }
-    assert_eq!(contact_from_wire(&contact_to_wire(&c, None)).unwrap().avatar, c.avatar, "round trip");
+    assert_eq!(contact_from_wire(&contact_to_wire(&c)).unwrap().avatar, c.avatar, "round trip");
 }
 
 #[test]
@@ -405,12 +405,12 @@ fn a_real_change_is_published_and_keeps_what_the_phone_knew() {
     let record = br#"{"idHex":"a7","name":"x","authoritativeName":"Before","nickname":"","futureField":"kept"}"#;
     let mut c = contact_from_wire(record).unwrap();
     c.name = "After".into();
-    let out = fold_value("contact:a7", &contact_to_wire(&c, None), Some(record)).expect("a rename is news");
+    let out = fold_value("contact:a7", &contact_to_wire(&c), Some(record)).expect("a rename is news");
     let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(v["authoritativeName"].as_str(), Some("After"));
     assert_eq!(v["futureField"].as_str(), Some("kept"));
     assert_eq!(contact_from_wire(&out).unwrap().name, "After");
-    assert_eq!(fold_value("contact:a7", &contact_to_wire(&c, None), Some(&out)), None, "and settles");
+    assert_eq!(fold_value("contact:a7", &contact_to_wire(&c), Some(&out)), None, "and settles");
 }
 
 #[test]

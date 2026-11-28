@@ -35,6 +35,30 @@ struct Contact: Identifiable, Codable, Equatable {
     }
 }
 
+extension Contact {
+    /// This record from another device, laid over what is held here. A picture or detail it leaves
+    /// out says nothing (Android's has none). From an older app (`legacyRecord`) only the name to
+    /// show means anything: if that is unchanged, the names here stay exactly as they are.
+    func keeping(_ held: Contact, legacyRecord: Bool) -> Contact {
+        func or(_ new: String?, _ old: String?) -> String? { (new?.isEmpty == false) ? new : old }
+        var next = self
+        next.verificationHex = or(verificationHex, held.verificationHex)
+        next.avatarB64 = or(avatarB64, held.avatarB64)
+        next.emoji = or(emoji, held.emoji)
+        next.bio = or(bio, held.bio)
+        next.link = or(link, held.link)
+        if legacyRecord {
+            if displayName == held.displayName || name.isEmpty {
+                (next.name, next.authoritativeName) = (held.name, held.authoritativeName)
+            } else {
+                next.authoritativeName = name
+            }
+            next.nickname = held.nickname
+        }
+        return next
+    }
+}
+
 /// Your circle, persisted locally on this device.
 @MainActor
 final class ContactsStore: ObservableObject {
@@ -165,11 +189,12 @@ final class ContactsStore: ObservableObject {
 
     /// Insert or replace a contact by node id — used by multi-device sync to apply a peer
     /// device's roster. No-op if an identical contact already exists (avoids churn/loops).
-    func syncUpsert(_ contact: Contact) {
+    func syncUpsert(_ contact: Contact, legacyRecord: Bool = false) {
         if isContactRemoved(contact.idHex) { return }   // a removed contact must not be resurrected by sync
         if let i = contacts.firstIndex(where: { $0.idHex == contact.idHex }) {
-            guard contacts[i] != contact else { return }
-            contacts[i] = contact
+            let next = contact.keeping(contacts[i], legacyRecord: legacyRecord)
+            guard contacts[i] != next else { return }
+            contacts[i] = next
         } else {
             contacts.append(contact)
         }

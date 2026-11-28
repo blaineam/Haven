@@ -420,6 +420,9 @@ mod clock {
 /// circle encoder + S3 helpers without going through UniFFI.
 pub mod multidevice;
 
+/// The `contact:` self-sync record: one set of rules for every app.
+pub mod contact_sync;
+
 /// `pub` so the desktop backend can call the shared seed-drop S4 enrollment codec directly.
 pub mod enroll;
 pub mod friend_invite;

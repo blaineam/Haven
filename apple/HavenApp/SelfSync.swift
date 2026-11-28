@@ -181,7 +181,7 @@ final class SelfSyncCoordinator {
         if let keptData = KeptStoriesStore.shared.syncPayload() { m["setting:keptStories"] = keptData }
         // Roster: contacts (full card) + blocked list.
         for c in ContactsStore.shared.contacts {
-            if let data = try? JSONEncoder().encode(c) { m["contact:\(c.idHex)"] = data }
+            if let data = try? JSONEncoder().encode(c) { m["contact:\(c.idHex)"] = data }   // folded by SyncedContact
         }
         // Contact removals — LWW by timestamp (contacts are additive-only, so a delete needs an explicit
         // newest-wins tombstone to stick fleet-wide). See ContactsStore.
@@ -365,11 +365,11 @@ final class SelfSyncCoordinator {
         }
 
         // Contacts: upsert everyone present that isn't tombstone-removed (syncUpsert enforces the tombstone).
-        var wantContacts: [String: Contact] = [:]
+        var wantContacts: [String: SyncedContact] = [:]
         for e in live where e.key.hasPrefix("contact:") {
-            if let c = try? JSONDecoder().decode(Contact.self, from: e.value) { wantContacts[c.idHex] = c }
+            if let c = SyncedContact(record: e.value) { wantContacts[c.contact.idHex] = c }
         }
-        for c in wantContacts.values { cs.syncUpsert(c) }
+        for c in wantContacts.values { cs.syncUpsert(c.contact, legacyRecord: c.legacy) }
         // ADDITIVE ONLY — do not remove contacts a peer happens not to have (see the circle note above:
         // a freshly-restored device's empty state must never delete the primary's contacts/posts).
 
@@ -656,8 +656,8 @@ final class SelfSyncCoordinator {
         let reads = await engineReads(engine)
         let local = currentLocal(snapshot: reads)
         for (key, value) in local {
-            if base.get(key: key) != value {
-                _ = try? base.set(key: key, value: value, ts: now, device: device)
+            if let stamp = SyncedContact.valueToStamp(key: key, local: value, base: base.get(key: key)) {
+                _ = try? base.set(key: key, value: stamp, ts: now, device: device)
             }
         }
         // Detect local removals in dynamic namespaces (a contact deleted, a peer unblocked) and
@@ -666,7 +666,7 @@ final class SelfSyncCoordinator {
         // tombstone the whole account).
         if safeToTombstone(local: local, base: base) {
             for e in base.entries() where Self.dynamicPrefixes.contains(where: { e.key.hasPrefix($0) }) {
-                if local[e.key] == nil {
+                if local[e.key] == nil, SyncedContact.mayTombstone(key: e.key, base: e.value) {
                     _ = try? base.remove(key: e.key, ts: now, device: device)
                 }
             }
@@ -752,12 +752,16 @@ final class SelfSyncCoordinator {
         let now = UInt64(Date().timeIntervalSince1970 * 1000)
         let device = SelfSyncDevice.id
         let local = currentLocal(snapshot: reads)
-        for (key, value) in local where base.get(key: key) != value {
-            _ = try? base.set(key: key, value: value, ts: now, device: device)
+        for (key, value) in local {
+            if let stamp = SyncedContact.valueToStamp(key: key, local: value, base: base.get(key: key)) {
+                _ = try? base.set(key: key, value: stamp, ts: now, device: device)
+            }
         }
         if safeToTombstone(local: local, base: base) {
             for e in base.entries() where Self.dynamicPrefixes.contains(where: { e.key.hasPrefix($0) }) {
-                if local[e.key] == nil { _ = try? base.remove(key: e.key, ts: now, device: device) }
+                if local[e.key] == nil, SyncedContact.mayTombstone(key: e.key, base: e.value) {
+                    _ = try? base.remove(key: e.key, ts: now, device: device)
+                }
             }
         }
     }
@@ -988,5 +992,37 @@ private extension Data {
             bytes.append(b); i += 2
         }
         self = Data(bytes)
+    }
+}
+
+// MARK: - `contact:` records
+
+/// A `contact:` record from any of this account's devices. Each app used to write only its own
+/// field names, so an iPhone could not read an Android phone's or a computer's contacts, nor they
+/// its own, and each published the other's as removed. The rules every app now shares are in the
+/// core (`core/haven-ffi/src/contact_sync.rs`).
+struct SyncedContact {
+    let contact: Contact
+    /// Written by an app from before the shared rules (Android or desktop): it carries only a name
+    /// to show, so it says nothing about the names and picture held here.
+    let legacy: Bool
+
+    init?(record: Data) {
+        guard let whole = contactSyncNormalize(record: record),
+              let contact = try? JSONDecoder().decode(Contact.self, from: whole) else { return nil }
+        self.contact = contact
+        let raw = (try? JSONSerialization.jsonObject(with: record)) as? [String: Any]
+        legacy = raw?["idHex"] == nil
+    }
+
+    /// What to stamp into the shared state for one locally published key. `nil`: leave it alone.
+    static func valueToStamp(key: String, local: Data, base: Data?) -> Data? {
+        if key.hasPrefix("contact:") { return contactSyncFold(local: local, base: base) }
+        return base == local ? nil : local
+    }
+
+    /// May a key missing from this device's state be published as removed?
+    static func mayTombstone(key: String, base: Data?) -> Bool {
+        !key.hasPrefix("contact:") || contactSyncMayTombstone(base: base)
     }
 }

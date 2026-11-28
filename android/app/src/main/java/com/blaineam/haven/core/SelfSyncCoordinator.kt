@@ -619,8 +619,8 @@ object SelfSyncCoordinator {
         val now = System.currentTimeMillis().toULong()
         val local = currentLocal(social)
         for ((key, value) in local) {
-            if (!value.contentEquals(base.get(key))) {
-                runCatching { base.set(key, value, now, deviceId) }
+            SelfSyncWire.valueToStamp(key, value, base.get(key))?.let { stamp ->
+                runCatching { base.set(key, stamp, now, deviceId) }
             }
         }
         // Detect local removals in dynamic namespaces and tombstone them so the removal propagates —
@@ -635,7 +635,9 @@ object SelfSyncCoordinator {
         val baseHasCircle = base.entries().any { it.key.startsWith("circle:") }
         if (!enrollBaseline && (localHasCircle || !baseHasCircle)) {
             for (e in base.entries()) {
-                if (dynamicPrefixes.any { e.key.startsWith(it) } && !local.containsKey(e.key)) {
+                if (dynamicPrefixes.any { e.key.startsWith(it) } && !local.containsKey(e.key) &&
+                    SelfSyncWire.mayTombstone(e.key, e.value)
+                ) {
                     runCatching { base.remove(e.key, now, deviceId) }
                 }
             }

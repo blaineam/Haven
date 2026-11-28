@@ -1,5 +1,6 @@
 package com.blaineam.haven.core
 
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -37,11 +38,27 @@ class SelfSyncWireTest {
     }
 
     @Test fun contact_encoding_round_trips_and_garbage_is_null() {
+        W.contactRules = JvmContactRules
         val c = Contact("ab".repeat(32), "Ana \"A\" Ramos", "verify-1")
         assertEquals(c, W.decodeContact(W.encodeContact(c)))
         assertNull(W.decodeContact("nope".toByteArray()))
         assertNull(W.decodeContact("{\"name\":\"no id\"}".toByteArray()))
         assertEquals(Contact("x", "", ""), W.decodeContact("{\"id_hex\":\"x\"}".toByteArray()))
+    }
+
+    @Test fun only_contact_keys_go_through_the_contact_rules() {
+        val asked = mutableListOf<String>()
+        W.contactRules = object : ContactRules by JvmContactRules {
+            override fun fold(local: ByteArray, base: ByteArray?): ByteArray? { asked.add("fold"); return null }
+            override fun mayTombstone(base: ByteArray?): Boolean { asked.add("tombstone"); return false }
+        }
+        assertNull(W.valueToStamp("contact:ab", byteArrayOf(1), byteArrayOf(2)))
+        assertFalse(W.mayTombstone("contact:ab", byteArrayOf(2)))
+        assertArrayEquals(byteArrayOf(1), W.valueToStamp("blocked:ab", byteArrayOf(1), byteArrayOf(2)))
+        assertNull(W.valueToStamp("blocked:ab", byteArrayOf(1), byteArrayOf(1)))
+        assertTrue(W.mayTombstone("circle:x", null))
+        assertEquals(listOf("fold", "tombstone"), asked)
+        W.contactRules = JvmContactRules
     }
 
     private fun resolve(vararg e: Pair<String, ByteArray>, tie: Boolean = true, legacy: String? = null,

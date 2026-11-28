@@ -40,6 +40,7 @@ class SelfSyncApplyTest {
     private fun field(n: String) = coordinator.getDeclaredField(n).apply { isAccessible = true }
 
     @Before fun setUp() {
+        SelfSyncWire.contactRules = JvmContactRules
         env.up()
         // SelfSyncCoordinator is a one-shot singleton shared with its state test: borrow the context, give it back.
         savedContext = field("appContext").get(SelfSyncCoordinator)

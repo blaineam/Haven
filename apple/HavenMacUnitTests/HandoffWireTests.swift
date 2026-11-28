@@ -145,8 +145,13 @@ final class HandoffWireTests: XCTestCase {
         wire.putRelay(HistoryHandoffWire.keysRequestKey(acct, sib.deviceHex), try JSONEncoder().encode(ask))
         let manifestKey = HistoryHandoffWire.keysManifestKey(acct, sib.deviceHex, me)
         var progress: HistoryHandoffWire.KeysManifest?
-        for _ in 0..<20 where progress?.complete != true {
-            _ = await MediaKeysSender.shared.serve(until: Date().addingTimeInterval(120))
+        // By the clock, not by a count: while a pass the app started itself is still running,
+        // `serve` returns at once, and twenty such returns were over before it had finished.
+        let giveUp = Date().addingTimeInterval(60)
+        while progress?.complete != true, Date() < giveUp {
+            if !(await MediaKeysSender.shared.serve(until: Date().addingTimeInterval(120))) {
+                try await Task.sleep(nanoseconds: 100_000_000)
+            }
             progress = try wire.relayData(manifestKey).map { try JSONDecoder().decode(HistoryHandoffWire.KeysManifest.self, from: $0) }
         }
         let m = try XCTUnwrap(progress)

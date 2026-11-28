@@ -20,9 +20,14 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - **Songs on posts and stories play in a browser.** The page looks up the 30-second preview in
   Apple's public iTunes Search API, as the desktop app does, and its policy allows Apple's preview
   address. A browser stays quiet until you turn sound on with the speaker.
-- **Friends have names and pictures in a browser and on desktop.** Contacts synced from an iPhone or
-  Mac were spelled differently and silently dropped, and each sync then marked them removed. All
-  three platforms' contact records are now read, and one is written that all three can read.
+- **Your contacts sync between all your own devices**: iPhone, iPad, Mac, Android, desktop and
+  browser. Each app spelled a synced contact its own way and could not read the others', so a
+  friend added on one was missing on another (in a browser they showed with no name or picture),
+  and each sync then marked the unread ones removed. All of them now follow one set of rules in the
+  shared core, which reads every old spelling and writes a record that apps not yet updated can
+  read too. A record from an older app no longer erases your nickname for someone or their picture,
+  and an iPhone can still change or clear a nickname. The web client has had its half since
+  2.2.4-1; the phone and desktop apps get theirs with their next release.
 - **The profile tab loads its media.** Every post and story there was requested from your first
   circle's relays; each now uses its own. A story or photo still on screen is asked for again, so a
   kept story no longer gets only one try.

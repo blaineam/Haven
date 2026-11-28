@@ -21,6 +21,8 @@
     "message_privately": "Message {0} privately",
     "just_now": "just now",
     "close": "Close",
+    "viewer_previous": "Previous",
+    "viewer_next": "Next",
     "cancel": "Cancel",
     "save": "Save",
     "done": "Done",
@@ -945,6 +947,8 @@
 
       "just_now": "たった今",
       "close": "閉じる",
+      "viewer_previous": "前へ",
+      "viewer_next": "次へ",
       "cancel": "キャンセル",
       "save": "保存",
       "done": "完了",
@@ -1751,6 +1755,8 @@
 
       "just_now": "gerade eben",
       "close": "Schließen",
+      "viewer_previous": "Zurück",
+      "viewer_next": "Weiter",
       "cancel": "Abbrechen",
       "save": "Speichern",
       "done": "Fertig",
@@ -2557,6 +2563,8 @@
 
       "just_now": "ahora mismo",
       "close": "Cerrar",
+      "viewer_previous": "Anterior",
+      "viewer_next": "Siguiente",
       "cancel": "Cancelar",
       "save": "Guardar",
       "done": "Listo",
@@ -3363,6 +3371,8 @@
 
       "just_now": "방금",
       "close": "닫기",
+      "viewer_previous": "이전",
+      "viewer_next": "다음",
       "cancel": "취소",
       "save": "저장",
       "done": "완료",
@@ -4169,6 +4179,8 @@
 
       "just_now": "agora mesmo",
       "close": "Fechar",
+      "viewer_previous": "Anterior",
+      "viewer_next": "Próximo",
       "cancel": "Cancelar",
       "save": "Salvar",
       "done": "Concluído",
@@ -4975,6 +4987,8 @@
 
       "just_now": "proprio ora",
       "close": "Chiudi",
+      "viewer_previous": "Precedente",
+      "viewer_next": "Successivo",
       "cancel": "Annulla",
       "save": "Salva",
       "done": "Fatto",

@@ -302,7 +302,7 @@ export default {
     'desktop-ui-test': {
       type: 'cmd',
       cmd: 'node',
-      args: ['--test', 'desktop/ui/ui.test.mjs', 'desktop/ui-test/app.dom.test.mjs', 'desktop/ui-test/app.regressions.test.mjs', 'desktop/ui-test/desktop-cov.test.mjs'],
+      args: ['--test', 'desktop/ui/ui.test.mjs', 'desktop/ui-test/app.dom.test.mjs', 'desktop/ui-test/app.regressions.test.mjs', 'desktop/ui-test/app.webclient.test.mjs', 'desktop/ui-test/desktop-cov.test.mjs'],
       description: 'Desktop UI i18n + pure-helper tests + whole-app.js DOM-stub tests (node --test)',
     },
 
@@ -334,6 +334,17 @@ export default {
       cmd: 'node',
       args: ['--test', 'web-client/sw.test.mjs'],
       description: 'Web client service worker tests (node --test, no network)',
+    },
+
+    // ── The web client in a REAL browser against a native engine hosting a real relay: linking,
+    //    posts and media both ways, storage at rest, then what a person does with it — video and
+    //    voice playback under the page's security policy, carousels, the grid viewer, story swipes,
+    //    songs. Builds the wasm client first; run it through buildq. See Scripts/web-smoke.mjs.
+    'web-client-browser': {
+      type: 'cmd',
+      cmd: 'node',
+      args: ['Scripts/web-smoke.mjs'],
+      description: 'Web client end to end in a headless browser (builds the wasm client)',
     },
 
     // ── Desktop (Tauri) BINARY. `desktop` above runs the crate's tests and `desktop-ui` is a JS
@@ -434,7 +445,7 @@ export default {
     // Mode without an auth prompt on the gate Mac (`automationmodetool enable-automationmode-without-authentication`).
     requireGreen: [
       'core', 'fabric', 'apple-logic', 'apple-unit', 'ios', 'ui-ipad', 'ui-mac', 'ui-watch', 'macos', 'watch-build', 'android-native', 'android', 'android-minified',
-      'desktop', 'desktop-ui', 'desktop-ui-test', 'desktop-build', 'push-worker', 'web', 'qa-harness', 'e2e',
+      'desktop', 'desktop-ui', 'desktop-ui-test', 'desktop-build', 'push-worker', 'web', 'qa-harness', 'e2e', 'web-push-sw', 'web-client-browser',
     ],
   },
 };

@@ -356,7 +356,10 @@ async fn a_relay_that_refuses_us_is_recorded_not_parked_and_a_dead_one_is_parked
     let stub = Stub::start().await;
     let (a, _) = new_engine(175);
     wire_to(&a, &stub).await;
-    a.post(DEFAULT_CIRCLE.into(), "refused".into(), vec![], None, false, None);
+    // Authored beside the engine: `Engine::post` also uploads in the background, and on a busy
+    // machine that attempt could meet the forced 500 late and park the URL again after the test
+    // had cleared it.
+    a.social.post(DEFAULT_CIRCLE.into(), "refused".into(), vec![], None, None, false, false, now_ms()).unwrap();
     let envs = a.social.export_my_envelopes(DEFAULT_CIRCLE.to_string());
 
     a.dyn_state.lock().seen_mailbox.clear(); // as if no relay had ever taken it
@@ -1246,6 +1249,35 @@ async fn a_browser_asks_again_for_an_old_photo_that_missed_the_first_time() {
     assert!(p.upload_media(DEFAULT_CIRCLE, &r).await);
     web.request_missing_media();
     bounded("the sweep fetches it", async {
+        while !web.media_present(&r) {
+            crate::rt::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+}
+
+/// A kept story outlives its post, so no feed names its media and the sweep never asks for it.
+/// The page asking again while it is on screen is its only second chance.
+#[tokio::test]
+async fn a_browser_asking_again_for_media_no_post_names_gets_a_second_attempt() {
+    let stub = Stub::start().await;
+    let (p, _) = new_engine(178);
+    wire_to(&p, &stub).await;
+    let web = linked_seedless_named(&p, &haven_p2p::webpolicy::mark_web_device_name("Safari")).await;
+    wire_to(&web, &stub).await;
+    let r = p.add_local_media(DEFAULT_CIRCLE, b"\xFF\xD8\xFF a kept story", false);
+
+    web.media_want(DEFAULT_CIRCLE, vec![r.clone()]); // not on the relay yet
+    crate::rt::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(!web.media_present(&r));
+    assert!(p.upload_media(DEFAULT_CIRCLE, &r).await);
+    web.request_missing_media();
+    crate::rt::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(!web.media_present(&r), "no post names it, so the sweep leaves it");
+
+    web.forget_web_asks(); // ten seconds later
+    web.media_want(DEFAULT_CIRCLE, vec![r.clone()]);
+    bounded("the second ask fetches it", async {
         while !web.media_present(&r) {
             crate::rt::sleep(std::time::Duration::from_millis(20)).await;
         }

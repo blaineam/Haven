@@ -92,7 +92,7 @@ echo "built $dist ($(find "$dist" -type f | wc -l | tr -d ' ') files)"
 site="$here/dist-site"
 rm -rf "$site"
 cp -R "$dist" "$site"
-csp="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data: https://*.mzstatic.com; media-src 'self' blob:; font-src 'self'; connect-src 'self' https: wss:; worker-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'"
+csp="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data: https://*.mzstatic.com; media-src 'self' blob: https://*.itunes.apple.com https://*.mzstatic.com; font-src 'self'; connect-src 'self' https: wss:; worker-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'"
 HAVEN_CSP="$csp" HAVEN_RDV="${HAVEN_SITE_RENDEZVOUS:-}" awk '
   /<meta name="viewport"/ && !done {
     print

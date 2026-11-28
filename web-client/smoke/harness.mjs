@@ -158,7 +158,10 @@ function retryStalledLoads(page, tries = 4, timeout = 15000) {
 
 /** Open a page in headless Chromium and wait until `ready()` is true in it. */
 export async function openPage(url, { ready = () => window.havenReady === true, before } = {}) {
-  const browser = await chromium.launch();
+  // SMOKE_EXECUTABLE: a browser build already on this machine, when it is not the one this
+  // Playwright would download.
+  const executablePath = process.env.SMOKE_EXECUTABLE || undefined;
+  const browser = await chromium.launch({ executablePath });
   const page = await browser.newPage();
   page.on("console", (m) => { if (process.env.SMOKE_CONSOLE || m.type() === "error") console.log(`   [page ${m.type()}] ${m.text()}`); });
   page.on("pageerror", (e) => console.log(`   [page error] ${e.message}`));

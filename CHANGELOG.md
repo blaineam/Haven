@@ -9,6 +9,32 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Fixed
+- **Haven in a browser: videos and voice notes play.** The page was handed them as `data:` links,
+  which its security policy refuses for video and sound. They are now `blob:` links.
+- **Songs on posts and stories play in a browser.** The page looks up the 30-second preview in
+  Apple's public iTunes Search API, as the desktop app does, and its policy allows Apple's preview
+  address. A browser stays quiet until you turn sound on with the speaker.
+- **Friends have names and pictures in a browser and on desktop.** Contacts synced from an iPhone or
+  Mac were spelled differently and silently dropped, and each sync then marked them removed. All
+  three platforms' contact records are now read, and one is written that all three can read.
+- **The profile tab loads its media.** Every post and story there was requested from your first
+  circle's relays; each now uses its own. A story or photo still on screen is asked for again, so a
+  kept story no longer gets only one try.
+- **Carousels keep their place and stories swipe.** The profile tab no longer redraws on every sync.
+  Stories swipe with a trackpad or a mouse; with only your own on show, a swipe moves one story.
+  Carousels have previous and next buttons.
+- A video or story that finishes loading keeps its framing, autoplay and sound button, and shows
+  its poster while it loads. A story's timer starts when its picture is there.
+
+### Added
+- **A full-window viewer.** Click a photo, or any tile of a large grid, and swipe, scroll or use the
+  arrow keys through the post.
+- **Browsers load small first.** The thumbnail shows as soon as a post is on screen; the full photo
+  or video is fetched only if you stay on it.
+- Tests: the browser end to end is now a Soren suite (`web-client-browser`) in the release gate, with
+  checks for each of the above in a real browser, and CI also runs it in WebKit.
+
 ### Changed
 - Release tooling: `Scripts/asc-autosubmit.mjs --build-number N` submits builds that were archived
   and uploaded from a Mac, for when Xcode Cloud can't build a release (docs/RELEASING.md).

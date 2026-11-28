@@ -334,3 +334,90 @@ fn bool_values_read_the_first_byte() {
     assert_eq!(bool_value(&[2]), Some(false));
     assert_eq!(bool_value(&[]), None);
 }
+
+// ---- `contact:` records across platforms -----------------------------------------------------
+
+/// What `JSONEncoder` writes for Apple's `Contact` (apple/HavenApp/Contacts.swift): optionals that
+/// are nil are left out.
+fn apple_record(hex: &str) -> Vec<u8> {
+    format!(
+        r#"{{"idHex":"{hex}","name":"Hand Shake","authoritativeName":"Signed Name","verificationHex":"vv","avatarB64":"/9j/4AAQ","emoji":"🌊","bio":"hi","link":"https://example.org"}}"#
+    )
+    .into_bytes()
+}
+
+fn android_record(hex: &str) -> Vec<u8> {
+    format!(r#"{{"id_hex":"{hex}","name":"Droid Friend","verify":"av"}}"#).into_bytes()
+}
+
+#[test]
+fn an_iphones_contact_arrives_with_name_and_picture() {
+    // The browser showed "Someone (d6c22b)" and no pictures: this record did not parse at all.
+    let mut p = Prefs::default();
+    assert!(apply_local(&[("contact:ab12".into(), apple_record("ab12"))], &mut p, &social(1)));
+    let c = &p.contacts[0];
+    assert_eq!((c.name.as_str(), c.verify_hex.as_str(), c.emoji.as_str()), ("Signed Name", "vv", "🌊"));
+    assert_eq!(c.avatar, "data:image/jpeg;base64,/9j/4AAQ");
+    assert_eq!((c.bio.as_str(), c.link.as_str()), ("hi", "https://example.org"));
+}
+
+#[test]
+fn a_nickname_wins_and_the_old_and_android_spellings_still_read() {
+    let nick = br#"{"idHex":"a1","name":"x","authoritativeName":"y","nickname":"Mum"}"#;
+    assert_eq!(contact_from_wire(nick).unwrap().name, "Mum");
+    let droid = contact_from_wire(&android_record("a2")).unwrap();
+    assert_eq!((droid.name.as_str(), droid.verify_hex.as_str(), droid.avatar.as_str()), ("Droid Friend", "av", ""));
+    let old = serde_json::to_vec(&contact("a3", "Old Desktop")).unwrap();
+    assert_eq!(contact_from_wire(&old).unwrap().name, "Old Desktop");
+    assert!(contact_from_wire(b"{}").is_none() && contact_from_wire(b"not json").is_none());
+}
+
+#[test]
+fn what_this_engine_publishes_every_platform_can_read() {
+    let mut c = contact("a4", "Zed");
+    c.avatar = "data:image/jpeg;base64,/9j/AA".into();
+    let v: serde_json::Value = serde_json::from_slice(&contact_to_wire(&c, None)).unwrap();
+    // Apple needs `idHex` + `name`; Android needs `id_hex`; each reads its own names for the rest.
+    for (k, want) in [("idHex", "a4"), ("id_hex", "a4"), ("name", "Zed"), ("verificationHex", "v"), ("verify", "v"), ("avatarB64", "/9j/AA")] {
+        assert_eq!(v[k].as_str(), Some(want), "{k}");
+    }
+    assert_eq!(contact_from_wire(&contact_to_wire(&c, None)).unwrap().avatar, c.avatar, "round trip");
+}
+
+#[test]
+fn syncing_with_a_phone_neither_rewrites_nor_removes_its_contacts() {
+    for record in [apple_record("a5"), android_record("a5")] {
+        let mut p = Prefs::default();
+        let s = social(1);
+        apply_local(&[("contact:a5".into(), record.clone())], &mut p, &s);
+        let local = current_local(&p, &s);
+        assert_eq!(fold_value("contact:a5", &local["contact:a5"], Some(&record)), None, "the same contact, spelled differently, is not a change");
+    }
+    // A record this build cannot read is not "removed here".
+    assert!(!may_tombstone("contact:a6", Some(b"{\"someFutureShape\":1}")));
+    assert!(!may_tombstone("contact:a6", None));
+    assert!(may_tombstone("contact:a6", Some(&apple_record("a6"))), "one we held and dropped still propagates");
+    assert!(may_tombstone("blocked:a6", Some(&[1])));
+}
+
+#[test]
+fn a_real_change_is_published_and_keeps_what_the_phone_knew() {
+    let record = br#"{"idHex":"a7","name":"x","authoritativeName":"Before","nickname":"","futureField":"kept"}"#;
+    let mut c = contact_from_wire(record).unwrap();
+    c.name = "After".into();
+    let out = fold_value("contact:a7", &contact_to_wire(&c, None), Some(record)).expect("a rename is news");
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["authoritativeName"].as_str(), Some("After"));
+    assert_eq!(v["futureField"].as_str(), Some("kept"));
+    assert_eq!(contact_from_wire(&out).unwrap().name, "After");
+    assert_eq!(fold_value("contact:a7", &contact_to_wire(&c, None), Some(&out)), None, "and settles");
+}
+
+#[test]
+fn a_record_without_a_picture_does_not_wipe_one() {
+    let mut p = Prefs::default();
+    let s = social(1);
+    apply_local(&[("contact:a8".into(), apple_record("a8"))], &mut p, &s);
+    apply_local(&[("contact:a8".into(), android_record("a8"))], &mut p, &s);
+    assert!(p.contacts[0].avatar.starts_with("data:image/jpeg"), "{:?}", p.contacts[0]);
+}

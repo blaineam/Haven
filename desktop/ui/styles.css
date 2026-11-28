@@ -619,6 +619,49 @@ input:focus, textarea:focus, select:focus {
 }
 .carousel-dots i.on { background: rgba(255, 255, 255, 0.95); }
 
+/* Previous/next over a carousel and the viewer: what a mouse uses where a finger swipes. Shown on
+   hover (or keyboard focus); a touch screen swipes, so it gets none. */
+.carousel-arrow {
+  position: absolute; top: 50%; transform: translateY(-50%); z-index: 5;
+  width: 34px; height: 34px; border-radius: 50%; padding: 0; cursor: pointer; color: #fff;
+  display: flex; align-items: center; justify-content: center; background: rgba(0, 0, 0, .45);
+  opacity: 0; transition: opacity .15s ease;
+}
+.carousel-arrow svg { width: 18px; height: 18px; }
+.carousel-arrow.prev { left: 8px; }
+.carousel-arrow.next { right: 8px; }
+.post-media.carousel:hover .carousel-arrow, .media-viewer .carousel-arrow, .carousel-arrow:focus-visible { opacity: 1; }
+@media (hover: none) { .carousel-arrow { display: none !important; } }
+.post-media img { cursor: zoom-in; }
+
+/* The full-window viewer: one item per screen, paged sideways. */
+.modal.plain.media-viewer {
+  position: fixed; inset: 0; width: 100vw; height: 100vh; height: 100dvh; max-width: none; max-height: none;
+  padding: 0; border: 0; border-radius: 0; background: rgba(0, 0, 0, .96); overflow: hidden;
+}
+.viewer-track {
+  display: flex; width: 100%; height: 100%; overflow-x: auto; overflow-y: hidden;
+  scroll-snap-type: x mandatory; overscroll-behavior: contain; scrollbar-width: none;
+}
+.viewer-track::-webkit-scrollbar { display: none; }
+.viewer-slide {
+  flex: 0 0 100%; height: 100%; scroll-snap-align: center; scroll-snap-stop: always; position: relative;
+  display: flex; align-items: center; justify-content: center; padding: 52px 12px 36px; box-sizing: border-box;
+}
+.viewer-slide img, .viewer-slide video { max-width: 100%; max-height: 100%; object-fit: contain; }
+.viewer-slide .media-evicted { min-width: min(80vw, 320px); min-height: 220px; }
+.viewer-count {
+  position: absolute; left: 0; right: 0; bottom: 10px; text-align: center; color: rgba(255, 255, 255, .8);
+  font-size: 12px; pointer-events: none;
+}
+.media-viewer .modal-x { z-index: 6; }
+
+/* A story is dragged as one surface: nothing in it may start the browser's own drag, selection
+   or scroll, any of which swallows the swipe. */
+.story-canvas { touch-action: none; -webkit-user-select: none; user-select: none; }
+.story-canvas img, .story-canvas video { -webkit-user-drag: none; }
+.story-stage { overscroll-behavior: contain; }
+
 /* ---- Reactions row (macOS `reactionsRow`) --------------------------------------------------
    Chips left (glass capsules, pink-tinted when they're YOURS), quick-react emoji + `＋` right. */
 .post-actions { display: flex; gap: 8px; margin-top: 12px; align-items: center; }

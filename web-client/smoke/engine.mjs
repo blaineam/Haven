@@ -21,6 +21,7 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { openPage, root, run } from "./harness.mjs";
+import { mediaChecks, watchMedia } from "./media.mjs";
 
 const until = async (what, fn, ms = 90000) => {
   const deadline = Date.now() + ms;
@@ -119,7 +120,7 @@ await run(
         try { return (await fetch(`${origin}/_haven`)).ok; } catch { return false; }
       }, 180000);
     }
-    const { browser, page } = await openPage(`${origin}/app/`, { ready: () => !!window.__HAVEN_WEB__, before: quiet });
+    const { browser, page } = await openPage(`${origin}/app/`, { ready: () => !!window.__HAVEN_WEB__, before: async (p) => { await quiet(p); await watchMedia(p); } });
     onExit(() => browser.close());
     // An uncaught error in the page — above all a Rust panic in the engine, which surfaces as a
     // bare "unreachable" — fails the run, whatever else passed. (A panic kills only the task it
@@ -271,6 +272,8 @@ await run(
     await page.locator(".attach-preview .chip .x").first().click();
     await page.locator('.tab[data-view="you"]').click();
     step("a picture dropped on the page is attached to the composer; a drop never navigates away");
+
+    await mediaChecks({ page, invoke, until, step });
 
     // Give the engine's delayed save (3 s after a received post) time to run, then: no crash.
     await page.waitForTimeout(4000);

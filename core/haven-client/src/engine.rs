@@ -255,6 +255,8 @@ struct DynState {
     web_media_wanted: std::collections::HashSet<String>,
     /// Browser only: per wanted ref, how many times the sweep has asked and when it may next.
     web_media_retry: HashMap<String, (u32, u64)>,
+    /// Browser only: when the page's own ask last started a download of each ref.
+    web_media_asked: HashMap<String, u64>,
     /// Camera-state ordering (frame 22): the stamp of the last one sent, and the newest applied
     /// from each peer — see [`Engine::camera_state_is_current`].
     camera_stamp_sent: u64,
@@ -804,7 +806,7 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
 /// The payload of a `data:` URL, or the string unchanged if it isn't one. The frontend stores
 /// avatars as `data:image/jpeg;base64,…` (that's what `img src` wants), but the profile card on the
 /// wire is bare base64 — iOS feeds it straight to `Data(base64Encoded:)`, which rejects the prefix.
-fn raw_base64(s: &str) -> String {
+pub(crate) fn raw_base64(s: &str) -> String {
     match s.split_once(";base64,") {
         Some((head, payload)) if head.starts_with("data:") => payload.to_string(),
         _ => s.to_string(),
@@ -4323,17 +4325,24 @@ impl Engine {
     /// narrowed to what was wanted here, so the page loads what the person scrolled to.
     /// Bounded: a wanted set that grows past a few thousand entries is started over.
     pub fn media_want(self: &Arc<Self>, circle_id: &str, references: Vec<String>) {
+        let now = now_ms();
         let mut fetch = Vec::new();
         {
             let mut st = self.dyn_state.lock();
             if st.web_media_wanted.len() > 4000 {
                 st.web_media_wanted.clear();
+                st.web_media_asked.clear();
             }
             for r in references {
                 if r.is_empty() || LocalMedia::is_synthetic(&r) {
                     continue;
                 }
-                if st.web_media_wanted.insert(r.clone()) && !self.media.has(&r) && !st.media_unopenable.contains(&r) {
+                st.web_media_wanted.insert(r.clone());
+                // Asked again while still on screen: try again. The sweep only knows what the
+                // feed names, so a kept story whose post is gone had one attempt, ever.
+                let recent = st.web_media_asked.get(&r).is_some_and(|at| now.saturating_sub(*at) < Self::WEB_REASK_MS);
+                if !recent && !self.media.has(&r) && !self.media.fetch_in_flight(&r) && !st.media_unopenable.contains(&r) {
+                    st.web_media_asked.insert(r.clone(), now);
                     fetch.push(r);
                 }
             }
@@ -4349,6 +4358,15 @@ impl Engine {
                 }
             });
         }
+    }
+
+    /// How soon the page's asking again for the same blob starts another download of it.
+    pub(crate) const WEB_REASK_MS: u64 = 10_000;
+
+    /// For a test: let the next [`Self::media_want`] count as a fresh ask, without waiting.
+    #[cfg(test)]
+    pub(crate) fn forget_web_asks(&self) {
+        self.dyn_state.lock().web_media_asked.clear();
     }
 
     pub fn media_download(self: &Arc<Self>, reference: String) {
@@ -10508,6 +10526,7 @@ impl Engine {
     pub(crate) fn retry_media_after_new_keys(self: &Arc<Self>) {
         {
             let mut st = self.dyn_state.lock();
+            st.web_media_asked.clear();
             st.media_unopenable.clear();
             st.web_media_retry.clear();
         }
@@ -13771,8 +13790,8 @@ impl Engine {
             crate::selfsync::current_local(&prefs, &self.social)
         };
         for (key, value) in &local {
-            if base.get(key) != Some(value.as_slice()) {
-                base.set(key, value.clone(), stamp);
+            if let Some(value) = crate::selfsync::fold_value(key, value, base.get(key)) {
+                base.set(key, value, stamp);
             }
         }
         // Detect local removals in dynamic namespaces and tombstone them — BUT NOT when the engine
@@ -13786,6 +13805,7 @@ impl Engine {
             for key in present_keys {
                 if crate::selfsync::DYNAMIC_PREFIXES.iter().any(|p| key.starts_with(p))
                     && !local.contains_key(&key)
+                    && crate::selfsync::may_tombstone(&key, base.get(&key))
                 {
                     base.remove(&key, stamp);
                 }

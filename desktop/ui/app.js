@@ -172,6 +172,7 @@ const ICONS = {
   "globe": { d: "M12 3a9 9 0 100 18 9 9 0 000-18zM3 12h18M12 3c2.6 2.4 4 5.6 4 9s-1.4 6.6-4 9c-2.6-2.4-4-5.6-4-9s1.4-6.6 4-9z" },
   "chevron.down": { d: "M4 8l6 6 6-6" },
   "chevron.right": { d: "M9 5l7 7-7 7" },
+  "chevron.left": { d: "M15 5l-7 7 7 7" },
   "person.2.fill": { fill: true, d: "M9 11.2a3.4 3.4 0 100-6.8 3.4 3.4 0 000 6.8zm7 .3a2.9 2.9 0 100-5.8 2.9 2.9 0 000 5.8zM9 12.8c-3 0-5.6 1.7-5.6 3.9v1.1a.8.8 0 00.8.8h9.6a.8.8 0 00.8-.8v-1.1c0-2.2-2.6-3.9-5.6-3.9zm7 .2c-.7 0-1.4.1-2 .3 1.2 1 1.9 2.2 1.9 3.4v1.9h4.3a.8.8 0 00.8-.8v-.9c0-2-2.3-3.9-5-3.9z" },
   // Stroked, not filled: the filled gear's teeth collapse into an unreadable blob at a 16px chip.
   "gearshape.fill": { w: 1.6, d: "M12 15a3 3 0 100-6 3 3 0 000 6z", extra: "M19.1 14.6a1.6 1.6 0 00.3 1.8l.1.1a1.9 1.9 0 11-2.7 2.7l-.1-.1a1.6 1.6 0 00-1.8-.3 1.6 1.6 0 00-1 1.5v.2a1.9 1.9 0 11-3.8 0v-.1a1.6 1.6 0 00-1-1.5 1.6 1.6 0 00-1.8.3l-.1.1a1.9 1.9 0 11-2.7-2.7l.1-.1a1.6 1.6 0 00.3-1.8 1.6 1.6 0 00-1.5-1h-.2a1.9 1.9 0 110-3.8h.1a1.6 1.6 0 001.5-1 1.6 1.6 0 00-.3-1.8l-.1-.1a1.9 1.9 0 112.7-2.7l.1.1a1.6 1.6 0 001.8.3h.1a1.6 1.6 0 001-1.5v-.2a1.9 1.9 0 113.8 0v.1a1.6 1.6 0 001 1.5 1.6 1.6 0 001.8-.3l.1-.1a1.9 1.9 0 112.7 2.7l-.1.1a1.6 1.6 0 00-.3 1.8v.1a1.6 1.6 0 001.5 1h.2a1.9 1.9 0 110 3.8h-.1a1.6 1.6 0 00-1.5 1z" },
@@ -318,6 +319,7 @@ async function loadMedia(node, circleId, ref) {
     // median rather than multi-megabyte originals), so the base64 copy this makes is a fraction of
     // what it used to be.
     const url = await invoke("media_data_url", { circleId, reference: ref });
+    if (isVideoRef(ref)) showVideoPoster(node, circleId, ref);
     if (url) { node.src = url; return; }
     const isVideo = isVideoRef(ref);
     // Which post this tile sits in, if any — read off the card rather than threaded through every
@@ -328,12 +330,73 @@ async function loadMedia(node, circleId, ref) {
     const bytes = await invoke("media_evicted_size", { reference: ref }).catch(() => null);
     if (bytes != null) node.replaceWith(evictedPlaceholder(circleId, ref, bytes, isVideo, post));
     else {
-      const box = syncingPlaceholder(circleId, ref, isVideo);
+      const box = syncingPlaceholder(circleId, ref, isVideo, node);
       node.replaceWith(box);
-      // In a browser nothing is downloaded until it is on screen. The app prefetches by itself.
-      if (HOST_WEB) wantWhenVisible(box, circleId, [ref, ThumbIndex.thumbFor(ref)].filter(Boolean));
+      // In a browser nothing is downloaded until it is on screen: the small picture at once, the
+      // full item once the reader stays on it. The app prefetches by itself.
+      if (HOST_WEB) {
+        wantWhenVisible(box, circleId, stillRefsFor(ref));
+        wantAfterDwell(box, circleId, ref);
+      }
     }
   } catch (_) {}
+}
+
+/** The small picture that can stand in for `ref`: its `thumb:` companion, else a video's poster. */
+function stillRefsFor(ref) {
+  const still = ThumbIndex.thumbFor(ref) || (isVideoRef(ref) ? PosterIndex.posterFor(ref) : null);
+  return still ? [still] : [];
+}
+
+/** Give a video the picture of itself that came with the post, so it is never a black box while
+ *  the browser reads its first frame. */
+function showVideoPoster(node, circleId, ref) {
+  const still = PosterIndex.posterFor(ref) || ThumbIndex.thumbFor(ref);
+  if (!still || node.getAttribute("poster")) return;
+  invoke("media_data_url", { circleId, reference: still })
+    .then((u) => { if (u) node.setAttribute("poster", u); })
+    .catch(() => {});
+}
+
+// How long a tile has to stay on screen before a browser asks for the full item. A reader flicking
+// past a post gets its small picture and costs the relay nothing more.
+const WEB_DWELL_MS = 700;
+
+// Browser only: ask for the full item once its placeholder has stayed visible for WEB_DWELL_MS.
+const wantAfterDwell = (() => {
+  let observer = null;
+  const waiting = new WeakMap(); // element → { circleId, ref, timer }
+  const ask = (el) => {
+    const w = waiting.get(el);
+    if (!w) return;
+    waiting.delete(el);
+    observer?.unobserve(el);
+    el.dataset.asked = "1";
+    invoke("media_want", { circleId: w.circleId, references: [w.ref] }).catch(() => {});
+  };
+  return (el, circleId, ref) => {
+    waiting.set(el, { circleId, ref, timer: null });
+    if (typeof IntersectionObserver === "undefined") { ask(el); return; }
+    if (!observer) {
+      observer = new IntersectionObserver((entries) => {
+        for (const e of entries) {
+          const w = waiting.get(e.target);
+          if (!w) continue;
+          clearTimeout(w.timer);
+          w.timer = e.isIntersecting
+            ? setTimeout(() => { if (e.target.isConnected) ask(e.target); }, WEB_DWELL_MS) : null;
+        }
+      }, { threshold: 0.25 });
+    }
+    observer.observe(el);
+  };
+})();
+
+/** Is any of this element inside the window right now? */
+function onScreen(el) {
+  const r = el.getBoundingClientRect?.();
+  if (!r || (!r.width && !r.height)) return false;
+  return r.bottom > 0 && r.right > 0 && r.top < window.innerHeight && r.left < window.innerWidth;
 }
 
 // Browser only: ask the engine for media when its placeholder actually comes into view (or close
@@ -366,12 +429,15 @@ const wantWhenVisible = (() => {
 // `thumb:` companion behind the spinner when one is held (real shape and color instead of a grey
 // box), "Still loading…" while the engine's sweeps fetch, and a terminal "Not available yet" +
 // Retry once polling gives up — never a spinner that lies forever.
-function syncingPlaceholder(circleId, ref, isVideo) {
-  const box = el("div", { class: "media-evicted", style: "position:relative;overflow:hidden" });
-  const th = ThumbIndex.thumbFor(ref);
-  if (th) {
+function syncingPlaceholder(circleId, ref, isVideo, original) {
+  const box = el("div", { class: "media-evicted", style: "position:relative;overflow:hidden", "data-media-ref": ref });
+  const th = stillRefsFor(ref)[0] || null;
+  let thumbShown = false;
+  const showThumb = () => {
+    if (!th || thumbShown) return;
     invoke("media_data_url", { circleId, reference: th }).then((u) => {
-      if (!u || !box.isConnected) return;
+      if (!u || thumbShown || !box.isConnected) return;
+      thumbShown = true;
       // SHARP, full opacity, nothing over it. The thumb IS the picture, just smaller — blurring it
       // behind a spinner made a post that was loading fine look broken. Apple/Android parity.
       // Sized exactly like the real fitted media (`.media-page > img`): auto/auto capped by the page
@@ -397,7 +463,16 @@ function syncingPlaceholder(circleId, ref, isVideo) {
       box.prepend(pic);
       front.style.display = "none";   // the picture is the status; no caption over it
     }).catch(() => {});
-  }
+  };
+  setTimeout(showThumb, 0);   // after the caller has put the box on the page
+  // The SAME element the page built takes the bytes: a carousel page, a story and a video's sound
+  // button all hold on to it. A new one arrived without a story's autoplay and framing, and
+  // without the listeners that give its page the right shape.
+  const arrived = () => {
+    const n = original || mediaNode(ref);
+    box.replaceWith(n);
+    loadMedia(n, circleId, ref);
+  };
   const front = el("div", { class: "col", style: "position:relative;z-index:1;align-items:center;gap:6px" });
   box.append(front);
   // `finding` = this device knows NO relay for the circle yet (a freshly installed device that has not
@@ -420,12 +495,22 @@ function syncingPlaceholder(circleId, ref, isVideo) {
   const start = () => {
     waiting(false);
     let waited = 0;
+    let askedAt = 0;
     let finding = false;
     clearTimeout(timer);
     const tick = async () => {
       if (!box.isConnected) return;   // card re-rendered underneath us — stop polling
       const url = await invoke("media_data_url", { circleId, reference: ref }).catch(() => null);
-      if (url) { const n = mediaNode(ref); box.replaceWith(n); loadMedia(n, circleId, ref); return; }
+      if (url) { arrived(); return; }
+      showThumb();                    // the small picture usually lands long before the rest
+      // A browser that has not asked for the full item yet is not waiting for it.
+      if (HOST_WEB && !box.dataset.asked) { timer = setTimeout(tick, 1000); return; }
+      // Still on screen and still missing: ask again. The first ask may have gone before the
+      // key or the relay's address arrived, and nothing else re-asks for a kept story.
+      if (HOST_WEB && waited - askedAt >= 12000 && onScreen(box)) {
+        askedAt = waited;
+        invoke("media_want", { circleId, references: [...stillRefsFor(ref), ref] }).catch(() => {});
+      }
       const nowFinding = await invoke("media_finding_relay", { circleId }).catch(() => false);
       if (nowFinding !== finding) { finding = nowFinding; waiting(finding); }
       waited += 2000;
@@ -434,7 +519,7 @@ function syncingPlaceholder(circleId, ref, isVideo) {
       if (waited >= 45000 && !finding) { gone(); return; }
       timer = setTimeout(tick, 2000);
     };
-    timer = setTimeout(tick, 2000);
+    timer = setTimeout(tick, HOST_WEB ? 1000 : 2000);
   };
   start();
   return box;
@@ -2354,6 +2439,8 @@ function mediaNode(ref, imgStyle) {
   if (isVideoRef(ref)) {
     const v = el("video", Object.assign({ "data-ref": ref, "data-video": "1", controls: "" },
       state.videoSoundOn && !callAudioActive() && !captureUIOpen() && !state.superDataSaver ? {} : { muted: "" }));
+    v.setAttribute("playsinline", "");
+    if (v.getAttribute("muted") !== null) v.muted = true;   // the attribute alone does not mute a built element
     // TAP A MUTED CLIP TO HEAR IT. When a song owns the post the clip plays silent, and the tap is
     // how the reader says "this one instead" — the song ducks out and the clip's own audio takes
     // over. The video itself is the target, exactly as on iOS, so there is no extra control.
@@ -2553,7 +2640,7 @@ function applyBackdrop(p) {
 function buildMediaPages(refs, container, onAspects) {
   const pages = refs.map((ref) => {
     const node = mediaNode(ref);
-    const page = el("div", { class: "media-page" }, node);
+    const page = el("div", { class: "media-page", "data-media-ref": ref }, node);
     if (node.tagName === "VIDEO") page.append(videoSoundButton(node));
     // .media-page is already position:relative + overflow:hidden — the cover goes straight in, over
     // both the fitted media and its backdrop (which is a blurred copy of the same flagged frame).
@@ -2623,12 +2710,112 @@ function mediaCarousel(refs, container) {
   // the zeros), so a fully-remembered carousel opens at its final height instead of settling into it.
   const seeded = String(carouselAspect(pages.map((p) => p.aspect)));
   for (const p of pages) { p.page.style.aspectRatio = seeded; track.append(p.page); }
-  dots.firstChild.classList.add("on");
-  track.addEventListener("scroll", () => {
-    const i = Math.round(track.scrollLeft / Math.max(1, track.clientWidth));
+  const key = refs.join("|");
+  const at = () => Math.round(track.scrollLeft / Math.max(1, track.clientWidth));
+  // Buttons as well as the scroll: a mouse has nothing to swipe with.
+  const arrow = (cls, label, glyph, step) => el("button", {
+    class: "carousel-arrow glass " + cls, title: label, "aria-label": label,
+    onclick: (e) => {
+      e.stopPropagation();
+      const to = Math.max(0, Math.min(refs.length - 1, at() + step));
+      track.scrollTo?.({ left: to * track.clientWidth, behavior: "smooth" });
+    },
+    ondblclick: (e) => e.stopPropagation(),
+  }, icon(glyph));
+  const back = arrow("prev", t("viewer_previous"), "chevron.left", -1);
+  const next = arrow("next", t("viewer_next"), "chevron.right", 1);
+  const mark = (i) => {
     [...dots.children].forEach((d, j) => d.classList.toggle("on", j === i));
+    back.style.display = i > 0 ? "" : "none";
+    next.style.display = i < refs.length - 1 ? "" : "none";
+  };
+  track.addEventListener("scroll", () => {
+    const i = at();
+    carouselAt.set(key, i);
+    mark(i);
   }, { passive: true });
-  container.append(track, dots);
+  const was = carouselAt.get(key) || 0;
+  mark(was);
+  container.append(track, back, next, dots);
+  // A redraw must not throw the reader back to the first photo.
+  if (was > 0) requestAnimationFrame(() => { track.scrollLeft = was * track.clientWidth; });
+}
+
+/** Which photo each carousel is on, so a redraw can put it back. */
+const carouselAt = new Map();
+
+// ---- Full-window media viewer ------------------------------------------------------------
+/** Open `refs` large, one at a time, starting at `index`: swipe or scroll sideways, or use the
+ *  arrow buttons or keys; Escape or the close button leaves. Only the item shown and its
+ *  neighbors are loaded. */
+function openMediaViewer(refs, index, circleId) {
+  if (!refs.length) return;
+  const track = el("div", { class: "viewer-track" });
+  const slides = refs.map(() => el("div", { class: "viewer-slide" }));
+  slides.forEach((sl) => track.append(sl));
+  const count = el("div", { class: "viewer-count" });
+  let current = -1;
+  const fill = (i) => {
+    const slide = slides[i];
+    if (!slide || slide.dataset.filled) return;
+    slide.dataset.filled = "1";
+    const node = mediaNode(refs[i]);
+    slide.append(node);
+    guardSensitiveIn(slide, node, refs[i]);
+    hydrateMedia(slide, circleId);
+  };
+  const arrow = (cls, label, glyph, step) => el("button", {
+    class: "carousel-arrow glass " + cls, title: label, "aria-label": label, onclick: () => go(current + step),
+  }, icon(glyph));
+  const back = arrow("prev", t("viewer_previous"), "chevron.left", -1);
+  const next = arrow("next", t("viewer_next"), "chevron.right", 1);
+  const settle = (i) => {
+    const to = Math.max(0, Math.min(refs.length - 1, i));
+    if (to === current) return;
+    current = to;
+    [to - 1, to, to + 1].forEach(fill);
+    slides.forEach((sl, j) => { if (j !== to) sl.querySelectorAll("video").forEach((v) => { if (!v.paused) v.pause(); }); });
+    count.textContent = refs.length > 1 ? `${to + 1} / ${refs.length}` : "";
+    back.style.display = to > 0 ? "" : "none";
+    next.style.display = to < refs.length - 1 ? "" : "none";
+  };
+  const go = (i) => {
+    const to = Math.max(0, Math.min(refs.length - 1, i));
+    track.scrollTo?.({ left: to * track.clientWidth, behavior: "smooth" });
+    settle(to);
+  };
+  track.addEventListener("scroll", () => settle(Math.round(track.scrollLeft / Math.max(1, track.clientWidth))), { passive: true });
+  const shell = el("div", { class: "media-viewer" }, track, back, next, count);
+  modal(shell);
+  const onKey = (e) => {
+    if (!shell.isConnected) { window.removeEventListener("keydown", onKey, true); return; }
+    if (e.key === "ArrowRight") { e.preventDefault(); go(current + 1); }
+    else if (e.key === "ArrowLeft") { e.preventDefault(); go(current - 1); }
+  };
+  window.addEventListener("keydown", onKey, true);
+  settle(index);
+  requestAnimationFrame(() => { track.scrollLeft = index * track.clientWidth; });
+}
+
+/** A click on a post's photo opens the viewer. A video keeps its own click (its controls, and
+ *  sound) except in the grid, where the tile is too small to be a player. A double click is the
+ *  heart, so the open waits to see that no second click follows. */
+function viewerOnClick(media, refs, circleId, grid) {
+  let pending = null;
+  const cancel = () => { clearTimeout(pending); pending = null; };
+  media.addEventListener("dblclick", cancel);
+  media.addEventListener("click", (e) => {
+    const hit = e.target.closest?.("img, video, .media-evicted");
+    if (!hit || e.target.closest("button, .sensitive-cover")) return;
+    if (hit.tagName === "VIDEO" && !grid) return;
+    const holder = hit.closest("[data-media-ref]");
+    const ref = (holder && holder.dataset.mediaRef) || hit.dataset.ref;
+    const index = refs.indexOf(ref);
+    if (index < 0) return;
+    if (hit.tagName === "VIDEO") e.preventDefault();
+    cancel();
+    pending = setTimeout(() => { pending = null; openMediaViewer(refs, index, circleId); }, 260);
+  });
 }
 
 // A concealed secret bubble: tap to reveal, auto-conceals after 5s. (Webviews can't truly block
@@ -3649,6 +3836,7 @@ function postCard(it, circleId, reports = []) {
   // map rather than from a main-thread decode). Eleven or more photos used to render NOTHING: this
   // branch was dropped by an unrelated hunk (4a580cc5) while the `masonry` class stayed behind.
   else for (const ref of visualRefs) media.append(guardSensitive(reserveAspect(mediaNode(ref), ref), ref));
+  if (mediaCount && !it.unsent) viewerOnClick(media, visualRefs, circleId, !carousel && mediaCount > 1);
   const audio = el("div", {});
   for (const ref of audioRefs) audio.append(mediaNode(ref));
   // Double-tap a photo to ❤️ it (Instagram-style), like the iOS gesture.
@@ -3684,9 +3872,11 @@ function postCard(it, circleId, reports = []) {
       onclick: async (e) => {
         e.stopPropagation();
         state.videoSoundOn = !state.videoSoundOn;
+        unlockSongs();   // still inside the click
         await invoke("set_video_sound", { on: state.videoSoundOn }).catch(() => {});
         syncFeedVideoSound();
-        renderFeed();
+        await render();  // whichever tab this card is on
+        Autoplay.schedule();
       },
     }, icon(state.videoSoundOn ? "speaker" : "speaker.slash"));
     chip.append(sound);
@@ -4207,7 +4397,10 @@ function hydrateMedia(root, circleId) {
   $$("[data-ref]", root).forEach((node) => {
     if (node.dataset.hydrated === "1") return;
     node.dataset.hydrated = "1";
-    loadMedia(node, circleId, node.dataset.ref);
+    // A page that mixes circles (the profile) says on each card and tile which one it is from.
+    // Taking the caller's for all of them asked the wrong circle's relays.
+    const own = node.closest?.("[data-media-circle]")?.dataset.mediaCircle;
+    loadMedia(node, own || circleId, node.dataset.ref);
   });
 }
 
@@ -4821,7 +5014,7 @@ function viewStories(list, startIndex = 0) {
     }
     // The reader may have advanced while that resolved.
     if (!url || token !== songToken || !card.isConnected) return;
-    songAudio = new Audio(url);
+    songAudio = songPlayer("story", url);
     songAudio.loop = true;
     songAudio.play().catch(() => { songAudio = null; });
   };
@@ -4833,13 +5026,21 @@ function viewStories(list, startIndex = 0) {
   let advanceTimer = null;
   const STILL_MS = 5000;
   const clearAdvance = () => { if (advanceTimer) { clearTimeout(advanceTimer); advanceTimer = null; } };
-  const armAdvance = () => {
+  // How long a story that is still loading is waited for before the run moves on without it.
+  const LOAD_WAIT_MS = 30000;
+  const armAdvance = (waited = 0) => {
     clearAdvance();
+    // The clock starts when there is something to look at.
+    if (slot.querySelector(".media-evicted") && waited < LOAD_WAIT_MS) {
+      advanceTimer = setTimeout(() => { if (card.isConnected) armAdvance(waited + 500); }, 500);
+      return;
+    }
     const v = slot.querySelector("video");
     if (v) {
       // A clip runs to its own end. `loop` is dropped here rather than at creation so the story
       // EDITOR's preview, which shares that builder, keeps looping as it should.
       v.loop = false;
+      if (waited && v.paused && !state.superDataSaver) v.play?.()?.catch(() => {});
       v.addEventListener("ended", () => { if (card.isConnected) nextStory(); }, { once: true });
       // A clip that cannot report its end (unreadable duration) still must not strand the run.
       const ms = Number.isFinite(v.duration) && v.duration > 0 ? v.duration * 1000 + 500 : 15000;
@@ -4882,12 +5083,37 @@ function viewStories(list, startIndex = 0) {
   // Pointer: a tap advances a story (left third steps back); a horizontal DRAG skips whole users
   // (drag left → next person, drag right → previous), and a downward drag dismisses — mirroring the
   // phones' gestures.
+  // A swipe moves between people, as on a phone. With only one person's stories on show (your
+  // own, from your profile) there is nobody else to skip to, so it moves one story.
+  const onePerson = () => stories.every((_, i) => author(i) === author(0));
+  const swipe = (forward) => {
+    if (onePerson()) (forward ? nextStory : prevStory)();
+    else (forward ? nextUser : prevUser)();
+  };
   let sx = 0, sy = 0, dragging = false;
+  // Dragging a picture otherwise starts the browser's own drag-and-drop, which cancels the
+  // pointer before it ever comes up: no swipe with a mouse.
+  slot.addEventListener("dragstart", (e) => e.preventDefault());
+  // A two-finger trackpad swipe arrives as sideways wheel events. One gesture, one step: the
+  // momentum that follows is ignored until it dies down. Taken from the browser, which would
+  // otherwise go back a page.
+  let wheelSum = 0, wheelSpent = false, wheelIdle = null;
+  stage.addEventListener("wheel", (e) => {
+    if (Math.abs(e.deltaX) <= Math.abs(e.deltaY)) return;
+    e.preventDefault();
+    clearTimeout(wheelIdle);
+    wheelIdle = setTimeout(() => { wheelSum = 0; wheelSpent = false; }, 220);
+    if (wheelSpent) return;
+    wheelSum += e.deltaX;
+    if (Math.abs(wheelSum) < 80) return;
+    wheelSpent = true;
+    swipe(wheelSum > 0);
+  }, { passive: false });
   slot.addEventListener("pointerdown", (e) => { dragging = true; sx = e.clientX; sy = e.clientY; });
   slot.addEventListener("pointerup", (e) => {
     if (!dragging) return; dragging = false;
     const dx = e.clientX - sx, dy = e.clientY - sy;
-    if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > 60) { dx < 0 ? nextUser() : prevUser(); return; }
+    if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > 60) { swipe(dx < 0); return; }
     if (dy > 90 && Math.abs(dy) > Math.abs(dx)) { done(); return; }
     if (Math.abs(dx) < 10 && Math.abs(dy) < 10) {
       const r = slot.getBoundingClientRect();
@@ -5826,6 +6052,13 @@ async function renderYou() {
     }
   }
   mine.sort((a, b) => Number(b.created_at) - Number(a.created_at));
+  const keptNow = await invoke("kept_stories").catch(() => []);
+  // The same guard as the feed. Without it every sync update rebuilt the whole tab, and in a
+  // browser each download is one: carousels jumped back to the first photo, videos restarted.
+  const sig = JSON.stringify([p, mine, keptNow, state.videoSoundOn, circles.map((c) => [c.id, c.name]), Hidden.showHidden]);
+  const keepScroll = root.scrollTop;
+  if (state.youSig === sig && !state.focusPost && root.querySelector(".profile-head")) return;
+  state.youSig = sig;
   const myPosts = mine.filter((i) => !i.story);
   // My stories for MY PROFILE: the live ones, PLUS any I chose to keep whose event has since been
   // purged. Kept stories are revived HERE and here only — the circle's story tray reads the live
@@ -5836,7 +6069,7 @@ async function renderYou() {
   // snapshot is strictly the after.
   const liveStories = mine.filter((i) => i.story);
   const liveIds = new Set(liveStories.map((i) => i.id));
-  const kept = await invoke("kept_stories").catch(() => []);
+  const kept = keptNow;
   const revived = kept.filter((k) => !liveIds.has(k.id) && (k.media || []).length).map((k) => ({
     id: k.id,
     author_name: t("you"),
@@ -5875,9 +6108,11 @@ async function renderYou() {
       // Never a <video>.
       let cover = displayMediaRefs(s.media || []).find((r) => !r.startsWith("geo:") && !isAudioRef(r));
       if (cover && isVideoRef(cover)) cover = posterRefFor(s.media, cover) || ThumbIndex.thumbFor(cover);
+      // A browser draws a 56px circle from the small picture, never the full one.
+      else if (cover && HOST_WEB) cover = ThumbIndex.thumbFor(cover) || cover;
       if (cover && !isVideoRef(cover)) inner.append(el("img", { "data-ref": cover }));
       else inner.append(icon("photo", "story-ph"));
-      tray.append(el("button", { class: "story-ring cover", onclick: () => viewStories(gallery, idx) }, el("div", { class: "ring" }, inner)));
+      tray.append(el("button", { class: "story-ring cover", "data-media-circle": s._circle, onclick: () => viewStories(gallery, idx) }, el("div", { class: "ring" }, inner)));
     });
     body.append(el("div", { class: "card" }, el("div", { class: "section-label" }, t("your_stories")), tray));
   }
@@ -5891,14 +6126,21 @@ async function renderYou() {
     // scrollbar was a sliver, the reason it was slow to open, and the reason scrolling stuttered
     // (the autoplay pass measures each card, and there were hundreds of them).
     const PAGE = 25;
+    // A rebuild keeps as many cards as the reader had reached, so their place stays put.
+    const reached = state.youShown || 0;
     let shown = 0;
     const sentinel = el("div", { style: "height:1px" });
     let observer = null;
     const nextPage = () => {
       const next = myPosts.slice(shown, shown + PAGE);
       shown += next.length;
-      for (const it of next) body.insertBefore(postCard(it, it._circle), sentinel);
-      for (const c of circles) hydrateMedia(body, c.id);
+      state.youShown = shown;
+      for (const it of next) {
+        const card = postCard(it, it._circle);
+        card.setAttribute("data-media-circle", it._circle);
+        body.insertBefore(card, sentinel);
+      }
+      hydrateMedia(body, state.activeCircle);
       Autoplay.track(body);
       Autoplay.schedule();
       if (shown >= myPosts.length) observer?.disconnect();
@@ -5908,10 +6150,12 @@ async function renderYou() {
                                         { rootMargin: "800px 0px" });
     observer.observe(sentinel);
     nextPage();
+    while (shown < Math.min(reached, myPosts.length)) nextPage();
   }
 
   root.replaceChildren(el("div", { class: "col-wrap" }, body));
-  for (const c of circles) hydrateMedia(root, c.id);   // refs resolve against their own circle's keys
+  hydrateMedia(root, state.activeCircle);   // each card and tile names its own circle
+  root.scrollTop = keepScroll;
 }
 
 /** The emoji palette, in macOS's order — `ProfileStore.avatarChoices` (Profile.swift:120). */
@@ -7556,10 +7800,10 @@ const Autoplay = {
     },
     async sync(card) {
       if (!card) return this.stop();
+      if (!state.videoSoundOn && deviceLikelySilent()) return this.stop();
       const id = card.dataset.post;
       if (this.postId === id) return;            // already this post's song
       this.stop();
-      if (!state.videoSoundOn && deviceLikelySilent()) return;
       const title = card.dataset.songTitle || "", artist = card.dataset.songArtist || "";
       if (!title) return;
       // THE TOKEN IS WHY THIS CANNOT STACK.
@@ -7585,7 +7829,7 @@ const Autoplay = {
       this.stop();                               // belt and braces: never assign over a live one
       this.seq = token;                          // stop() bumped it; this request is still current
       this.postId = id;
-      this.audio = new Audio(url);
+      this.audio = songPlayer("feed", url);
       this.audio.loop = true;
       this.audio.play().catch(() => { this.stop(); });
     },
@@ -7601,10 +7845,56 @@ function videoHasAudio(v) {
   return true;
 }
 
-/** A WebView cannot read the system mute state, so this is deliberately conservative: it never
- *  claims the device is silent. The in-app toggle is the real control on desktop, and this exists
- *  so the rule reads the same on both platforms. */
-function deviceLikelySilent() { return false; }
+/** A WebView cannot read the system mute state, so the desktop app never claims the device is
+ *  silent. A web page stays quiet until its sound is turned on: the speaker is its mute switch. */
+function deviceLikelySilent() { return HOST_WEB; }
+
+// ---- A browser lets a page make sound only from a click -----------------------------------
+// Safari grants that per player: one that has played inside a click may play again later, when a
+// song lookup returns or the next post scrolls in. So a browser keeps one player for the feed and
+// one for stories, and starts each, silently, on the first click.
+const songPlayers = new Map();
+let songsUnlocked = false;
+
+function songPlayer(name, url) {
+  if (!HOST_WEB) return new Audio(url);
+  let a = songPlayers.get(name);
+  if (!a) songPlayers.set(name, (a = new Audio()));
+  a.src = url;
+  return a;
+}
+
+/** A tenth of a second of silence, as a `blob:` URL (the page's policy allows no `data:` sound). */
+function silentClip() {
+  const rate = 8000, samples = 800, bytes = new Uint8Array(44 + samples).fill(128);
+  const view = new DataView(bytes.buffer);
+  const text = (at, s) => [...s].forEach((c, i) => { bytes[at + i] = c.charCodeAt(0); });
+  text(0, "RIFF"); view.setUint32(4, 36 + samples, true); text(8, "WAVEfmt ");
+  view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+  view.setUint32(24, rate, true); view.setUint32(28, rate, true);
+  view.setUint16(32, 1, true); view.setUint16(34, 8, true); text(36, "data"); view.setUint32(40, samples, true);
+  return URL.createObjectURL(new Blob([bytes], { type: "audio/wav" }));
+}
+
+/** Call from inside a click or key press. */
+function unlockSongs() {
+  if (!HOST_WEB || songsUnlocked) return;
+  songsUnlocked = true;
+  const quiet = silentClip();
+  for (const name of ["feed", "story"]) {
+    let a = songPlayers.get(name);
+    if (!a) songPlayers.set(name, (a = new Audio()));
+    if (a.src && !a.paused) continue;
+    a.src = quiet;
+    a.play()?.then(() => { if (a.src === quiet) a.pause(); }).catch(() => { songsUnlocked = false; });
+  }
+}
+if (HOST_WEB) {
+  document.addEventListener("pointerdown", unlockSongs, true);
+  document.addEventListener("keydown", unlockSongs, true);
+  // A song the browser refused earlier gets another chance after any click.
+  document.addEventListener("click", () => Autoplay.schedule(), true);
+}
 window.addEventListener("scroll", () => Autoplay.schedule(), true);
 window.addEventListener("resize", () => Autoplay.schedule());
 document.addEventListener("visibilitychange", () => Autoplay.schedule());
@@ -7628,6 +7918,7 @@ function syncFeedVideoSound() {
     b.title = state.videoSoundOn ? t("mute_all_videos") : t("unmute_all_videos");
     b.replaceChildren(icon(state.videoSoundOn ? "speaker" : "speaker.slash"));
   });
+  Autoplay.schedule();   // the centred post's song follows the same switch
 }
 
 const invitees = () => [...call.roster].filter((h) => h !== call.me).sort();

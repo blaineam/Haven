@@ -138,7 +138,18 @@ devices to be running a build that has this, at the same time as the browser.
 
 ### Photos and videos
 
-A browser reads media from the relay as it scrolls into view. Each blob is encrypted once, to the
+A browser reads media from the relay as it scrolls into view: the post's thumbnail at once, and
+the full photo or video once the reader has stayed on it for a moment (`WEB_DWELL_MS`). What is
+still on screen and still missing is asked for again, which is the only retry a kept story has
+once its post is gone. Video and voice notes are played from `blob:` URLs, because the page's
+policy allows no `data:` media (`web-host.js`).
+
+**Songs.** A post names its song and carries no audio. Like the desktop app, the page looks the
+30-second preview up in Apple's public iTunes Search API, so Apple sees the song's title and artist
+(or its Apple Music number) and the browser's address. No cookies or referrer are sent. A page is
+silent until its sound is turned on.
+
+Each blob is encrypted once, to the
 devices that existed when it was sent and to its sender's circle key at that moment. A browser
 linked later is on no old device list, so the circle key is its way in. It has the keys its
 account's other devices still hold (D25): the last four per sender. Rotation is weekly and on

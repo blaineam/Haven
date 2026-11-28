@@ -115,6 +115,7 @@
 
   /** Unlink this browser: nothing of Haven's is left in it. */
   async function eraseEverything() {
+    forgetPlayable();
     await pushDisable().catch(() => {});   // an unlinked browser must not go on being rung
     if (storage) storage.stop();
     storage = null;
@@ -188,6 +189,77 @@
     } catch (_) { /* next visit */ }
   }
 
+  // ── Video and voice notes ──────────────────────────────────────────────────────────────────
+  // The engine hands the page media as a `data:` URL. This page's security policy lets a picture
+  // be one and a video or sound not (and Safari plays a long `data:` video badly even where it is
+  // allowed), so those are handed over as `blob:` URLs here instead, made once per blob.
+  const PLAYABLE = /^(vid_|v:|aud_|a:)/;
+  const PLAYABLE_BUDGET_BYTES = 192 * 1024 * 1024;
+  const playable = new Map(); // reference → { url, bytes }, oldest use first
+
+  /** The container the bytes really are: clips composed on a computer are WebM under a `vid_` name. */
+  function playableType(bytes, reference) {
+    const video = /^(vid_|v:)/.test(reference);
+    const at = (i, text) => [...text].every((c, j) => bytes[i + j] === c.charCodeAt(0));
+    if (bytes[0] === 0x1a && bytes[1] === 0x45 && bytes[2] === 0xdf && bytes[3] === 0xa3) return video ? "video/webm" : "audio/webm";
+    if (at(4, "ftyp")) return video ? "video/mp4" : "audio/mp4";
+    if (at(0, "OggS")) return video ? "video/ogg" : "audio/ogg";
+    if (at(0, "RIFF")) return "audio/wav";
+    if (at(0, "ID3") || (bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0)) return "audio/mpeg";
+    return video ? "video/mp4" : "audio/mp4";
+  }
+
+  const urlInUse = (url) => [...document.querySelectorAll("video, audio, source")].some((m) => m.getAttribute("src") === url);
+
+  function playableUrl(circleId, reference) {
+    let hit = playable.get(reference);
+    if (hit) { playable.delete(reference); playable.set(reference, hit); return hit.url; }
+    const bytes = app.mediaBytes(circleId || "default", reference);
+    if (!bytes) return null;
+    hit = { url: URL.createObjectURL(new Blob([bytes], { type: playableType(bytes, reference) })), bytes: bytes.length };
+    playable.set(reference, hit);
+    // Keep the tab small: drop the longest-unused ones that nothing on the page is playing.
+    let total = [...playable.values()].reduce((n, e) => n + e.bytes, 0);
+    for (const [ref, e] of playable) {
+      if (total <= PLAYABLE_BUDGET_BYTES) break;
+      if (ref === reference || urlInUse(e.url)) continue;
+      URL.revokeObjectURL(e.url);
+      playable.delete(ref);
+      total -= e.bytes;
+    }
+    return hit.url;
+  }
+
+  function forgetPlayable() {
+    for (const e of playable.values()) URL.revokeObjectURL(e.url);
+    playable.clear();
+  }
+
+  // ── Songs ──────────────────────────────────────────────────────────────────────────────────
+  // A post names its song, never a clip of it. The desktop app looks the 30-second preview up in
+  // Apple's public iTunes Search API (src-tauri songsuggest.rs); so does this page. Same request,
+  // same answer shape; no cookies and no referrer go with it.
+  async function itunes(path) {
+    const res = await fetch(`https://itunes.apple.com/${path}`, { credentials: "omit", referrerPolicy: "no-referrer" });
+    if (!res.ok) return [];
+    const body = await res.json();
+    return (body.results || []).filter((t) => t.previewUrl).map((t) => ({
+      catalog_id: t.trackViewUrl || "",
+      title: t.trackName || "",
+      artist: t.artistName || "",
+      artwork_url: String(t.artworkUrl100 || "").replace("100x100", "300x300"),
+      duration_ms: t.trackTimeMillis || 0,
+      preview_url: t.previewUrl,
+      explicit: t.trackExplicitness === "explicit",
+    }));
+  }
+  const songSearch = (q, limit) => itunes(`search?term=${encodeURIComponent(q)}&media=music&entity=song&limit=${limit}`);
+  /** `commands::itunes_track_id`: the track number in an Apple music link. */
+  function trackId(url) {
+    if (!/music\.apple\.com|itunes\.apple\.com/.test(url || "")) return null;
+    return (/[?&]i=(\d+)/.exec(url) || /\/id(\d+)[^/]*$/.exec(url) || [])[1] || null;
+  }
+
   const NOT_IN_A_BROWSER = "not available in a browser";
 
   /** Commands that belong to the application, not the engine. */
@@ -196,6 +268,19 @@
     demo_mode: () => false,
     take_deep_links: () => [],
     ui_log: ({ line }) => { console.log("ui:", line); },
+    music_resolve: async ({ title, artist, catalogId }) => {
+      try {
+        // By number first, when the post's song carries its link: a text search can miss.
+        const id = trackId(catalogId);
+        const byId = id ? (await itunes(`lookup?id=${id}&entity=song`))[0] : null;
+        return byId || (await songSearch(`${title || ""} ${artist || ""}`.trim(), 1))[0] || null;
+      } catch (_) { return null; }
+    },
+    music_search: async ({ query, limit }) => {
+      const q = String(query || "").trim();
+      if (!q) return [];
+      try { return (await songSearch(q, limit || 25)).filter((t) => !t.explicit); } catch (_) { return []; }
+    },
     self_test: () => JSON.parse(haven.engineSelfTestReport()),
     // Linking: persist the ticket, then restart into the linking engine (it sends the request).
     // `remember` is the person's answer to "is this your computer?" — it decides, before the
@@ -263,6 +348,9 @@
   async function invoke(cmd, args = {}) {
     await ready;
     if (cmd === "engine_invoke") {
+      if (args.name === "media_data_url" && PLAYABLE.test(String(args.args?.reference || ""))) {
+        return playableUrl(args.args.circleId, args.args.reference);
+      }
       // Rejects with the string "unknown-command" for a name the engine does not have — the same
       // contract as the desktop host — and app.js then asks for it by its own name.
       const out = JSON.parse(await app.invoke(args.name, JSON.stringify(args.args ?? {})));
